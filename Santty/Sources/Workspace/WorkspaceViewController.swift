@@ -123,7 +123,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 
     private var tabs: [WorkspaceTabState] = []
     private var selectedTabID: UUID?
-    private var splitViewsByPath: [[LayoutPathComponent]: WorkspaceSplitView] = [:]
+    private var tilingView: WorkspaceTilingView?
     private var autoResizePanelController: PaneAutoResizePanelController?
     private var hasAppeared = false
     private var bypassNextWindowCloseConfirmation = false
@@ -651,10 +651,10 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 
         let clampedFractions = target.splitNode.clampedFractions(
             targetFractions,
-            in: target.splitView.bounds.size
+            in: target.tilingView.bounds.size
         )
         paneResizeWVCLog.debug(
-            "movePaneDivider path=\(formatPath(target.context.splitPath), privacy: .public) context=\(formatFractionsWVC(target.context.fractions), privacy: .public) proposed=\(formatFractionsWVC(targetFractions), privacy: .public) clamped=\(formatFractionsWVC(clampedFractions), privacy: .public) bounds=\(NSStringFromSize(target.splitView.bounds.size), privacy: .public)"
+            "movePaneDivider path=\(formatPath(target.context.splitPath), privacy: .public) context=\(formatFractionsWVC(target.context.fractions), privacy: .public) proposed=\(formatFractionsWVC(targetFractions), privacy: .public) clamped=\(formatFractionsWVC(clampedFractions), privacy: .public) bounds=\(NSStringFromSize(target.tilingView.bounds.size), privacy: .public)"
         )
         guard clampedFractions != target.context.fractions else {
             paneResizeWVCLog.debug("movePaneDivider clamped==context -> beep")
@@ -662,11 +662,19 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             return
         }
 
-        target.splitView.setFractions(
-            clampedFractions,
-            animated: true,
-            persistLayoutClamp: true
-        )
+        // Update the model
+        if let layoutNode = selectedTabState?.layoutNode,
+            let updatedNode = layoutNode.replacingFractions(
+                at: target.context.splitPath, with: clampedFractions
+            )
+        {
+            selectedTabState?.layoutNode = updatedNode
+            let paneViews = buildPaneViewsDictionary(for: selectedTabState!)
+            target.tilingView.setLayoutNode(
+                updatedNode, paneViews: paneViews, animated: true
+            )
+        }
+
         updateSplitFractions(
             at: target.context.splitPath,
             to: clampedFractions,
@@ -683,21 +691,21 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     ) -> (
         context: ParentSplitContext,
         splitNode: LayoutNode,
-        splitView: WorkspaceSplitView
+        tilingView: WorkspaceTilingView
     )? {
         guard
             let tabState = selectedTabState,
             let layoutNode = tabState.layoutNode,
             let focusedPaneID = tabState.focusedPaneID,
+            let tilingView,
             let context = layoutNode.ancestorSplitContexts(for: focusedPaneID).reversed()
                 .first(where: { $0.axis == axis && $0.fractions.count > 1 }),
-            let splitNode = layoutNode.node(at: context.splitPath),
-            let splitView = splitViewsByPath[context.splitPath]
+            let splitNode = layoutNode.node(at: context.splitPath)
         else {
             return nil
         }
 
-        return (context, splitNode, splitView)
+        return (context, splitNode, tilingView)
     }
 
     private func movedDividerFractions(
@@ -1033,7 +1041,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             removeAgentSessions(in: tabState)
             tabs.remove(at: index)
             selectedTabID = nil
-            splitViewsByPath = [:]
+            tilingView = nil
             rebuildWorkspaceLayout()
             requestWindowClose()
             return
@@ -1201,7 +1209,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         updateTabStrip()
 
         guard let tabState = selectedTabState, let layoutNode = tabState.layoutNode else {
-            splitViewsByPath = [:]
+            tilingView = nil
             rootView.installRenderedContentView(NSView())
             view.layoutSubtreeIfNeeded()
             updateWindowTitle()
@@ -1210,8 +1218,22 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             return
         }
 
-        splitViewsByPath = [:]
-        rootView.installRenderedContentView(makeRenderedView(for: layoutNode, path: []))
+        let paneViews = buildPaneViewsDictionary(for: tabState)
+
+        if let tilingView {
+            tilingView.setLayoutNode(layoutNode, paneViews: paneViews)
+        } else {
+            let newTilingView = WorkspaceTilingView()
+            newTilingView.onFractionsChange = { [weak self] path, fractions, source in
+                self?.updateSplitFractions(
+                    at: path, to: fractions, changeSource: source
+                )
+            }
+            tilingView = newTilingView
+            newTilingView.setLayoutNode(layoutNode, paneViews: paneViews)
+            rootView.installRenderedContentView(newTilingView)
+        }
+
         view.layoutSubtreeIfNeeded()
         if !applyPreservedActiveAutoZoom(in: tabState) {
             applyAutoZoomToFocusedPane(in: tabState, animated: applyAutoZoomAnimated)
@@ -1222,42 +1244,24 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         applyFocusedPaneResponder()
     }
 
-    private func makeRenderedView(for node: LayoutNode, path: [LayoutPathComponent]) -> NSView {
-        switch node {
-        case .panel(let paneID):
-            if selectedTabState?.activeFloatingPaneState?.paneID == paneID {
-                return TerminalPanePlaceholderView(paneID: paneID)
+    private func buildPaneViewsDictionary(
+        for tabState: WorkspaceTabState
+    ) -> [PaneID: NSView] {
+        var result: [PaneID: NSView] = [:]
+        for (paneID, paneController) in tabState.paneControllers {
+            if tabState.activeFloatingPaneState?.paneID == paneID {
+                result[paneID] = TerminalPanePlaceholderView(paneID: paneID)
+            } else {
+                result[paneID] = paneController.hostView
             }
-
-            return selectedTabState?.paneControllers[paneID]?.hostView ?? NSView()
-        case .split(let axis, let children, let fractions):
-            let renderedChildren = children.enumerated().map { index, child in
-                makeRenderedView(for: child, path: path + [.child(index)])
-            }
-            let splitView = WorkspaceSplitView(
-                axis: axis,
-                fractions: fractions,
-                childViews: renderedChildren,
-                childMinimumSizes: children.map { $0.minimumSize() },
-                onFractionsChange: { [weak self] newFractions, changeSource in
-                    self?.updateSplitFractions(
-                        at: path,
-                        to: newFractions,
-                        changeSource: changeSource
-                    )
-                }
-            )
-
-            splitView.path = path
-            splitViewsByPath[path] = splitView
-            return splitView
         }
+        return result
     }
 
     private func updateSplitFractions(
         at path: [LayoutPathComponent],
         to fractions: [CGFloat],
-        changeSource: WorkspaceSplitFractionChangeSource
+        changeSource: TilingFractionChangeSource
     ) {
         paneResizeWVCLog.debug(
             "updateSplitFractions path=\(formatPath(path), privacy: .public) fractions=\(formatFractionsWVC(fractions), privacy: .public) source=\(String(describing: changeSource), privacy: .public)"
@@ -1295,17 +1299,17 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     }
 
     private func restoreActiveAutoZoom(in tabState: WorkspaceTabState, animated: Bool) {
-        guard let activeAutoZoomState = tabState.activeAutoZoomState else {
+        guard tabState.activeAutoZoomState != nil,
+            let modelLayoutNode = tabState.layoutNode,
+            let tilingView
+        else {
             return
         }
 
-        for splitState in activeAutoZoomState.splitStates.reversed() {
-            splitViewsByPath[splitState.splitPath]?.setFractions(
-                splitState.originalFractions,
-                animated: animated,
-                persistLayoutClamp: true
-            )
-        }
+        // The model was never modified by auto-zoom, so restoring just means
+        // re-applying the model's layout to the tiling view.
+        let paneViews = buildPaneViewsDictionary(for: tabState)
+        tilingView.setLayoutNode(modelLayoutNode, paneViews: paneViews, animated: animated)
         tabState.activeAutoZoomState = nil
     }
 
@@ -1344,7 +1348,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 
         tabState.activeAutoZoomState = ActiveAutoZoomState(
             focusedPaneID: focusedPaneID,
-            splitStates: targetStates.map { context, _, _ in
+            splitStates: targetStates.map { context, _ in
                 ActiveAutoZoomSplitState(
                     splitPath: context.splitPath,
                     originalFractions: context.fractions
@@ -1375,60 +1379,60 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     private func autoZoomTargetStates(
         for focusedPaneID: PaneID,
         in tabState: WorkspaceTabState
-    ) -> [(ParentSplitContext, WorkspaceSplitView, [CGFloat])] {
+    ) -> [(ParentSplitContext, [CGFloat])] {
         guard
             let layoutNode = tabState.layoutNode,
             let autoResizeConfiguration = tabState.paneAutoResizeConfigurations[focusedPaneID],
-            autoResizeConfiguration.isEnabled
+            autoResizeConfiguration.isEnabled,
+            let tilingView
         else {
             return []
         }
 
         return layoutNode.ancestorSplitContexts(for: focusedPaneID).compactMap {
-            context -> (ParentSplitContext, WorkspaceSplitView, [CGFloat])? in
-            guard
-                let splitNode = layoutNode.node(at: context.splitPath),
-                let splitView = splitViewsByPath[context.splitPath]
-            else {
+            context -> (ParentSplitContext, [CGFloat])? in
+            guard let splitNode = layoutNode.node(at: context.splitPath) else {
                 return nil
             }
 
             let focusedRatio = autoResizeConfiguration.ratios[context.axis]
             let proposedFractions = context.replacingFocusedChildFraction(focusedRatio)
-            let targetFractions = clampedAutoZoomFractions(
-                proposedFractions,
-                splitNode: splitNode,
-                splitView: splitView
+            let targetFractions = splitNode.clampedFractions(
+                proposedFractions, in: tilingView.bounds.size
             )
 
             guard targetFractions != context.fractions else {
                 return nil
             }
 
-            return (context, splitView, targetFractions)
+            return (context, targetFractions)
         }
     }
 
     private func applyAutoZoomTargetStates(
-        _ targetStates: [(ParentSplitContext, WorkspaceSplitView, [CGFloat])],
+        _ targetStates: [(ParentSplitContext, [CGFloat])],
         animated: Bool
     ) {
-        for (_, splitView, targetFractions) in targetStates {
-            splitView.setFractions(targetFractions, animated: animated, persistLayoutClamp: false)
-        }
-    }
-
-    private func clampedAutoZoomFractions(
-        _ proposedFractions: [CGFloat],
-        splitNode: LayoutNode,
-        splitView: WorkspaceSplitView
-    ) -> [CGFloat] {
-        let availableSize = splitView.bounds.size
-        guard availableSize.width > 0, availableSize.height > 0 else {
-            return proposedFractions
+        guard let tabState = selectedTabState,
+            let modelLayoutNode = tabState.layoutNode,
+            let tilingView
+        else {
+            return
         }
 
-        return splitNode.clampedFractions(proposedFractions, in: availableSize)
+        // Build auto-zoomed layout node for rendering only — the model is NOT updated.
+        // This matches the old behavior where splitView.setFractions() only affected visuals.
+        var autoZoomedNode = modelLayoutNode
+        for (context, targetFractions) in targetStates {
+            if let updated = autoZoomedNode.replacingFractions(
+                at: context.splitPath, with: targetFractions
+            ) {
+                autoZoomedNode = updated
+            }
+        }
+
+        let paneViews = buildPaneViewsDictionary(for: tabState)
+        tilingView.setLayoutNode(autoZoomedNode, paneViews: paneViews, animated: animated)
     }
 
     private func updatePanePresentation(in tabState: WorkspaceTabState) {
@@ -1924,23 +1928,32 @@ extension WorkspaceViewController {
     }
 
     func debugUpdateSplitFractions(at path: [LayoutPathComponent], to fractions: [CGFloat]) {
-        splitViewsByPath[path]?.setFractions(
-            fractions,
-            animated: false,
-            persistLayoutClamp: false
-        )
+        guard let tabState = selectedTabState,
+            var layoutNode = tabState.layoutNode,
+            let tilingView
+        else {
+            return
+        }
+
+        if let updated = layoutNode.replacingFractions(at: path, with: fractions) {
+            layoutNode = updated
+        }
+
+        tabState.layoutNode = layoutNode
+        let paneViews = buildPaneViewsDictionary(for: tabState)
+        tilingView.setLayoutNode(layoutNode, paneViews: paneViews)
         updateSplitFractions(at: path, to: fractions, changeSource: .userDrag)
     }
 
     func debugRenderedSplitFractions(at path: [LayoutPathComponent]) -> [CGFloat]? {
-        splitViewsByPath[path]?.currentFractions
+        tilingView?.debugCurrentFractions(at: path)
     }
 
     func debugRenderedSplitChildFrame(
         at path: [LayoutPathComponent],
         childIndex: Int
     ) -> NSRect? {
-        splitViewsByPath[path]?.debugChildFrame(at: childIndex)
+        tilingView?.debugNodeFrame(at: path + [.child(childIndex)])
     }
 
     func debugNewTab() {
