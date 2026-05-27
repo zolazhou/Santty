@@ -509,4 +509,108 @@ final class WorkspaceTilingViewTests: XCTestCase {
         XCTAssertEqual(nestedFrame.width, 497, accuracy: 0.01)
         XCTAssertEqual(nestedFrame.height, 600, accuracy: 0.01)
     }
+
+    // MARK: - WorkspaceTilingView: Divider Drag
+
+    func testDividerDragCallbackFiresWithCorrectPath() {
+        let paneA = PaneID()
+        let paneB = PaneID()
+        let tilingView = WorkspaceTilingView()
+        tilingView.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+
+        var receivedPath: [LayoutPathComponent]?
+        var receivedFractions: [CGFloat]?
+        tilingView.onFractionsChange = { path, fractions, _ in
+            receivedPath = path
+            receivedFractions = fractions
+        }
+
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [.panel(paneA), .panel(paneB)],
+                fractions: [0.5, 0.5]
+            ),
+            paneViews: [paneA: NSView(), paneB: NSView()]
+        )
+        tilingView.layoutSubtreeIfNeeded()
+
+        // Simulate a drag on the root divider
+        tilingView.debugApplyDragForDivider(
+            at: [], dividerIndex: 0, location: NSPoint(x: 700, y: 300)
+        )
+
+        XCTAssertEqual(receivedPath, [])
+        XCTAssertNotNil(receivedFractions)
+        XCTAssertGreaterThan(receivedFractions![0], 0.5)
+        XCTAssertLessThan(receivedFractions![1], 0.5)
+    }
+
+    func testDividerDragRespectsMinimumPaneSize() {
+        let paneA = PaneID()
+        let paneB = PaneID()
+        let tilingView = WorkspaceTilingView()
+        tilingView.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+
+        var receivedFractions: [CGFloat]?
+        tilingView.onFractionsChange = { _, fractions, _ in
+            receivedFractions = fractions
+        }
+
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [.panel(paneA), .panel(paneB)],
+                fractions: [0.5, 0.5]
+            ),
+            paneViews: [paneA: NSView(), paneB: NSView()]
+        )
+        tilingView.layoutSubtreeIfNeeded()
+
+        // Drag far right — should clamp pane B to minimum
+        tilingView.debugApplyDragForDivider(
+            at: [], dividerIndex: 0, location: NSPoint(x: 950, y: 300)
+        )
+
+        XCTAssertNotNil(receivedFractions)
+        let viewB = tilingView.paneViews[paneB]!
+        XCTAssertGreaterThanOrEqual(viewB.frame.width, 240 - 0.01)
+    }
+
+    func testDividerDragOnNestedSplit() {
+        let paneA = PaneID()
+        let paneB = PaneID()
+        let paneC = PaneID()
+        let tilingView = WorkspaceTilingView()
+        tilingView.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+
+        var receivedPath: [LayoutPathComponent]?
+        tilingView.onFractionsChange = { path, _, _ in
+            receivedPath = path
+        }
+
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [
+                    .panel(paneA),
+                    .split(
+                        axis: .vertical,
+                        children: [.panel(paneB), .panel(paneC)],
+                        fractions: [0.5, 0.5]
+                    ),
+                ],
+                fractions: [0.5, 0.5]
+            ),
+            paneViews: [paneA: NSView(), paneB: NSView(), paneC: NSView()]
+        )
+        tilingView.layoutSubtreeIfNeeded()
+
+        // Drag the nested vertical divider
+        tilingView.debugApplyDragForDivider(
+            at: [.child(1)], dividerIndex: 0, location: NSPoint(x: 750, y: 200)
+        )
+
+        XCTAssertEqual(receivedPath, [.child(1)])
+    }
 }

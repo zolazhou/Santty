@@ -445,7 +445,160 @@ final class WorkspaceTilingView: NSView {
         layer.add(animation, forKey: "santty.paneResize.flip")
     }
 
+    // MARK: - Mouse Handling
+
+    override func mouseDown(with event: NSEvent) {
+        layoutSubtreeIfNeeded()
+        guard let layout = currentLayout else {
+            super.mouseDown(with: event)
+            return
+        }
+
+        let location = convert(event.locationInWindow, from: nil)
+        guard let hitDivider = layout.dividerPlacements.first(where: {
+            $0.rect.contains(location)
+        }) else {
+            super.mouseDown(with: event)
+            return
+        }
+
+        animationGeneration += 1
+
+        while let nextEvent = window?.nextEvent(
+            matching: [.leftMouseDragged, .leftMouseUp]
+        ) {
+            let nextLocation = convert(nextEvent.locationInWindow, from: nil)
+            applyDividerDrag(
+                splitPath: hitDivider.splitPath,
+                dividerIndex: hitDivider.dividerIndex,
+                location: nextLocation
+            )
+
+            if nextEvent.type == .leftMouseUp {
+                return
+            }
+        }
+    }
+
+    private func applyDividerDrag(
+        splitPath: [LayoutPathComponent],
+        dividerIndex: Int,
+        location: NSPoint
+    ) {
+        guard let layoutNode,
+            let splitNode = layoutNode.node(at: splitPath),
+            case .split(let axis, let children, let fractions) = splitNode
+        else {
+            return
+        }
+
+        guard let splitRect = currentLayout?.nodeFrames[splitPath] else { return }
+
+        let newFractions = Self.computeDragFractions(
+            axis: axis,
+            fractions: fractions,
+            dividerIndex: dividerIndex,
+            location: location,
+            splitRect: splitRect,
+            children: children,
+            dividerThickness: dividerThickness,
+            minimumPaneSize: minimumPaneSize
+        )
+
+        guard newFractions != fractions else { return }
+
+        if let updatedNode = layoutNode.replacingFractions(
+            at: splitPath, with: newFractions
+        ) {
+            self.layoutNode = updatedNode
+            let layout = TilingLayout.compute(
+                node: updatedNode,
+                rect: bounds,
+                dividerThickness: dividerThickness,
+                minimumPaneSize: minimumPaneSize
+            )
+            currentLayout = layout
+            applyPaneFrames(layout)
+            onFractionsChange?(splitPath, newFractions, .userDrag)
+        }
+    }
+
+    private static func computeDragFractions(
+        axis: SplitAxis,
+        fractions: [CGFloat],
+        dividerIndex: Int,
+        location: NSPoint,
+        splitRect: NSRect,
+        children: [LayoutNode],
+        dividerThickness: CGFloat,
+        minimumPaneSize: NSSize
+    ) -> [CGFloat] {
+        let primaryLength =
+            axis == .horizontal ? splitRect.width : splitRect.height
+        let dividerCount = max(0, children.count - 1)
+        let usablePrimaryLength = max(
+            0,
+            primaryLength - dividerThickness * CGFloat(dividerCount)
+        )
+
+        guard usablePrimaryLength > 0 else { return fractions }
+
+        let leadingMinSize = children[dividerIndex].minimumSize(
+            panelMinimumSize: minimumPaneSize, dividerThickness: dividerThickness
+        )
+        let trailingMinSize = children[dividerIndex + 1].minimumSize(
+            panelMinimumSize: minimumPaneSize, dividerThickness: dividerThickness
+        )
+        let minimumLeadingLength =
+            axis == .horizontal ? leadingMinSize.width : leadingMinSize.height
+        let minimumTrailingLength =
+            axis == .horizontal ? trailingMinSize.width : trailingMinSize.height
+
+        let combinedPrimaryLength =
+            usablePrimaryLength * fractions[dividerIndex]
+            + usablePrimaryLength * fractions[dividerIndex + 1]
+
+        let proposedLeadingLength: CGFloat
+        switch axis {
+        case .horizontal:
+            proposedLeadingLength = location.x - splitRect.minX
+                - fractions.prefix(dividerIndex).reduce(0) {
+                    $0 + usablePrimaryLength * $1 + dividerThickness
+                }
+        case .vertical:
+            let leadingOrigin = fractions.prefix(dividerIndex).reduce(0) {
+                $0 + usablePrimaryLength * $1 + dividerThickness
+            }
+            let leadingTop = splitRect.maxY - leadingOrigin
+            proposedLeadingLength = leadingTop - location.y
+        }
+
+        let clampedLeadingLength = min(
+            max(proposedLeadingLength, minimumLeadingLength),
+            combinedPrimaryLength - minimumTrailingLength
+        )
+        let clampedTrailingLength = combinedPrimaryLength - clampedLeadingLength
+
+        var updated = fractions
+        updated[dividerIndex] = clampedLeadingLength / usablePrimaryLength
+        updated[dividerIndex + 1] = clampedTrailingLength / usablePrimaryLength
+        return updated
+    }
+
     // MARK: - Debug API
+
+    func debugApplyDragForDivider(
+        at splitPath: [LayoutPathComponent],
+        dividerIndex: Int,
+        location: NSPoint
+    ) {
+        layoutSubtreeIfNeeded()
+        applyDividerDrag(
+            splitPath: splitPath,
+            dividerIndex: dividerIndex,
+            location: location
+        )
+    }
 
     func debugCurrentFractions(at path: [LayoutPathComponent]) -> [CGFloat]? {
         guard let node = layoutNode?.node(at: path) else { return nil }
