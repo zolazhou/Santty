@@ -182,3 +182,282 @@ struct TilingLayout: Equatable {
         }
     }
 }
+
+enum TilingFractionChangeSource: Equatable {
+    case layoutClamp
+    case userDrag
+}
+
+@MainActor
+final class WorkspaceTilingView: NSView {
+    var onFractionsChange:
+        (([LayoutPathComponent], [CGFloat], TilingFractionChangeSource) -> Void)?
+
+    private var layoutNode: LayoutNode?
+    var paneViews: [PaneID: NSView] = [:]
+    private var currentLayout: TilingLayout?
+    private let dividerThickness: CGFloat
+    private let minimumPaneSize: NSSize
+    var animationGeneration = 0
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    init(
+        dividerThickness: CGFloat = WorkspaceLayoutMetrics.dividerThickness,
+        minimumPaneSize: NSSize = WorkspaceLayoutMetrics.minimumPaneSize
+    ) {
+        self.dividerThickness = dividerThickness
+        self.minimumPaneSize = minimumPaneSize
+        super.init(frame: .zero)
+
+        wantsLayer = true
+        layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        // Suppress implicit position/bounds animations so layout-induced
+        // geometry changes don't fight an in-flight FLIP.
+        layer?.actions = [
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "frame": NSNull(),
+        ]
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) { nil }
+
+    // MARK: - Public API
+
+    func setLayoutNode(_ node: LayoutNode, paneViews: [PaneID: NSView]) {
+        setLayoutNode(node, paneViews: paneViews, animated: false)
+    }
+
+    func setLayoutNode(
+        _ node: LayoutNode,
+        paneViews: [PaneID: NSView],
+        animated: Bool
+    ) {
+        let oldPaneIDs = Set(self.layoutNode?.paneIDsInTraversalOrder ?? [])
+        let newPaneIDs = Set(node.paneIDsInTraversalOrder)
+        let structureChanged = oldPaneIDs != newPaneIDs
+
+        // Remove views for panes no longer in the tree
+        for (paneID, view) in self.paneViews where !newPaneIDs.contains(paneID) {
+            view.removeFromSuperview()
+            self.paneViews.removeValue(forKey: paneID)
+        }
+
+        // Add views for new panes
+        for (paneID, view) in paneViews where self.paneViews[paneID] == nil {
+            view.translatesAutoresizingMaskIntoConstraints = true
+            addSubview(view)
+            self.paneViews[paneID] = view
+        }
+
+        // Replace views that changed identity (e.g., host view ↔ placeholder)
+        for (paneID, view) in paneViews where self.paneViews[paneID] !== view {
+            self.paneViews[paneID]?.removeFromSuperview()
+            view.translatesAutoresizingMaskIntoConstraints = true
+            addSubview(view)
+            self.paneViews[paneID] = view
+        }
+
+        self.layoutNode = node
+        self.paneViews = paneViews
+
+        if !structureChanged && animated {
+            applyAnimatedLayout()
+        } else {
+            animationGeneration += 1
+            needsLayout = true
+            layoutSubtreeIfNeeded()
+        }
+    }
+
+    // MARK: - Layout
+
+    override func layout() {
+        super.layout()
+        guard let layoutNode else { return }
+
+        let layout = TilingLayout.compute(
+            node: layoutNode,
+            rect: bounds,
+            dividerThickness: dividerThickness,
+            minimumPaneSize: minimumPaneSize
+        )
+        currentLayout = layout
+        applyPaneFrames(layout)
+        checkForClampedFractions(layout, node: layoutNode)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard let layout = currentLayout else { return }
+
+        for divider in layout.dividerPlacements {
+            guard let node = layoutNode?.node(at: divider.splitPath),
+                  case .split(let axis, _, _) = node
+            else {
+                continue
+            }
+
+            let cursor: NSCursor =
+                axis == .horizontal ? .resizeLeftRight : .resizeUpDown
+            addCursorRect(divider.rect, cursor: cursor)
+        }
+    }
+
+    // MARK: - Internal
+
+    func applyPaneFrames(_ layout: TilingLayout) {
+        for placement in layout.panePlacements {
+            if let view = paneViews[placement.paneID] {
+                view.frame = placement.frame
+            }
+        }
+    }
+
+    private func checkForClampedFractions(_ layout: TilingLayout, node: LayoutNode) {
+        checkForClampedFractionsRecursive(layout: layout, node: node, path: [])
+    }
+
+    private func checkForClampedFractionsRecursive(
+        layout: TilingLayout,
+        node: LayoutNode,
+        path: [LayoutPathComponent]
+    ) {
+        guard case .split(_, let children, let storedFractions) = node else {
+            return
+        }
+
+        if let effectiveFractions = layout.effectiveFractions[path],
+            effectiveFractions != storedFractions
+        {
+            layoutNode = layoutNode?.replacingFractions(
+                at: path, with: effectiveFractions
+            )
+            onFractionsChange?(path, effectiveFractions, .layoutClamp)
+        }
+
+        for (index, child) in children.enumerated() {
+            checkForClampedFractionsRecursive(
+                layout: layout,
+                node: child,
+                path: path + [.child(index)]
+            )
+        }
+    }
+
+    func applyAnimatedLayout() {
+        guard let layoutNode else { return }
+
+        let generation = animationGeneration + 1
+        animationGeneration = generation
+
+        // Settle current layout and snapshot pre-animation frames
+        layoutSubtreeIfNeeded()
+        let oldFrames = paneViews.mapValues { $0.frame }
+
+        // Apply new layout instantly
+        let newLayout = TilingLayout.compute(
+            node: layoutNode,
+            rect: bounds,
+            dividerThickness: dividerThickness,
+            minimumPaneSize: minimumPaneSize
+        )
+        currentLayout = newLayout
+        applyPaneFrames(newLayout)
+        checkForClampedFractions(newLayout, node: layoutNode)
+
+        let newFrames = paneViews.mapValues { $0.frame }
+
+        // FLIP: apply inverse transforms and animate to identity
+        let duration = WorkspaceFocusZoomConfiguration.animationDuration
+        let timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(duration)
+        CATransaction.setAnimationTimingFunction(timingFunction)
+        CATransaction.setCompletionBlock { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard generation == self.animationGeneration else { return }
+                self.layoutSubtreeIfNeeded()
+            }
+        }
+
+        for (paneID, view) in paneViews {
+            guard let oldFrame = oldFrames[paneID],
+                  let newFrame = newFrames[paneID]
+            else {
+                continue
+            }
+
+            animateFlip(
+                view: view,
+                oldFrame: oldFrame,
+                newFrame: newFrame,
+                duration: duration,
+                timingFunction: timingFunction
+            )
+        }
+
+        CATransaction.commit()
+    }
+
+    func animateFlip(
+        view: NSView,
+        oldFrame: NSRect,
+        newFrame: NSRect,
+        duration: TimeInterval,
+        timingFunction: CAMediaTimingFunction
+    ) {
+        guard let layer = view.layer,
+              newFrame.width > 0,
+              newFrame.height > 0
+        else {
+            return
+        }
+
+        if oldFrame == newFrame { return }
+
+        let scaleX = oldFrame.width / newFrame.width
+        let scaleY = oldFrame.height / newFrame.height
+
+        let anchor = layer.anchorPoint
+        let translateX = (oldFrame.minX - newFrame.minX)
+            + anchor.x * (oldFrame.width - newFrame.width)
+        let translateY = (oldFrame.minY - newFrame.minY)
+            + anchor.y * (oldFrame.height - newFrame.height)
+
+        let initialAffine = CGAffineTransform.identity
+            .translatedBy(x: translateX, y: translateY)
+            .scaledBy(x: scaleX, y: scaleY)
+        let initialTransform = CATransform3DMakeAffineTransform(initialAffine)
+
+        let animation = CABasicAnimation(keyPath: "transform")
+        animation.fromValue = NSValue(caTransform3D: initialTransform)
+        animation.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        animation.duration = duration
+        animation.timingFunction = timingFunction
+        animation.fillMode = .both
+        animation.isRemovedOnCompletion = true
+        layer.add(animation, forKey: "santty.paneResize.flip")
+    }
+
+    // MARK: - Debug API
+
+    func debugCurrentFractions(at path: [LayoutPathComponent]) -> [CGFloat]? {
+        guard let node = layoutNode?.node(at: path) else { return nil }
+        guard case .split(_, _, let fractions) = node else { return nil }
+        return fractions
+    }
+
+    func debugPaneFrame(paneID: PaneID) -> NSRect? {
+        currentLayout?.panePlacements.first { $0.paneID == paneID }?.frame
+    }
+
+    func debugNodeFrame(at path: [LayoutPathComponent]) -> NSRect? {
+        currentLayout?.nodeFrames[path]
+    }
+}

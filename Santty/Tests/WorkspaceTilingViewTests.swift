@@ -299,4 +299,214 @@ final class WorkspaceTilingViewTests: XCTestCase {
         let child1Frame = layout.nodeFrames[[.child(1)]]
         XCTAssertEqual(child1Frame, NSRect(x: 503, y: 0, width: 497, height: 600))
     }
+
+    // MARK: - WorkspaceTilingView: Basic Layout
+
+    func testTilingViewSinglePaneLayout() {
+        let paneID = PaneID()
+        let paneView = NSView()
+        let tilingView = WorkspaceTilingView()
+        tilingView.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+
+        tilingView.setLayoutNode(.panel(paneID), paneViews: [paneID: paneView])
+        tilingView.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(paneView.frame, NSRect(x: 0, y: 0, width: 800, height: 600))
+        XCTAssertTrue(paneView.superview === tilingView)
+    }
+
+    func testTilingViewHorizontalSplitLayout() {
+        let paneA = PaneID()
+        let paneB = PaneID()
+        let viewA = NSView()
+        let viewB = NSView()
+        let tilingView = WorkspaceTilingView()
+        tilingView.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [.panel(paneA), .panel(paneB)],
+                fractions: [0.5, 0.5]
+            ),
+            paneViews: [paneA: viewA, paneB: viewB]
+        )
+        tilingView.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(viewA.frame.width, 497, accuracy: 0.01)
+        XCTAssertEqual(viewA.frame.height, 600, accuracy: 0.01)
+        XCTAssertEqual(viewB.frame.minX, 503, accuracy: 0.01)
+        XCTAssertEqual(viewB.frame.width, 497, accuracy: 0.01)
+        XCTAssertTrue(viewA.superview === tilingView)
+        XCTAssertTrue(viewB.superview === tilingView)
+    }
+
+    func testTilingViewNestedSplitLayout() {
+        let paneA = PaneID()
+        let paneB = PaneID()
+        let paneC = PaneID()
+        let viewA = NSView()
+        let viewB = NSView()
+        let viewC = NSView()
+        let tilingView = WorkspaceTilingView()
+        tilingView.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [
+                    .panel(paneA),
+                    .split(
+                        axis: .vertical,
+                        children: [.panel(paneB), .panel(paneC)],
+                        fractions: [0.5, 0.5]
+                    ),
+                ],
+                fractions: [0.5, 0.5]
+            ),
+            paneViews: [paneA: viewA, paneB: viewB, paneC: viewC]
+        )
+        tilingView.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(viewA.frame.width, 497, accuracy: 0.01)
+        XCTAssertEqual(viewB.frame.minX, 503, accuracy: 0.01)
+        XCTAssertEqual(viewB.frame.width, 497, accuracy: 0.01)
+        XCTAssertEqual(viewB.frame.height, 297, accuracy: 0.01)
+        XCTAssertEqual(viewC.frame.minX, 503, accuracy: 0.01)
+        XCTAssertEqual(viewC.frame.width, 497, accuracy: 0.01)
+        XCTAssertEqual(viewC.frame.height, 297, accuracy: 0.01)
+    }
+
+    func testTilingViewRemovesPaneOnStructuralChange() {
+        let paneA = PaneID()
+        let paneB = PaneID()
+        let viewA = NSView()
+        let viewB = NSView()
+        let tilingView = WorkspaceTilingView()
+        tilingView.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [.panel(paneA), .panel(paneB)],
+                fractions: [0.5, 0.5]
+            ),
+            paneViews: [paneA: viewA, paneB: viewB]
+        )
+        tilingView.layoutSubtreeIfNeeded()
+        XCTAssertTrue(viewB.superview === tilingView)
+
+        // Close pane B — structural change
+        tilingView.setLayoutNode(.panel(paneA), paneViews: [paneA: viewA])
+        tilingView.layoutSubtreeIfNeeded()
+
+        XCTAssertNil(viewB.superview)
+        XCTAssertEqual(viewA.frame, NSRect(x: 0, y: 0, width: 1000, height: 600))
+    }
+
+    func testTilingViewAddsPaneOnStructuralChange() {
+        let paneA = PaneID()
+        let viewA = NSView()
+        let tilingView = WorkspaceTilingView()
+        tilingView.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+
+        tilingView.setLayoutNode(.panel(paneA), paneViews: [paneA: viewA])
+        tilingView.layoutSubtreeIfNeeded()
+
+        // Split — add pane B
+        let paneB = PaneID()
+        let viewB = NSView()
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [.panel(paneA), .panel(paneB)],
+                fractions: [0.5, 0.5]
+            ),
+            paneViews: [paneA: viewA, paneB: viewB]
+        )
+        tilingView.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(viewB.superview === tilingView)
+        XCTAssertEqual(viewA.frame.width, 497, accuracy: 0.01)
+        XCTAssertEqual(viewB.frame.width, 497, accuracy: 0.01)
+    }
+
+    // MARK: - WorkspaceTilingView: Debug API
+
+    func testDebugCurrentFractionsReturnsStoredFractions() {
+        let paneA = PaneID()
+        let paneB = PaneID()
+        let tilingView = WorkspaceTilingView()
+        tilingView.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [.panel(paneA), .panel(paneB)],
+                fractions: [0.3, 0.7]
+            ),
+            paneViews: [paneA: NSView(), paneB: NSView()]
+        )
+        tilingView.layoutSubtreeIfNeeded()
+
+        let fractions = tilingView.debugCurrentFractions(at: [])
+        XCTAssertNotNil(fractions)
+        XCTAssertEqual(fractions![0], 0.3, accuracy: 0.0001)
+        XCTAssertEqual(fractions![1], 0.7, accuracy: 0.0001)
+    }
+
+    func testDebugNodeFrameReturnsPaneFrameForPanelPath() {
+        let paneA = PaneID()
+        let paneB = PaneID()
+        let viewA = NSView()
+        let viewB = NSView()
+        let tilingView = WorkspaceTilingView()
+        tilingView.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [.panel(paneA), .panel(paneB)],
+                fractions: [0.5, 0.5]
+            ),
+            paneViews: [paneA: viewA, paneB: viewB]
+        )
+        tilingView.layoutSubtreeIfNeeded()
+
+        let frameA = tilingView.debugNodeFrame(at: [.child(0)])
+        XCTAssertEqual(frameA, NSRect(x: 0, y: 0, width: 497, height: 600))
+
+        let frameB = tilingView.debugNodeFrame(at: [.child(1)])
+        XCTAssertEqual(frameB, NSRect(x: 503, y: 0, width: 497, height: 600))
+    }
+
+    func testDebugNodeFrameReturnsBoundingRectForSplitPath() throws {
+        let paneA = PaneID()
+        let paneB = PaneID()
+        let paneC = PaneID()
+        let tilingView = WorkspaceTilingView()
+        tilingView.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [
+                    .panel(paneA),
+                    .split(
+                        axis: .vertical,
+                        children: [.panel(paneB), .panel(paneC)],
+                        fractions: [0.5, 0.5]
+                    ),
+                ],
+                fractions: [0.5, 0.5]
+            ),
+            paneViews: [paneA: NSView(), paneB: NSView(), paneC: NSView()]
+        )
+        tilingView.layoutSubtreeIfNeeded()
+
+        let nestedFrame = try XCTUnwrap(tilingView.debugNodeFrame(at: [.child(1)]))
+        XCTAssertEqual(nestedFrame.minX, 503, accuracy: 0.01)
+        XCTAssertEqual(nestedFrame.width, 497, accuracy: 0.01)
+        XCTAssertEqual(nestedFrame.height, 600, accuracy: 0.01)
+    }
 }
