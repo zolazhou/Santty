@@ -1,5 +1,8 @@
 import AppKit
 import GhosttyTerminal
+import os
+
+private let paneResizeLog = Logger(subsystem: "com.zola.santty", category: "PaneResize")
 
 private final class EventMonitorToken: @unchecked Sendable {
     let value: Any
@@ -93,6 +96,7 @@ final class TerminalPaneHostView: NSView {
     private var isFocused = false
     private var isFloating = false
     private var terminalPadding = TerminalSettings.padding
+    private var terminalPaddingConstraints: [NSLayoutConstraint] = []
     private var pasteKeyMonitor: EventMonitorToken?
 
     override var acceptsFirstResponder: Bool {
@@ -111,11 +115,19 @@ final class TerminalPaneHostView: NSView {
         wantsLayer = true
         layer?.cornerRadius = 8
         layer?.masksToBounds = true
+        // Suppress implicit position/bounds animations so they don't fight an
+        // in-flight pane-resize FLIP transform animation on this layer.
+        layer?.actions = [
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "frame": NSNull(),
+        ]
         updateAppearance()
 
         addSubview(vibrancyView)
+        vibrancyView.translatesAutoresizingMaskIntoConstraints = false
 
-        terminalView.translatesAutoresizingMaskIntoConstraints = true
+        terminalView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(terminalView)
 
         statusBackgroundView.wantsLayer = true
@@ -136,6 +148,7 @@ final class TerminalPaneHostView: NSView {
 
         registerForDraggedTypes(Array(TerminalPasteboardText.dropTypes))
         installPasteKeyMonitor()
+        installContentConstraints()
     }
 
     @available(*, unavailable)
@@ -149,12 +162,18 @@ final class TerminalPaneHostView: NSView {
         }
     }
 
+    override func setFrameSize(_ newSize: NSSize) {
+        let oldSize = frame.size
+        if oldSize != newSize {
+            paneResizeLog.debug(
+                "setFrameSize TerminalPaneHostView#\(ObjectIdentifier(self).hashValue, privacy: .public) old=\(NSStringFromSize(oldSize), privacy: .public) new=\(NSStringFromSize(newSize), privacy: .public)"
+            )
+        }
+        super.setFrameSize(newSize)
+    }
+
     override func layout() {
         super.layout()
-
-        vibrancyView.frame = bounds
-        terminalView.frame = terminalContentFrame
-        terminalView.fitToSize()
 
         let labelSize = statusLabel.intrinsicContentSize
         let horizontalPadding: CGFloat = 8
@@ -247,6 +266,7 @@ final class TerminalPaneHostView: NSView {
         layer?.borderColor = borderColor(isFocused: isFocused).cgColor
         applyPaneBackgroundColor()
         needsLayout = true
+        updateTerminalPaddingConstraints()
     }
 
     private func applyVibrancyTintAlpha(_ alpha: CGFloat) {
@@ -265,6 +285,41 @@ final class TerminalPaneHostView: NSView {
         isFocused
             ? AppAppearanceSettings.accentColor
             : NSColor.separatorColor.withAlphaComponent(0.45)
+    }
+
+    private func installContentConstraints() {
+        terminalPaddingConstraints = [
+            terminalView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: terminalPadding),
+            terminalView.trailingAnchor.constraint(
+                equalTo: trailingAnchor,
+                constant: -terminalPadding
+            ),
+            terminalView.topAnchor.constraint(equalTo: topAnchor, constant: terminalPadding),
+            terminalView.bottomAnchor.constraint(
+                equalTo: bottomAnchor,
+                constant: -terminalPadding
+            ),
+        ]
+
+        NSLayoutConstraint.activate(
+            [
+                vibrancyView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                vibrancyView.trailingAnchor.constraint(equalTo: trailingAnchor),
+                vibrancyView.topAnchor.constraint(equalTo: topAnchor),
+                vibrancyView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            ] + terminalPaddingConstraints
+        )
+    }
+
+    private func updateTerminalPaddingConstraints() {
+        guard terminalPaddingConstraints.count == 4 else {
+            return
+        }
+
+        terminalPaddingConstraints[0].constant = terminalPadding
+        terminalPaddingConstraints[1].constant = -terminalPadding
+        terminalPaddingConstraints[2].constant = terminalPadding
+        terminalPaddingConstraints[3].constant = -terminalPadding
     }
 
     @objc private func handleClick() {
@@ -365,20 +420,15 @@ final class TerminalPaneHostView: NSView {
         terminalView.frame
     }
 
+    var debugVibrancyFrame: NSRect {
+        vibrancyView.frame
+    }
+
     var debugTerminalPadding: CGFloat {
         terminalPadding
     }
 
     var debugPaneBounds: NSRect {
         bounds
-    }
-
-    private var terminalContentFrame: NSRect {
-        NSRect(
-            x: terminalPadding,
-            y: terminalPadding,
-            width: max(0, bounds.width - terminalPadding * 2),
-            height: max(0, bounds.height - terminalPadding * 2)
-        )
     }
 }

@@ -1,8 +1,72 @@
 import AppKit
+import os
+
+private let paneResizeLog = Logger(subsystem: "com.zola.santty", category: "PaneResize")
+
+private func formatFractions(_ fractions: [CGFloat]) -> String {
+    "[" + fractions.map { String(format: "%.4f", Double($0)) }.joined(separator: ", ") + "]"
+}
+
+private final class FlipAnimationProbe: NSObject, CAAnimationDelegate {
+    let label: String
+    weak var layer: CALayer?
+
+    init(label: String, layer: CALayer) {
+        self.label = label
+        self.layer = layer
+    }
+
+    func animationDidStart(_ anim: CAAnimation) {
+        paneResizeLog.debug("flip \(self.label, privacy: .public) didStart")
+    }
+
+    func animationDidStop(_ anim: CAAnimation, finished flag: Bool) {
+        let presentationTransform = self.layer?.presentation()?.transform
+        let modelTransform = self.layer?.transform
+        let pres = presentationTransform.map {
+            "m11=\($0.m11) m22=\($0.m22) m41=\($0.m41) m42=\($0.m42)"
+        } ?? "nil"
+        let model = modelTransform.map {
+            "m11=\($0.m11) m22=\($0.m22) m41=\($0.m41) m42=\($0.m42)"
+        } ?? "nil"
+        paneResizeLog.debug(
+            "flip \(self.label, privacy: .public) didStop finished=\(flag, privacy: .public) presentation=\(pres, privacy: .public) model=\(model, privacy: .public)"
+        )
+    }
+}
 
 enum WorkspaceSplitFractionChangeSource {
     case layoutClamp
     case userDrag
+}
+
+@MainActor
+private final class WorkspaceSplitDividerView: NSView {
+    override var mouseDownCanMoveWindow: Bool {
+        false
+    }
+
+    override func hitTest(_: NSPoint) -> NSView? {
+        nil
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        // Suppress implicit position/bounds animations so they cannot fight
+        // our explicit FLIP transform animation.
+        layer?.actions = [
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "frame": NSNull(),
+        ]
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        nil
+    }
 }
 
 @MainActor
@@ -15,9 +79,13 @@ final class WorkspaceSplitView: NSView {
     private let childMinimumSizes: [NSSize]
     private let onFractionsChange: ([CGFloat], WorkspaceSplitFractionChangeSource) -> Void
     private let dividerThickness: CGFloat
+    private let dividerViews: [WorkspaceSplitDividerView]
 
     private var fractions: [CGFloat]
     private var shouldPersistLayoutClamp = true
+    private var childPrimaryConstraints: [NSLayoutConstraint] = []
+    private var lastPrimaryConstraintContainerSize = NSSize.zero
+    private var animationGeneration = 0
     private var cachedDividerRects: [NSRect] = []
     private var childFrames: [NSRect] = []
 
@@ -39,12 +107,40 @@ final class WorkspaceSplitView: NSView {
         self.childMinimumSizes = childMinimumSizes
         self.dividerThickness = dividerThickness
         self.onFractionsChange = onFractionsChange
+        self.dividerViews =
+            childViews.count > 1
+            ? (0..<(childViews.count - 1)).map { _ in WorkspaceSplitDividerView() }
+            : []
 
         super.init(frame: .zero)
 
+        wantsLayer = true
+        layer?.masksToBounds = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        // Suppress implicit position/bounds animations on the container layer
+        // so layout-induced geometry changes can't fight an in-flight FLIP.
+        layer?.actions = [
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "frame": NSNull(),
+        ]
+
+        setContentHuggingPriority(.defaultLow, for: .horizontal)
+        setContentHuggingPriority(.defaultLow, for: .vertical)
+        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+
         for childView in childViews {
+            childView.translatesAutoresizingMaskIntoConstraints = false
             addSubview(childView)
         }
+        for dividerView in dividerViews {
+            dividerView.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(dividerView)
+        }
+
+        installStructuralConstraints()
+        rebuildPrimaryConstraints()
     }
 
     @available(*, unavailable)
@@ -52,29 +148,46 @@ final class WorkspaceSplitView: NSView {
         nil
     }
 
-    override func layout() {
-        super.layout()
+    override func setFrameSize(_ newSize: NSSize) {
+        let oldSize = frame.size
+        if oldSize != newSize {
+            paneResizeLog.debug(
+                "setFrameSize WorkspaceSplitView#\(ObjectIdentifier(self).hashValue, privacy: .public) old=\(NSStringFromSize(oldSize), privacy: .public) new=\(NSStringFromSize(newSize), privacy: .public)"
+            )
+        }
+        super.setFrameSize(newSize)
+        updatePrimaryConstraintConstantsIfNeeded()
+        if oldSize != newSize {
+            needsLayout = true
+        }
+    }
 
+    override func layout() {
         let clampedFractions = clampedFractions(self.fractions)
         if clampedFractions != self.fractions {
+            paneResizeLog.debug(
+                "split(\(ObjectIdentifier(self).hashValue, privacy: .public)) layout() clamp self.fractions=\(formatFractions(self.fractions), privacy: .public) -> \(formatFractions(clampedFractions), privacy: .public) persist=\(self.shouldPersistLayoutClamp, privacy: .public) bounds=\(NSStringFromSize(self.bounds.size), privacy: .public)"
+            )
             self.fractions = clampedFractions
+            updatePrimaryConstraintConstants()
 
             if shouldPersistLayoutClamp {
+                paneResizeLog.debug(
+                    "split(\(ObjectIdentifier(self).hashValue, privacy: .public)) layout() -> onFractionsChange(.layoutClamp) \(formatFractions(clampedFractions), privacy: .public)"
+                )
                 onFractionsChange(clampedFractions, .layoutClamp)
             }
         }
 
-        let framesAndDividers = computeFramesAndDividers(for: self.fractions)
-        childFrames = framesAndDividers.frames
-        cachedDividerRects = framesAndDividers.dividers
-
-        for (childView, frame) in zip(childViews, childFrames) {
-            childView.frame = frame
-        }
+        updatePrimaryConstraintConstantsIfNeeded()
+        super.layout()
+        updateCachedFrames()
     }
 
     override func resetCursorRects() {
         super.resetCursorRects()
+        layoutSubtreeIfNeeded()
+        updateCachedFrames()
 
         let cursor: NSCursor = axis == .horizontal ? .resizeLeftRight : .resizeUpDown
         for dividerRect in cachedDividerRects {
@@ -83,6 +196,9 @@ final class WorkspaceSplitView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        layoutSubtreeIfNeeded()
+        updateCachedFrames()
+
         let location = convert(event.locationInWindow, from: nil)
         guard let dividerIndex = cachedDividerRects.firstIndex(where: { $0.contains(location) })
         else {
@@ -90,10 +206,13 @@ final class WorkspaceSplitView: NSView {
             return
         }
 
+        animationGeneration += 1
+
         while let nextEvent = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
             shouldPersistLayoutClamp = true
             let nextLocation = convert(nextEvent.locationInWindow, from: nil)
             fractions = fractions(forDraggingDividerAt: dividerIndex, location: nextLocation)
+            updatePrimaryConstraintConstants()
             onFractionsChange(fractions, .userDrag)
             needsLayout = true
             layoutSubtreeIfNeeded()
@@ -109,79 +228,188 @@ final class WorkspaceSplitView: NSView {
     }
 
     func setFractions(_ newFractions: [CGFloat], animated: Bool, persistLayoutClamp: Bool) {
+        paneResizeLog.debug(
+            "split(\(ObjectIdentifier(self).hashValue, privacy: .public)) setFractions enter requested=\(formatFractions(newFractions), privacy: .public) current=\(formatFractions(self.fractions), privacy: .public) animated=\(animated, privacy: .public) persist=\(persistLayoutClamp, privacy: .public) bounds=\(NSStringFromSize(self.bounds.size), privacy: .public)"
+        )
         shouldPersistLayoutClamp = persistLayoutClamp
 
         let clampedFractions = clampedFractions(newFractions)
         guard clampedFractions != fractions else {
+            paneResizeLog.debug(
+                "split(\(ObjectIdentifier(self).hashValue, privacy: .public)) setFractions early-return clamped==current \(formatFractions(clampedFractions), privacy: .public)"
+            )
             return
         }
-
-        layoutSubtreeIfNeeded()
-        let framesAndDividers = computeFramesAndDividers(for: clampedFractions)
-        fractions = clampedFractions
-        childFrames = framesAndDividers.frames
-        cachedDividerRects = framesAndDividers.dividers
+        paneResizeLog.debug(
+            "split(\(ObjectIdentifier(self).hashValue, privacy: .public)) setFractions clamped=\(formatFractions(clampedFractions), privacy: .public)"
+        )
 
         if animated {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = WorkspaceFocusZoomConfiguration.animationDuration
-                for (childView, targetFrame) in zip(childViews, childFrames) {
-                    childView.animator().frame = targetFrame
-                }
-            } completionHandler: { [weak self] in
-                guard let self else {
-                    return
-                }
+            let generation = animationGeneration + 1
+            animationGeneration = generation
 
-                self.needsLayout = true
-                self.layoutSubtreeIfNeeded()
+            // Settle the current layout and snapshot pre-animation frames so we
+            // can FLIP each child/divider after we apply the new layout.
+            layoutSubtreeIfNeeded()
+            updateCachedFrames()
+            let oldChildFrames = childFrames
+            let oldDividerFrames = cachedDividerRects
+
+            // Apply the new layout instantly. Doing this synchronously means
+            // each pane's underlying Metal surface re-renders exactly once at
+            // its final size, instead of snapping mid-animation while the host
+            // wrapper's frame is still in motion.
+            fractions = clampedFractions
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                context.allowsImplicitAnimation = false
+                updatePrimaryConstraintConstants()
+                needsLayout = true
+                layoutSubtreeIfNeeded()
             }
+            updateCachedFrames()
+            let newChildFrames = childFrames
+            let newDividerFrames = cachedDividerRects
+            CATransaction.commit()
+
+            // Visually map each layer from its new frame back to its old frame
+            // and animate the transform to identity. The host wrapper's mask
+            // and corner radius live on the same layer as the Metal sublayer,
+            // so they scale together and the right pane no longer appears to
+            // teleport to its final position at frame 0.
+            let duration = WorkspaceFocusZoomConfiguration.animationDuration
+            let timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+
+            CATransaction.begin()
+            CATransaction.setAnimationDuration(duration)
+            CATransaction.setAnimationTimingFunction(timingFunction)
+            CATransaction.setCompletionBlock { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self else {
+                        return
+                    }
+                    guard generation == self.animationGeneration else {
+                        paneResizeLog.debug(
+                            "split(\(ObjectIdentifier(self).hashValue, privacy: .public)) animation completion superseded generation=\(generation, privacy: .public) current=\(self.animationGeneration, privacy: .public)"
+                        )
+                        return
+                    }
+
+                    paneResizeLog.debug(
+                        "split(\(ObjectIdentifier(self).hashValue, privacy: .public)) animation completion generation=\(generation, privacy: .public) fractions=\(formatFractions(self.fractions), privacy: .public)"
+                    )
+                    self.layoutSubtreeIfNeeded()
+                    self.updateCachedFrames()
+                }
+            }
+
+            for (index, childView) in childViews.enumerated() {
+                guard
+                    index < oldChildFrames.count,
+                    index < newChildFrames.count
+                else {
+                    continue
+                }
+                animateFlip(
+                    view: childView,
+                    oldFrame: oldChildFrames[index],
+                    newFrame: newChildFrames[index],
+                    duration: duration,
+                    timingFunction: timingFunction
+                )
+            }
+
+            for (index, dividerView) in dividerViews.enumerated() {
+                guard
+                    index < oldDividerFrames.count,
+                    index < newDividerFrames.count
+                else {
+                    continue
+                }
+                animateFlip(
+                    view: dividerView,
+                    oldFrame: oldDividerFrames[index],
+                    newFrame: newDividerFrames[index],
+                    duration: duration,
+                    timingFunction: timingFunction
+                )
+            }
+
+            CATransaction.commit()
         } else {
+            animationGeneration += 1
+            fractions = clampedFractions
+            updatePrimaryConstraintConstants()
             needsLayout = true
             layoutSubtreeIfNeeded()
         }
     }
 
-    private func computeFramesAndDividers(for fractions: [CGFloat]) -> (
-        frames: [NSRect], dividers: [NSRect]
+    private func animateFlip(
+        view: NSView,
+        oldFrame: NSRect,
+        newFrame: NSRect,
+        duration: TimeInterval,
+        timingFunction: CAMediaTimingFunction
     ) {
-        guard !childViews.isEmpty else {
-            return ([], [])
+        guard let layer = view.layer,
+              newFrame.width > 0,
+              newFrame.height > 0
+        else {
+            paneResizeLog.debug(
+                "animateFlip skip view=\(ObjectIdentifier(view).hashValue, privacy: .public) type=\(String(describing: Swift.type(of: view)), privacy: .public) reason=no-layer-or-zero-size new=\(NSStringFromRect(newFrame), privacy: .public)"
+            )
+            return
         }
 
-        let usablePrimaryLength = max(
-            0,
-            primaryLength(of: bounds.size) - dividerThickness
-                * CGFloat(max(0, childViews.count - 1))
+        if oldFrame == newFrame {
+            paneResizeLog.debug(
+                "animateFlip skip view=\(ObjectIdentifier(view).hashValue, privacy: .public) type=\(String(describing: Swift.type(of: view)), privacy: .public) reason=same-frame frame=\(NSStringFromRect(newFrame), privacy: .public)"
+            )
+            return
+        }
+
+        let scaleX = oldFrame.width / newFrame.width
+        let scaleY = oldFrame.height / newFrame.height
+
+        // AppKit layer-backed NSViews don't use a fixed anchor point — for
+        // non-flipped views it's typically (0, 0), not (0.5, 0.5). The visual
+        // origin of a transformed layer is:
+        //   visual.origin = newFrame.origin + anchor * newSize * (1 - scale)
+        //                 + (tx, ty)
+        // Solve for (tx, ty) so visual.origin == oldFrame.origin.
+        let anchor = layer.anchorPoint
+        let translateX = (oldFrame.minX - newFrame.minX)
+            + anchor.x * (oldFrame.width - newFrame.width)
+        let translateY = (oldFrame.minY - newFrame.minY)
+            + anchor.y * (oldFrame.height - newFrame.height)
+
+        paneResizeLog.debug(
+            "animateFlip view=\(ObjectIdentifier(view).hashValue, privacy: .public) type=\(String(describing: Swift.type(of: view)), privacy: .public) old=\(NSStringFromRect(oldFrame), privacy: .public) new=\(NSStringFromRect(newFrame), privacy: .public) anchor=(\(Double(anchor.x), privacy: .public),\(Double(anchor.y), privacy: .public)) scale=(\(Double(scaleX), privacy: .public),\(Double(scaleY), privacy: .public)) translate=(\(Double(translateX), privacy: .public),\(Double(translateY), privacy: .public)) layerFlipped=\(layer.isGeometryFlipped, privacy: .public) viewFlipped=\(view.isFlipped, privacy: .public)"
         )
-        let secondaryLength = secondaryLength(of: bounds.size)
-        var frames: [NSRect] = []
-        var dividers: [NSRect] = []
 
-        var cursor: CGFloat = 0
-        for index in childViews.indices {
-            let isLastChild = index == childViews.count - 1
-            let childPrimaryLength =
-                isLastChild
-                ? max(
-                    0,
-                    usablePrimaryLength
-                        - fractions.prefix(index).reduce(0) { $0 + usablePrimaryLength * $1 })
-                : usablePrimaryLength * fractions[index]
-            let frame = frameForChild(
-                primaryOrigin: cursor, primaryLength: childPrimaryLength,
-                secondaryLength: secondaryLength)
-            frames.append(frame)
-            cursor += childPrimaryLength
+        // Build the transform that visually maps the layer (now positioned at
+        // newFrame) back to oldFrame, applied around the layer's anchor point.
+        let initialAffine = CGAffineTransform.identity
+            .translatedBy(x: translateX, y: translateY)
+            .scaledBy(x: scaleX, y: scaleY)
+        let initialTransform = CATransform3DMakeAffineTransform(initialAffine)
 
-            if !isLastChild {
-                dividers.append(
-                    dividerRect(atPrimaryOrigin: cursor, secondaryLength: secondaryLength))
-                cursor += dividerThickness
-            }
-        }
-
-        return (frames, dividers)
+        let animation = CABasicAnimation(keyPath: "transform")
+        animation.fromValue = NSValue(caTransform3D: initialTransform)
+        animation.toValue = NSValue(caTransform3D: CATransform3DIdentity)
+        animation.duration = duration
+        animation.timingFunction = timingFunction
+        animation.fillMode = .both
+        animation.isRemovedOnCompletion = true
+        let probe = FlipAnimationProbe(
+            label: "\(String(describing: Swift.type(of: view)))#\(ObjectIdentifier(view).hashValue)",
+            layer: layer
+        )
+        animation.delegate = probe
+        layer.add(animation, forKey: "santty.paneResize.flip")
     }
 
     private func fractions(forDraggingDividerAt dividerIndex: Int, location: NSPoint) -> [CGFloat] {
@@ -229,6 +457,211 @@ final class WorkspaceSplitView: NSView {
         fractions(forDraggingDividerAt: dividerIndex, location: location)
     }
 
+    func debugApplyDragForDividerAt(_ dividerIndex: Int, location: NSPoint) {
+        fractions = fractions(forDraggingDividerAt: dividerIndex, location: location)
+        updatePrimaryConstraintConstants()
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+    }
+
+    func debugDividerFrame(at dividerIndex: Int) -> NSRect? {
+        layoutSubtreeIfNeeded()
+        updateCachedFrames()
+        guard cachedDividerRects.indices.contains(dividerIndex) else {
+            return nil
+        }
+
+        return cachedDividerRects[dividerIndex]
+    }
+
+    func debugChildFrame(at childIndex: Int) -> NSRect? {
+        layoutSubtreeIfNeeded()
+        updateCachedFrames()
+        guard childFrames.indices.contains(childIndex) else {
+            return nil
+        }
+
+        return childFrames[childIndex]
+    }
+
+    private func installStructuralConstraints() {
+        guard !childViews.isEmpty else {
+            return
+        }
+
+        switch axis {
+        case .horizontal:
+            installHorizontalConstraints()
+        case .vertical:
+            installVerticalConstraints()
+        }
+    }
+
+    private func installHorizontalConstraints() {
+        var constraints: [NSLayoutConstraint] = []
+        var leadingAnchor: NSLayoutXAxisAnchor = self.leadingAnchor
+
+        for index in childViews.indices {
+            let childView = childViews[index]
+            constraints += [
+                childView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                childView.topAnchor.constraint(equalTo: topAnchor),
+                childView.heightAnchor.constraint(equalTo: heightAnchor),
+            ]
+
+            if dividerViews.indices.contains(index) {
+                let dividerView = dividerViews[index]
+                let dividerLeadingConstraint = dividerView.leadingAnchor.constraint(
+                    equalTo: childView.trailingAnchor
+                )
+                constraints += [
+                    dividerLeadingConstraint,
+                    dividerView.widthAnchor.constraint(equalToConstant: dividerThickness),
+                    dividerView.topAnchor.constraint(equalTo: topAnchor),
+                    dividerView.heightAnchor.constraint(equalTo: heightAnchor),
+                ]
+                leadingAnchor = dividerView.trailingAnchor
+            } else {
+                constraints.append(childView.trailingAnchor.constraint(equalTo: trailingAnchor))
+            }
+        }
+
+        NSLayoutConstraint.activate(constraints)
+    }
+
+    private func installVerticalConstraints() {
+        var constraints: [NSLayoutConstraint] = []
+        var topAnchor: NSLayoutYAxisAnchor = self.topAnchor
+
+        for index in childViews.indices {
+            let childView = childViews[index]
+            constraints += [
+                childView.topAnchor.constraint(equalTo: topAnchor),
+                childView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                childView.widthAnchor.constraint(equalTo: widthAnchor),
+            ]
+
+            if dividerViews.indices.contains(index) {
+                let dividerView = dividerViews[index]
+                let dividerTopConstraint = dividerView.topAnchor.constraint(
+                    equalTo: childView.bottomAnchor
+                )
+                constraints += [
+                    dividerTopConstraint,
+                    dividerView.heightAnchor.constraint(equalToConstant: dividerThickness),
+                    dividerView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                    dividerView.widthAnchor.constraint(equalTo: widthAnchor),
+                ]
+                topAnchor = dividerView.bottomAnchor
+            } else {
+                constraints.append(childView.bottomAnchor.constraint(equalTo: bottomAnchor))
+            }
+        }
+
+        NSLayoutConstraint.activate(constraints)
+    }
+
+    private func rebuildPrimaryConstraints() {
+        NSLayoutConstraint.deactivate(childPrimaryConstraints)
+        childPrimaryConstraints = []
+
+        guard !childViews.isEmpty else {
+            return
+        }
+
+        childPrimaryConstraints = childViews.dropLast().map { childView in
+            switch axis {
+            case .horizontal:
+                return childView.widthAnchor.constraint(equalToConstant: 0)
+            case .vertical:
+                return childView.heightAnchor.constraint(equalToConstant: 0)
+            }
+        }
+
+        NSLayoutConstraint.activate(childPrimaryConstraints)
+        updatePrimaryConstraintConstants()
+    }
+
+    private func updatePrimaryConstraintConstantsIfNeeded() {
+        guard bounds.size != lastPrimaryConstraintContainerSize else {
+            return
+        }
+
+        updatePrimaryConstraintConstants()
+    }
+
+    private func updatePrimaryConstraintConstants() {
+        guard !childPrimaryConstraints.isEmpty else {
+            return
+        }
+
+        lastPrimaryConstraintContainerSize = bounds.size
+        let primaryLength = primaryLength(of: bounds.size)
+        let usablePrimaryLength = max(
+            0,
+            primaryLength - dividerThickness * CGFloat(dividerViews.count)
+        )
+        let normalizedFractions = Self.normalizedFractions(fractions, count: childViews.count)
+
+        for (constraint, fraction) in zip(childPrimaryConstraints, normalizedFractions.dropLast()) {
+            constraint.constant = usablePrimaryLength * fraction
+        }
+    }
+
+    private func updateCachedFrames() {
+        let framesAndDividers = computeFramesAndDividers(for: fractions)
+        childFrames = framesAndDividers.frames
+        cachedDividerRects = framesAndDividers.dividers
+    }
+
+    private func computeFramesAndDividers(for fractions: [CGFloat]) -> (
+        frames: [NSRect], dividers: [NSRect]
+    ) {
+        guard !childViews.isEmpty else {
+            return ([], [])
+        }
+
+        let usablePrimaryLength = max(
+            0,
+            primaryLength(of: bounds.size) - dividerThickness * CGFloat(dividerViews.count)
+        )
+        let secondaryLength = secondaryLength(of: bounds.size)
+        var frames: [NSRect] = []
+        var dividers: [NSRect] = []
+
+        var cursor: CGFloat = 0
+        for index in childViews.indices {
+            let isLastChild = index == childViews.count - 1
+            let childPrimaryLength =
+                isLastChild
+                ? max(
+                    0,
+                    usablePrimaryLength
+                        - fractions.prefix(index).reduce(0) {
+                            $0 + usablePrimaryLength * $1
+                        }
+                )
+                : usablePrimaryLength * fractions[index]
+            frames.append(
+                frameForChild(
+                    primaryOrigin: cursor,
+                    primaryLength: childPrimaryLength,
+                    secondaryLength: secondaryLength
+                )
+            )
+            cursor += childPrimaryLength
+
+            if !isLastChild {
+                dividers.append(
+                    dividerRect(atPrimaryOrigin: cursor, secondaryLength: secondaryLength)
+                )
+                cursor += dividerThickness
+            }
+        }
+
+        return (frames, dividers)
+    }
+
     private func clampedFractions(_ proposedFractions: [CGFloat]) -> [CGFloat] {
         let usablePrimaryLength = max(
             0,
@@ -262,7 +695,9 @@ final class WorkspaceSplitView: NSView {
     }
 
     private func frameForChild(
-        primaryOrigin: CGFloat, primaryLength: CGFloat, secondaryLength: CGFloat
+        primaryOrigin: CGFloat,
+        primaryLength: CGFloat,
+        secondaryLength: CGFloat
     ) -> NSRect {
         switch axis {
         case .horizontal:

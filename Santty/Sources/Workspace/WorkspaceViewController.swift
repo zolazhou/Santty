@@ -1,4 +1,19 @@
 import AppKit
+import os
+
+private let paneResizeWVCLog = Logger(subsystem: "com.zola.santty", category: "PaneResize")
+
+private func formatFractionsWVC(_ fractions: [CGFloat]) -> String {
+    "[" + fractions.map { String(format: "%.4f", Double($0)) }.joined(separator: ", ") + "]"
+}
+
+private func formatPath(_ path: [LayoutPathComponent]) -> String {
+    path.map { component in
+        switch component {
+        case .child(let index): return "\(index)"
+        }
+    }.joined(separator: "/")
+}
 
 struct PaneFocusRatios: Equatable {
     var horizontal: CGFloat
@@ -24,7 +39,7 @@ enum WorkspaceFocusZoomConfiguration {
         isEnabled: false,
         ratios: PaneFocusRatios(horizontal: 0.7, vertical: 0.7)
     )
-    static let animationDuration: TimeInterval = 0.15
+    static let animationDuration: TimeInterval = 1.15
 }
 
 enum WorkspaceFloatingPaneConfiguration {
@@ -619,6 +634,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     }
 
     private func movePaneDivider(_ direction: PaneDividerMoveDirection) {
+        paneResizeWVCLog.debug(
+            "movePaneDivider direction=\(String(describing: direction), privacy: .public)"
+        )
         guard
             let target = focusedResizeTarget(for: direction.axis),
             let targetFractions = movedDividerFractions(
@@ -626,6 +644,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
                 direction: direction
             )
         else {
+            paneResizeWVCLog.debug("movePaneDivider no target -> beep")
             NSSound.beep()
             return
         }
@@ -634,7 +653,11 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             targetFractions,
             in: target.splitView.bounds.size
         )
+        paneResizeWVCLog.debug(
+            "movePaneDivider path=\(formatPath(target.context.splitPath), privacy: .public) context=\(formatFractionsWVC(target.context.fractions), privacy: .public) proposed=\(formatFractionsWVC(targetFractions), privacy: .public) clamped=\(formatFractionsWVC(clampedFractions), privacy: .public) bounds=\(NSStringFromSize(target.splitView.bounds.size), privacy: .public)"
+        )
         guard clampedFractions != target.context.fractions else {
+            paneResizeWVCLog.debug("movePaneDivider clamped==context -> beep")
             NSSound.beep()
             return
         }
@@ -1236,6 +1259,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         to fractions: [CGFloat],
         changeSource: WorkspaceSplitFractionChangeSource
     ) {
+        paneResizeWVCLog.debug(
+            "updateSplitFractions path=\(formatPath(path), privacy: .public) fractions=\(formatFractionsWVC(fractions), privacy: .public) source=\(String(describing: changeSource), privacy: .public)"
+        )
         guard let tabState = selectedTabState, let layoutNode = tabState.layoutNode else {
             return
         }
@@ -1908,6 +1934,13 @@ extension WorkspaceViewController {
 
     func debugRenderedSplitFractions(at path: [LayoutPathComponent]) -> [CGFloat]? {
         splitViewsByPath[path]?.currentFractions
+    }
+
+    func debugRenderedSplitChildFrame(
+        at path: [LayoutPathComponent],
+        childIndex: Int
+    ) -> NSRect? {
+        splitViewsByPath[path]?.debugChildFrame(at: childIndex)
     }
 
     func debugNewTab() {

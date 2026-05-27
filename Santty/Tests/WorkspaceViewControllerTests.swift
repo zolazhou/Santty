@@ -995,12 +995,71 @@ final class WorkspaceViewControllerTests: XCTestCase {
                 [0.45, 0.55],
                 accuracy: 0.0001
             )
+            XCTAssertLessThan(
+                try XCTUnwrap(controller.debugRenderedSplitChildFrame(at: [], childIndex: 0))
+                    .width,
+                try XCTUnwrap(controller.debugRenderedSplitChildFrame(at: [], childIndex: 1))
+                    .width
+            )
 
             controller.debugPerformCommand(withID: "pane.resize.equalize")
             assertFractionsEqual(
                 try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])),
                 [0.5, 0.5],
                 accuracy: 0.0001
+            )
+        }
+    }
+
+    func testPaneResizeCommandMovesHorizontalDividerAfterNestedVerticalSplit() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+
+            controller.debugSplitFocusedPane(along: .horizontal)
+            controller.debugSplitFocusedPane(along: .vertical)
+
+            let initialLeftWidth = try XCTUnwrap(
+                controller.debugRenderedSplitChildFrame(at: [], childIndex: 0)
+            ).width
+            let initialRightWidth = try XCTUnwrap(
+                controller.debugRenderedSplitChildFrame(at: [], childIndex: 1)
+            ).width
+
+            controller.debugPerformCommand(withID: "pane.resize.left")
+
+            let updatedLeftWidth = try XCTUnwrap(
+                controller.debugRenderedSplitChildFrame(at: [], childIndex: 0)
+            ).width
+            let updatedRightWidth = try XCTUnwrap(
+                controller.debugRenderedSplitChildFrame(at: [], childIndex: 1)
+            ).width
+
+            XCTAssertLessThan(updatedLeftWidth, initialLeftWidth)
+            XCTAssertGreaterThan(updatedRightWidth, initialRightWidth)
+        }
+    }
+
+    func testPaneResizeRightCanShrinkNestedVerticalSplitToMinimumWidth() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+
+            controller.debugSplitFocusedPane(along: .horizontal)
+            controller.debugSplitFocusedPane(along: .vertical)
+
+            for _ in 0..<8 {
+                controller.debugPerformCommand(withID: "pane.resize.right")
+            }
+
+            let rightWidth = try XCTUnwrap(
+                controller.debugRenderedSplitChildFrame(at: [], childIndex: 1)
+            ).width
+            let rootFractions = try XCTUnwrap(controller.debugRenderedSplitFractions(at: []))
+
+            XCTAssertLessThan(rootFractions[1], 0.25)
+            XCTAssertEqual(
+                rightWidth,
+                WorkspaceLayoutMetrics.minimumPaneSize.width,
+                accuracy: WorkspaceLayoutMetrics.dividerThickness
             )
         }
     }
