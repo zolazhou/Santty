@@ -613,4 +613,116 @@ final class WorkspaceTilingViewTests: XCTestCase {
 
         XCTAssertEqual(receivedPath, [.child(1)])
     }
+
+    // MARK: - WorkspaceTilingView: FLIP Animation
+
+    func testAnimatedFractionChangeUpdatesModelImmediately() {
+        let paneA = PaneID()
+        let paneB = PaneID()
+        let viewA = NSView()
+        let viewB = NSView()
+        let tilingView = WorkspaceTilingView()
+        tilingView.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [.panel(paneA), .panel(paneB)],
+                fractions: [0.5, 0.5]
+            ),
+            paneViews: [paneA: viewA, paneB: viewB]
+        )
+        tilingView.layoutSubtreeIfNeeded()
+
+        // Animated fraction change — model should update immediately
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [.panel(paneA), .panel(paneB)],
+                fractions: [0.7, 0.3]
+            ),
+            paneViews: [paneA: viewA, paneB: viewB],
+            animated: true
+        )
+
+        let fractions = tilingView.debugCurrentFractions(at: [])
+        XCTAssertNotNil(fractions)
+        XCTAssertEqual(fractions![0], 0.7, accuracy: 0.0001)
+        XCTAssertEqual(fractions![1], 0.3, accuracy: 0.0001)
+
+        // Final frames should reflect new fractions
+        XCTAssertEqual(viewA.frame.width, 695.8, accuracy: 0.1)
+        XCTAssertEqual(viewB.frame.width, 298.2, accuracy: 0.1)
+    }
+
+    func testInterruptedAnimationKeepsLatestFractions() {
+        let paneA = PaneID()
+        let paneB = PaneID()
+        let viewA = NSView()
+        let viewB = NSView()
+        let tilingView = WorkspaceTilingView()
+        tilingView.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [.panel(paneA), .panel(paneB)],
+                fractions: [0.5, 0.5]
+            ),
+            paneViews: [paneA: viewA, paneB: viewB]
+        )
+        tilingView.layoutSubtreeIfNeeded()
+
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [.panel(paneA), .panel(paneB)],
+                fractions: [0.7, 0.3]
+            ),
+            paneViews: [paneA: viewA, paneB: viewB],
+            animated: true
+        )
+
+        // Interrupt with new fractions
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [.panel(paneA), .panel(paneB)],
+                fractions: [0.4, 0.6]
+            ),
+            paneViews: [paneA: viewA, paneB: viewB],
+            animated: true
+        )
+
+        let fractions = tilingView.debugCurrentFractions(at: [])
+        XCTAssertEqual(fractions![0], 0.4, accuracy: 0.0001)
+        XCTAssertEqual(fractions![1], 0.6, accuracy: 0.0001)
+    }
+
+    func testStructuralChangeIgnoresAnimatedFlag() {
+        let paneA = PaneID()
+        let viewA = NSView()
+        let tilingView = WorkspaceTilingView()
+        tilingView.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+
+        tilingView.setLayoutNode(.panel(paneA), paneViews: [paneA: viewA])
+        tilingView.layoutSubtreeIfNeeded()
+
+        // Add a pane — structural change, should be instant even with animated: true
+        let paneB = PaneID()
+        let viewB = NSView()
+        tilingView.setLayoutNode(
+            .split(
+                axis: .horizontal,
+                children: [.panel(paneA), .panel(paneB)],
+                fractions: [0.5, 0.5]
+            ),
+            paneViews: [paneA: viewA, paneB: viewB],
+            animated: true
+        )
+        tilingView.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(viewA.frame.width, 497, accuracy: 0.01)
+        XCTAssertEqual(viewB.frame.width, 497, accuracy: 0.01)
+    }
 }
