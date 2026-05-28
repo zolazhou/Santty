@@ -3,6 +3,7 @@ import AppKit
 @MainActor
 struct ActiveFloatingPaneState: Equatable {
     let paneID: PaneID
+    var size: NSSize?
 }
 
 @MainActor
@@ -16,6 +17,7 @@ final class WorkspaceTabState {
     private var recentlyFocusedPaneIDs: [PaneID]
     var activeAutoZoomState: ActiveAutoZoomState?
     var activeFloatingPaneState: ActiveFloatingPaneState?
+    var floatingPaneSizes: [PaneID: NSSize] = [:]
 
     init(
         id: UUID = UUID(),

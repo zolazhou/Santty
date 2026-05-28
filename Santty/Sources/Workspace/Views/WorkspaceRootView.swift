@@ -55,6 +55,7 @@ final class WorkspaceRootView: NSView {
     private var floatingPaneContentView: NSView?
     private var lastFloatingPaneInitialFrame: NSRect?
     private var isFloatingPaneAnimating = false
+    private var customFloatingPaneSize: NSSize?
     private var contentFrame = NSRect.zero
     private var toolbarFrame = NSRect.zero
 
@@ -191,6 +192,7 @@ final class WorkspaceRootView: NSView {
         floatingPaneContentView = nil
         lastFloatingPaneInitialFrame = nil
         isFloatingPaneAnimating = false
+        customFloatingPaneSize = nil
     }
 
     func beginFloatingPaneAnimation() {
@@ -211,18 +213,45 @@ final class WorkspaceRootView: NSView {
         floatingPaneView?.animator().frame = frame
     }
 
+    func setCustomFloatingPaneSize(_ size: NSSize?) {
+        customFloatingPaneSize = size
+        if !isFloatingPaneAnimating, let floatingPaneView {
+            let targetFrame = floatingPaneTargetFrame()
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = WorkspaceFloatingPaneConfiguration.animationDuration
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                floatingPaneView.animator().frame = targetFrame
+            }
+        }
+    }
+
     func floatingPaneTargetFrame() -> NSRect {
         let bounds = floatingOverlayView.bounds
-        let targetSize = NSSize(
-            width: min(
-                bounds.width,
-                max(bounds.width * 0.8, WorkspaceLayoutMetrics.minimumPaneSize.width)
-            ),
-            height: min(
-                bounds.height,
-                max(bounds.height * 0.9, WorkspaceLayoutMetrics.minimumPaneSize.height)
+        let targetSize: NSSize
+
+        if let custom = customFloatingPaneSize {
+            targetSize = NSSize(
+                width: min(
+                    bounds.width,
+                    max(custom.width, WorkspaceLayoutMetrics.minimumPaneSize.width)
+                ),
+                height: min(
+                    bounds.height,
+                    max(custom.height, WorkspaceLayoutMetrics.minimumPaneSize.height)
+                )
             )
-        )
+        } else {
+            targetSize = NSSize(
+                width: min(
+                    bounds.width,
+                    max(bounds.width * 0.8, WorkspaceLayoutMetrics.minimumPaneSize.width)
+                ),
+                height: min(
+                    bounds.height,
+                    max(bounds.height * 0.9, WorkspaceLayoutMetrics.minimumPaneSize.height)
+                )
+            )
+        }
 
         return NSRect(
             x: (bounds.width - targetSize.width) / 2,

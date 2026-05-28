@@ -44,6 +44,7 @@ enum WorkspaceFocusZoomConfiguration {
 
 enum WorkspaceFloatingPaneConfiguration {
     static let animationDuration: TimeInterval = 0.15
+    static let resizeStep: CGFloat = 40
 }
 
 private enum PaneDividerMoveDirection {
@@ -634,6 +635,13 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     }
 
     private func movePaneDivider(_ direction: PaneDividerMoveDirection) {
+        if let tabState = selectedTabState,
+            tabState.activeFloatingPaneState != nil
+        {
+            resizeFloatingPane(in: tabState, direction: direction)
+            return
+        }
+
         paneResizeWVCLog.debug(
             "movePaneDivider direction=\(String(describing: direction), privacy: .public)"
         )
@@ -683,7 +691,50 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     }
 
     private func canMovePaneDivider(_ direction: PaneDividerMoveDirection) -> Bool {
-        focusedResizeTarget(for: direction.axis) != nil
+        if selectedTabState?.activeFloatingPaneState != nil {
+            return true
+        }
+        return focusedResizeTarget(for: direction.axis) != nil
+    }
+
+    private func resizeFloatingPane(
+        in tabState: WorkspaceTabState,
+        direction: PaneDividerMoveDirection
+    ) {
+        guard var floatingState = tabState.activeFloatingPaneState else { return }
+
+        let step = WorkspaceFloatingPaneConfiguration.resizeStep
+
+        let currentSize: NSSize = {
+            if let existing = floatingState.size {
+                return existing
+            }
+            return rootView.floatingPaneTargetFrame().size
+        }()
+
+        var newSize = currentSize
+        switch direction {
+        case .up:
+            newSize.height += step
+        case .down:
+            newSize.height -= step
+        case .left:
+            newSize.width -= step
+        case .right:
+            newSize.width += step
+        }
+
+        newSize.width = max(newSize.width, WorkspaceLayoutMetrics.minimumPaneSize.width)
+        newSize.height = max(newSize.height, WorkspaceLayoutMetrics.minimumPaneSize.height)
+
+        guard newSize != currentSize else {
+            NSSound.beep()
+            return
+        }
+
+        floatingState.size = newSize
+        tabState.activeFloatingPaneState = floatingState
+        rootView.setCustomFloatingPaneSize(newSize)
     }
 
     private func focusedResizeTarget(
@@ -770,6 +821,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 
         tabState.paneControllers.removeValue(forKey: paneID)
         tabState.paneAutoResizeConfigurations.removeValue(forKey: paneID)
+        tabState.floatingPaneSizes.removeValue(forKey: paneID)
         tabState.removePaneFromFocusHistory(paneID)
         AgentSessionStore.shared.removeSessions(forPaneID: paneID)
 
@@ -1131,7 +1183,11 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             return
         }
 
-        tabState.activeFloatingPaneState = ActiveFloatingPaneState(paneID: paneID)
+        let savedSize = tabState.floatingPaneSizes[paneID]
+        rootView.setCustomFloatingPaneSize(savedSize)
+
+        tabState.activeFloatingPaneState = ActiveFloatingPaneState(
+            paneID: paneID, size: savedSize)
         rootView.installFloatingPaneView(
             paneController.hostView,
             initialFrame: sourceFrame,
@@ -1199,6 +1255,12 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         in tabState: WorkspaceTabState,
         reapplyAutoZoom: Bool
     ) {
+        if let floatingState = tabState.activeFloatingPaneState,
+            let size = floatingState.size
+        {
+            tabState.floatingPaneSizes[floatingState.paneID] = size
+        }
+
         tabState.activeFloatingPaneState = nil
         rebuildWorkspaceLayout(applyAutoZoomAnimated: reapplyAutoZoom)
         rootView.removeFloatingPaneView()
