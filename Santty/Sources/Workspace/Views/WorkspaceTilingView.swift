@@ -253,9 +253,16 @@ final class WorkspaceTilingView: NSView {
             self.paneViews[paneID] = view
         }
 
-        // Replace views that changed identity (e.g., host view ↔ placeholder)
+        // Replace views that changed identity (e.g., host view ↔ placeholder).
+        // Only detach the old view when it is still our direct subview; the
+        // floating-pane flow re-parents the host view into the floating
+        // overlay before we get here, and a blind removeFromSuperview() would
+        // rip it out of the overlay and make the floating pane invisible.
         for (paneID, view) in paneViews where self.paneViews[paneID] !== view {
-            self.paneViews[paneID]?.removeFromSuperview()
+            let oldView = self.paneViews[paneID]
+            if oldView?.superview === self {
+                oldView?.removeFromSuperview()
+            }
             view.translatesAutoresizingMaskIntoConstraints = true
             addSubview(view)
             self.paneViews[paneID] = view

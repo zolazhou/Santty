@@ -39,7 +39,7 @@ enum WorkspaceFocusZoomConfiguration {
         isEnabled: false,
         ratios: PaneFocusRatios(horizontal: 0.7, vertical: 0.7)
     )
-    static let animationDuration: TimeInterval = 1.15
+    static let animationDuration: TimeInterval = 0.15
 }
 
 enum WorkspaceFloatingPaneConfiguration {
