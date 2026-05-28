@@ -100,6 +100,9 @@ final class WorkspaceStatusButtonView: NSControl {
 
     private func configureSubviews() {
         vibrancyView.translatesAutoresizingMaskIntoConstraints = false
+        vibrancyView.wantsLayer = true
+        vibrancyView.layer?.cornerRadius = layer?.cornerRadius ?? 0
+        vibrancyView.layer?.masksToBounds = true
         contentStackView.translatesAutoresizingMaskIntoConstraints = false
         symbolImageView.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
