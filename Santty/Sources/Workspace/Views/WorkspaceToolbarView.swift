@@ -1,5 +1,14 @@
 import AppKit
 
+@MainActor
+private final class WorkspaceToolbarStackView: NSStackView {
+    override var mouseDownCanMoveWindow: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
+}
+
 struct DetachedPaneStatusItem: Equatable {
     let paneID: PaneID
     let number: Int
@@ -12,13 +21,19 @@ final class WorkspaceToolbarView: NSView {
     let tabStripView = WorkspaceTabStripView()
     let agentStatusButton = WorkspaceStatusButtonView()
 
-    private let statusStackView = NSStackView()
+    private let statusStackView = WorkspaceToolbarStackView()
     private var detachedPaneButtons: [PaneID: DetachedPaneStatusButtonView] = [:]
     private var detachedPaneOrder: [PaneID] = []
     private let spacing: CGFloat = 6
     private let toolbarHeight = WorkspaceLayoutMetrics.tabStripHeight
 
     override var isFlipped: Bool { true }
+
+    override var mouseDownCanMoveWindow: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)

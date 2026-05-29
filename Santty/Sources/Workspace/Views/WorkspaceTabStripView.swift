@@ -1,5 +1,20 @@
 import AppKit
 
+@MainActor
+private final class WorkspaceTabCollectionView: NSCollectionView {
+    override var mouseDownCanMoveWindow: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        let location = convert(event.locationInWindow, from: nil)
+        guard indexPathForItem(at: location) == nil else {
+            super.mouseDown(with: event)
+            return
+        }
+
+        window?.performDrag(with: event)
+    }
+}
+
 struct WorkspaceTabStripItem: Equatable {
     let id: UUID
     let title: String
@@ -24,7 +39,7 @@ final class WorkspaceTabStripView: NSView {
     var onNewTab: (() -> Void)?
     var onMoveTab: ((UUID, Int) -> Void)?
 
-    private let collectionView = NSCollectionView()
+    private let collectionView = WorkspaceTabCollectionView()
     private let collectionLayout = NSCollectionViewFlowLayout()
     private var tabButtons: [UUID: WorkspaceTabButtonView] = [:]
     nonisolated private static let tabPasteboardType = NSPasteboard.PasteboardType(
@@ -39,6 +54,12 @@ final class WorkspaceTabStripView: NSView {
 
     override var isFlipped: Bool {
         true
+    }
+
+    override var mouseDownCanMoveWindow: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
     }
 
     override init(frame frameRect: NSRect) {
