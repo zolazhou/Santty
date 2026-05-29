@@ -24,6 +24,10 @@ final class TerminalPanePlaceholderView: NSView {
         false
     }
 
+    override func hitTest(_: NSPoint) -> NSView? {
+        nil
+    }
+
     init(paneID: PaneID) {
         self.paneID = paneID
         super.init(frame: .zero)
@@ -323,6 +327,10 @@ final class TerminalPaneHostView: NSView {
     }
 
     @objc private func handleClick() {
+        guard !isFloating else {
+            return
+        }
+
         onFocusRequest?(paneID)
     }
 

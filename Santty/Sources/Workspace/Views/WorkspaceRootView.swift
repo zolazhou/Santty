@@ -3,12 +3,22 @@ import QuartzCore
 
 @MainActor
 private final class WorkspaceFloatingOverlayView: NSView {
+    override var mouseDownCanMoveWindow: Bool {
+        false
+    }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
         for subview in subviews.reversed() {
+            guard subview.frame.contains(point) else {
+                continue
+            }
+
             let convertedPoint = convert(point, to: subview)
             if let hitView = subview.hitTest(convertedPoint) {
                 return hitView
             }
+
+            return subview
         }
 
         return nil
@@ -18,6 +28,10 @@ private final class WorkspaceFloatingOverlayView: NSView {
 @MainActor
 private final class WorkspaceFloatingPaneContainerView: NSView {
     private let contentView: NSView
+
+    override var mouseDownCanMoveWindow: Bool {
+        false
+    }
 
     init(contentView: NSView, frame: NSRect) {
         self.contentView = contentView
@@ -52,7 +66,7 @@ private final class WorkspaceFloatingPaneContainerView: NSView {
             }
         }
 
-        return self
+        return contentView
     }
 }
 
@@ -83,8 +97,8 @@ final class WorkspaceRootView: NSView {
         wantsLayer = true
         applyWindowBackgroundColor()
         addSubview(contentContainerView)
-        addSubview(floatingOverlayView)
         addSubview(toolbarView)
+        addSubview(floatingOverlayView)
 
         floatingOverlayView.wantsLayer = true
         floatingOverlayView.layer?.backgroundColor = NSColor.clear.cgColor
@@ -102,6 +116,11 @@ final class WorkspaceRootView: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyWindowBackgroundColor()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        layoutSubtreeIfNeeded()
+        return super.hitTest(point)
     }
 
     private let edgePadding = WorkspaceLayoutMetrics.workspaceEdgePadding
@@ -144,7 +163,7 @@ final class WorkspaceRootView: NSView {
             height: contentHeight
         )
         contentContainerView.frame = contentFrame
-        floatingOverlayView.frame = contentFrame
+        floatingOverlayView.frame = bounds
         renderedContentView?.frame = contentContainerView.bounds
         if let floatingPaneView, !isFloatingPaneAnimating {
             floatingPaneView.frame = floatingPaneTargetFrame()
@@ -238,7 +257,7 @@ final class WorkspaceRootView: NSView {
     }
 
     func floatingPaneTargetFrame() -> NSRect {
-        let bounds = floatingOverlayView.bounds
+        let bounds = contentFrame
         let targetSize: NSSize
 
         if let custom = customFloatingPaneSize {
@@ -266,8 +285,8 @@ final class WorkspaceRootView: NSView {
         }
 
         return NSRect(
-            x: (bounds.width - targetSize.width) / 2,
-            y: (bounds.height - targetSize.height) / 2,
+            x: bounds.minX + (bounds.width - targetSize.width) / 2,
+            y: bounds.minY + (bounds.height - targetSize.height) / 2,
             width: targetSize.width,
             height: targetSize.height
         )
@@ -368,6 +387,7 @@ final class WorkspaceRootView: NSView {
             return nil
         }
 
+        layoutSubtreeIfNeeded()
         return floatingOverlayView.convert(floatingPaneView.frame, to: self)
     }
     var debugLastFloatingPaneInitialFrame: NSRect? {
@@ -399,19 +419,48 @@ final class WorkspaceRootView: NSView {
     }
 
     func debugHitTerminalPaneID(at point: NSPoint) -> PaneID? {
+        debugHitTerminalPane(at: point)?.paneID
+    }
+
+    func debugHitTerminalPane(at point: NSPoint) -> (paneID: PaneID, isInsideFloatingPane: Bool)? {
         guard let hitView = hitTest(point) else {
             return nil
         }
 
+        let isInsideFloatingPane = isHitViewInsideFloatingPane(hitView)
         var current: NSView? = hitView
         while let view = current {
             if let paneHostView = view as? TerminalPaneHostView {
-                return paneHostView.paneID
+                return (paneHostView.paneID, isInsideFloatingPane)
             }
             current = view.superview
         }
 
         return nil
+    }
+
+    func debugHitIsInsideFloatingPane(at point: NSPoint) -> Bool {
+        guard let hitView = hitTest(point) else {
+            return false
+        }
+
+        return isHitViewInsideFloatingPane(hitView)
+    }
+
+    private func isHitViewInsideFloatingPane(_ hitView: NSView) -> Bool {
+        guard let floatingPaneView else {
+            return false
+        }
+
+        var current: NSView? = hitView
+        while let view = current {
+            if view === floatingPaneView {
+                return true
+            }
+            current = view.superview
+        }
+
+        return false
     }
 
     func debugPlaceholderUsesHiddenWindowPresentation(for paneID: PaneID) -> Bool? {

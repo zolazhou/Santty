@@ -848,6 +848,8 @@ final class WorkspaceViewControllerTests: XCTestCase {
             let floatingPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
 
             controller.debugToggleFloatingPane()
+            XCTAssertEqual(controller.debugActiveFloatingPaneState?.paneID, floatingPaneID)
+            XCTAssertEqual(controller.debugFocusedPaneID, floatingPaneID)
 
             let contentFrame = controller.debugContentFrame
             let floatingFrame = try XCTUnwrap(controller.debugFloatingPaneFrame)
@@ -868,12 +870,8 @@ final class WorkspaceViewControllerTests: XCTestCase {
                 y: floatingFrame.midY
             )
             let abovePoint = NSPoint(
-                x: contentFrame.minX + 1,
+                x: floatingFrame.minX + 1,
                 y: min(contentFrame.maxY - 1, floatingFrame.maxY + 1)
-            )
-            let belowPoint = NSPoint(
-                x: contentFrame.minX + 1,
-                y: max(contentFrame.minY + 1, floatingFrame.minY - 1)
             )
 
             XCTAssertTrue(floatingFrame.contains(insidePoint))
@@ -904,23 +902,29 @@ final class WorkspaceViewControllerTests: XCTestCase {
             XCTAssertNil(controller.debugActiveFloatingPaneState)
             XCTAssertEqual(controller.debugFocusedPaneID, firstPaneID)
 
-            controller.debugFocusPane(withID: floatingPaneID)
+            XCTAssertFalse(floatingFrame.contains(outsidePoint))
+        }
+    }
+
+    func testClickBelowFloatingPanePassesThroughToBackgroundPane() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            controller.debugSplitFocusedPane(along: .horizontal)
+            let floatingPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+
             controller.debugToggleFloatingPane()
+
+            let contentFrame = controller.debugContentFrame
+            let floatingFrame = try XCTUnwrap(controller.debugFloatingPaneFrame)
+            let belowPoint = NSPoint(
+                x: floatingFrame.minX + 1,
+                y: max(contentFrame.minY + 1, floatingFrame.minY - 1)
+            )
+
+            XCTAssertFalse(floatingFrame.contains(belowPoint))
+            XCTAssertFalse(controller.debugHitIsInsideFloatingPane(at: belowPoint))
+            XCTAssertEqual(controller.debugFocusedPaneID, floatingPaneID)
             XCTAssertEqual(controller.debugActiveFloatingPaneState?.paneID, floatingPaneID)
-
-            controller.debugClickWorkspace(at: belowPoint)
-
-            XCTAssertNil(controller.debugActiveFloatingPaneState)
-            XCTAssertEqual(controller.debugFocusedPaneID, firstPaneID)
-
-            controller.debugFocusPane(withID: floatingPaneID)
-            controller.debugToggleFloatingPane()
-            XCTAssertEqual(controller.debugActiveFloatingPaneState?.paneID, floatingPaneID)
-
-            controller.debugClickWorkspace(at: outsidePoint)
-
-            XCTAssertNil(controller.debugActiveFloatingPaneState)
-            XCTAssertEqual(controller.debugFocusedPaneID, firstPaneID)
         }
     }
 

@@ -268,6 +268,11 @@ final class WorkspaceTilingView: NSView {
             self.paneViews[paneID] = view
         }
 
+        let desiredViewIDs = Set(paneViews.values.map { ObjectIdentifier($0) })
+        for subview in subviews where !desiredViewIDs.contains(ObjectIdentifier(subview)) {
+            subview.removeFromSuperview()
+        }
+
         self.layoutNode = node
         self.paneViews = paneViews
 

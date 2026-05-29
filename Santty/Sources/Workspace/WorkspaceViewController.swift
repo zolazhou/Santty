@@ -595,7 +595,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         paneController.updateAppearance()
 
         paneController.onFocusRequest = { [weak self] paneID in
-            self?.focusPaneLocatingTab(withID: paneID)
+            self?.handlePaneFocusRequest(withID: paneID)
         }
 
         paneController.onTitleChange = { [weak self] paneID in
@@ -941,9 +941,31 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         focusPane(withID: paneID)
     }
 
+    private func handlePaneFocusRequest(withID paneID: PaneID) {
+        guard let tabState = tabState(containing: paneID) else {
+            return
+        }
+
+        if tabState.id != selectedTabID {
+            selectTab(withID: tabState.id)
+        }
+
+        if tabState.id == selectedTabID, tabState.activeFloatingPaneState != nil {
+            clearFloatingPaneImmediately(in: tabState, reapplyAutoZoom: false)
+        }
+
+        focusPane(withID: paneID)
+    }
+
     private func focusPane(withID paneID: PaneID) {
         guard let tabState = selectedTabState, tabState.containsPane(withID: paneID) else {
             return
+        }
+
+        if let activeFloatingPaneID = tabState.activeFloatingPaneState?.paneID,
+            paneID != activeFloatingPaneID
+        {
+            clearFloatingPaneImmediately(in: tabState, reapplyAutoZoom: false)
         }
 
         guard paneID != tabState.focusedPaneID else {
@@ -957,7 +979,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             return
         }
 
-        leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
+        if tabState.activeFloatingPaneState != nil {
+            leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
+        }
         hideActiveDetachedPane(in: tabState, animated: false, reapplyAutoZoom: false)
         restoreActiveAutoZoom(in: tabState, animated: true)
 
@@ -1649,6 +1673,23 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     ) {
         if let floatingState = tabState.activeFloatingPaneState,
             let size = floatingState.size
+        {
+            tabState.floatingPaneSizes[floatingState.paneID] = size
+        }
+
+        tabState.activeFloatingPaneState = nil
+        rebuildWorkspaceLayout(applyAutoZoomAnimated: reapplyAutoZoom)
+        rootView.removeFloatingPaneView()
+        applyFocusedPaneResponder()
+    }
+
+    private func clearFloatingPaneImmediately(
+        in tabState: WorkspaceTabState,
+        reapplyAutoZoom: Bool
+    ) {
+        if let floatingState = tabState.activeFloatingPaneState,
+            let paneController = tabState.paneControllers[floatingState.paneID],
+            let size = rootView.floatingPaneFrame(for: paneController.hostView)?.size
         {
             tabState.floatingPaneSizes[floatingState.paneID] = size
         }
@@ -2358,12 +2399,34 @@ extension WorkspaceViewController {
         rootView.debugDetachedPaneStatusCellIsActive(for: paneID)
     }
 
-    func debugClickWorkspace(at point: NSPoint) {
-        guard let paneID = rootView.debugHitTerminalPaneID(at: point) else {
-            return
+    @discardableResult
+    func debugClickWorkspace(at point: NSPoint) -> PaneID? {
+        guard let hit = rootView.debugHitTerminalPane(at: point) else {
+            return nil
         }
 
-        focusPaneLocatingTab(withID: paneID)
+        if hit.isInsideFloatingPane {
+            return hit.paneID
+        }
+
+        handlePaneFocusRequest(withID: hit.paneID)
+        return hit.paneID
+    }
+
+    func debugHitWorkspacePaneID(at point: NSPoint) -> PaneID? {
+        rootView.debugHitTerminalPaneID(at: point)
+    }
+
+    func debugHitIsInsideFloatingPane(at point: NSPoint) -> Bool {
+        rootView.debugHitIsInsideFloatingPane(at: point)
+    }
+
+    func debugSelectedTabContainsPane(withID paneID: PaneID) -> Bool {
+        selectedTabState?.containsPane(withID: paneID) == true
+    }
+
+    func debugSelectedTabPaneIsTiled(_ paneID: PaneID) -> Bool {
+        selectedTabState?.isPaneTiled(paneID) == true
     }
 
     func debugPlaceholderUsesHiddenWindowPresentation(for paneID: PaneID) -> Bool? {
