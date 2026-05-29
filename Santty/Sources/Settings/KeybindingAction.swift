@@ -16,6 +16,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
     case focusAbovePane
     case focusBelowPane
     case toggleFloatingPane
+    case detachPane
+    case attachDetachedPane
     case openPromptEditor
     case autoResizePane
     case closePane
@@ -56,6 +58,10 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             "pane.focus.below"
         case .toggleFloatingPane:
             "pane.floating.toggle"
+        case .detachPane:
+            "pane.detach"
+        case .attachDetachedPane:
+            "pane.detached.attach"
         case .openPromptEditor:
             "pane.promptEditor"
         case .autoResizePane:
@@ -103,6 +109,10 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             "Focus Below Pane"
         case .toggleFloatingPane:
             "Toggle Floating Pane"
+        case .detachPane:
+            "Detach Pane"
+        case .attachDetachedPane:
+            "Attach Detached Pane"
         case .openPromptEditor:
             "Open Prompt Editor"
         case .autoResizePane:
@@ -126,7 +136,7 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             .movePaneDividerUp, .movePaneDividerDown, .movePaneDividerLeft,
             .movePaneDividerRight, .focusPreviousPane, .focusNextPane, .focusLeftPane,
             .focusRightPane, .focusAbovePane, .focusBelowPane, .toggleFloatingPane,
-            .openPromptEditor, .autoResizePane, .closePane:
+            .detachPane, .attachDetachedPane, .openPromptEditor, .autoResizePane, .closePane:
             "Pane"
         case .newTab, .closeTab, .focusPreviousTab, .focusNextTab:
             "Tab"
@@ -163,6 +173,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             .init(.j, modifiers: [.command])
         case .toggleFloatingPane:
             .init(.f, modifiers: [.command, .shift])
+        case .detachPane, .attachDetachedPane:
+            nil
         case .openPromptEditor:
             nil
         case .autoResizePane:

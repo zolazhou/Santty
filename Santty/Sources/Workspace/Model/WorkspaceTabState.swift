@@ -17,6 +17,8 @@ final class WorkspaceTabState {
     private var recentlyFocusedPaneIDs: [PaneID]
     var activeAutoZoomState: ActiveAutoZoomState?
     var activeFloatingPaneState: ActiveFloatingPaneState?
+    var detachedPaneIDs: [PaneID] = []
+    var activeDetachedPaneID: PaneID?
     var floatingPaneSizes: [PaneID: NSSize] = [:]
 
     init(
@@ -53,7 +55,17 @@ final class WorkspaceTabState {
             return customTitle
         }
 
-        return focusedPaneController?.displayTitle ?? "Shell"
+        if let focusedTitle = focusedPaneController?.displayTitle {
+            return focusedTitle
+        }
+
+        if let firstDetachedPaneID = detachedPaneIDs.first,
+            let detachedPaneController = paneControllers[firstDetachedPaneID]
+        {
+            return detachedPaneController.displayTitle
+        }
+
+        return "Shell"
     }
 
     func containsPane(withID paneID: PaneID) -> Bool {
@@ -62,6 +74,22 @@ final class WorkspaceTabState {
 
     func focusRecency(for paneID: PaneID) -> Int? {
         recentlyFocusedPaneIDs.firstIndex(of: paneID)
+    }
+
+    func isPaneDetached(_ paneID: PaneID) -> Bool {
+        detachedPaneIDs.contains(paneID)
+    }
+
+    func isPaneTiled(_ paneID: PaneID) -> Bool {
+        layoutNode?.path(to: paneID) != nil
+    }
+
+    var tiledPaneIDsInTraversalOrder: [PaneID] {
+        layoutNode?.paneIDsInTraversalOrder ?? []
+    }
+
+    var lastFocusedTiledPaneID: PaneID? {
+        recentlyFocusedPaneIDs.first { isPaneTiled($0) } ?? layoutNode?.firstPaneID
     }
 
     func markPaneFocused(_ paneID: PaneID) {

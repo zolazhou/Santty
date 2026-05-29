@@ -1,11 +1,20 @@
 import AppKit
 
+struct DetachedPaneStatusItem: Equatable {
+    let paneID: PaneID
+    let number: Int
+    let isActive: Bool
+    let isEnabled: Bool
+}
+
 @MainActor
 final class WorkspaceToolbarView: NSView {
     let tabStripView = WorkspaceTabStripView()
     let agentStatusButton = WorkspaceStatusButtonView()
 
     private let statusStackView = NSStackView()
+    private var detachedPaneButtons: [PaneID: DetachedPaneStatusButtonView] = [:]
+    private var detachedPaneOrder: [PaneID] = []
     private let spacing: CGFloat = 6
     private let toolbarHeight = WorkspaceLayoutMetrics.tabStripHeight
 
@@ -24,7 +33,8 @@ final class WorkspaceToolbarView: NSView {
     override func layout() {
         super.layout()
         let statusSize = statusStackView.fittingSize
-        let statusWidth = agentStatusButton.isHidden ? 0 : statusSize.width
+        let hasVisibleStatusItem = statusStackView.arrangedSubviews.contains { !$0.isHidden }
+        let statusWidth = hasVisibleStatusItem ? statusSize.width : 0
         let centeredY = max(0, (bounds.height - toolbarHeight) / 2)
         let statusX = max(bounds.minX, bounds.maxX - statusWidth)
         statusStackView.frame = NSRect(
@@ -50,9 +60,70 @@ final class WorkspaceToolbarView: NSView {
         needsLayout = true
     }
 
+    func updateDetachedPanes(
+        _ items: [DetachedPaneStatusItem],
+        target: AnyObject?,
+        action: Selector
+    ) {
+        let itemIDs = items.map(\.paneID)
+        for paneID in detachedPaneOrder where !itemIDs.contains(paneID) {
+            if let button = detachedPaneButtons.removeValue(forKey: paneID) {
+                statusStackView.removeArrangedSubview(button)
+                button.removeFromSuperview()
+            }
+        }
+
+        detachedPaneOrder = itemIDs
+        for (index, item) in items.enumerated() {
+            let button = detachedPaneButtons[item.paneID] ?? DetachedPaneStatusButtonView()
+            if detachedPaneButtons[item.paneID] == nil {
+                detachedPaneButtons[item.paneID] = button
+            }
+
+            button.numberText = "\(item.number)"
+            button.tag = index
+            button.target = target
+            button.action = action
+            button.isEnabled = item.isEnabled
+            button.isActive = item.isActive
+
+            if button.superview !== statusStackView {
+                statusStackView.insertArrangedSubview(button, at: index)
+            } else if statusStackView.arrangedSubviews.firstIndex(of: button) != index {
+                statusStackView.removeArrangedSubview(button)
+                statusStackView.insertArrangedSubview(button, at: index)
+            }
+        }
+
+        if agentStatusButton.superview !== statusStackView {
+            statusStackView.addArrangedSubview(agentStatusButton)
+        } else {
+            statusStackView.removeArrangedSubview(agentStatusButton)
+            statusStackView.addArrangedSubview(agentStatusButton)
+        }
+
+        needsLayout = true
+    }
+
     func updateAppearance() {
         tabStripView.updateAppearance()
+        for button in detachedPaneButtons.values {
+            button.updateAppearance()
+        }
         agentStatusButton.updateAppearance()
+    }
+
+    func detachedPaneCellFrame(for paneID: PaneID) -> NSRect? {
+        guard let button = detachedPaneButtons[paneID], button.superview != nil else {
+            return nil
+        }
+
+        layoutSubtreeIfNeeded()
+        return button.convert(button.bounds, to: nil)
+    }
+
+    func debugDetachedPaneCellIsActive(for paneID: PaneID) -> Bool? {
+        detachedPaneButtons[paneID]?.isActive
     }
 
     private func configureSubviews() {

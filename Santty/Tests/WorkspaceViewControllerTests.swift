@@ -840,6 +840,90 @@ final class WorkspaceViewControllerTests: XCTestCase {
         }
     }
 
+    func testFloatingPaneHitTestingKeepsInsideClicksAndPassesThroughOutsideClicks() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            let firstPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugSplitFocusedPane(along: .horizontal)
+            let floatingPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+
+            controller.debugToggleFloatingPane()
+
+            let contentFrame = controller.debugContentFrame
+            let floatingFrame = try XCTUnwrap(controller.debugFloatingPaneFrame)
+            let insidePoint = NSPoint(
+                x: floatingFrame.minX + 1,
+                y: floatingFrame.midY
+            )
+            let topInsidePoint = NSPoint(
+                x: floatingFrame.midX,
+                y: floatingFrame.maxY - 1
+            )
+            let bottomInsidePoint = NSPoint(
+                x: floatingFrame.midX,
+                y: floatingFrame.minY + 1
+            )
+            let outsidePoint = NSPoint(
+                x: contentFrame.minX + 1,
+                y: floatingFrame.midY
+            )
+            let abovePoint = NSPoint(
+                x: contentFrame.minX + 1,
+                y: min(contentFrame.maxY - 1, floatingFrame.maxY + 1)
+            )
+            let belowPoint = NSPoint(
+                x: contentFrame.minX + 1,
+                y: max(contentFrame.minY + 1, floatingFrame.minY - 1)
+            )
+
+            XCTAssertTrue(floatingFrame.contains(insidePoint))
+            XCTAssertTrue(floatingFrame.contains(topInsidePoint))
+            XCTAssertTrue(floatingFrame.contains(bottomInsidePoint))
+            XCTAssertFalse(floatingFrame.contains(outsidePoint))
+            XCTAssertEqual(controller.debugFocusedPaneID, floatingPaneID)
+
+            controller.debugClickWorkspace(at: insidePoint)
+
+            XCTAssertEqual(controller.debugActiveFloatingPaneState?.paneID, floatingPaneID)
+            XCTAssertEqual(controller.debugFocusedPaneID, floatingPaneID)
+            XCTAssertEqual(controller.debugPaneIDsInTraversalOrder, [firstPaneID, floatingPaneID])
+            XCTAssertNotNil(controller.debugFloatingPaneFrame)
+
+            controller.debugClickWorkspace(at: topInsidePoint)
+
+            XCTAssertEqual(controller.debugActiveFloatingPaneState?.paneID, floatingPaneID)
+            XCTAssertEqual(controller.debugFocusedPaneID, floatingPaneID)
+
+            controller.debugClickWorkspace(at: bottomInsidePoint)
+
+            XCTAssertEqual(controller.debugActiveFloatingPaneState?.paneID, floatingPaneID)
+            XCTAssertEqual(controller.debugFocusedPaneID, floatingPaneID)
+
+            controller.debugClickWorkspace(at: abovePoint)
+
+            XCTAssertNil(controller.debugActiveFloatingPaneState)
+            XCTAssertEqual(controller.debugFocusedPaneID, firstPaneID)
+
+            controller.debugFocusPane(withID: floatingPaneID)
+            controller.debugToggleFloatingPane()
+            XCTAssertEqual(controller.debugActiveFloatingPaneState?.paneID, floatingPaneID)
+
+            controller.debugClickWorkspace(at: belowPoint)
+
+            XCTAssertNil(controller.debugActiveFloatingPaneState)
+            XCTAssertEqual(controller.debugFocusedPaneID, firstPaneID)
+
+            controller.debugFocusPane(withID: floatingPaneID)
+            controller.debugToggleFloatingPane()
+            XCTAssertEqual(controller.debugActiveFloatingPaneState?.paneID, floatingPaneID)
+
+            controller.debugClickWorkspace(at: outsidePoint)
+
+            XCTAssertNil(controller.debugActiveFloatingPaneState)
+            XCTAssertEqual(controller.debugFocusedPaneID, firstPaneID)
+        }
+    }
+
     func testFloatingPanePreservesAutoResizePlaceholderAndExitLayout() async throws {
         try await MainActor.run {
             let controller = Self.makeController()
@@ -883,6 +967,115 @@ final class WorkspaceViewControllerTests: XCTestCase {
         }
     }
 
+    func testDetachingPaneRemovesItFromLayoutAndAddsStatusCell() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            let firstPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+
+            controller.debugSplitFocusedPane(along: .horizontal)
+            let detachedPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+
+            controller.debugDetachFocusedPane()
+
+            XCTAssertEqual(controller.debugPaneIDsInTraversalOrder, [firstPaneID])
+            XCTAssertEqual(controller.debugDetachedPaneIDs, [detachedPaneID])
+            XCTAssertNil(controller.debugActiveDetachedPaneID)
+            XCTAssertEqual(controller.debugFocusedPaneID, firstPaneID)
+            XCTAssertNotNil(controller.debugDetachedPaneStatusCellFrame(for: detachedPaneID))
+            XCTAssertEqual(controller.debugDetachedPaneStatusCellIsActive(for: detachedPaneID), false)
+        }
+    }
+
+    func testDetachedPaneToggleShowsAndHidesFloatingPane() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            let firstPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+
+            controller.debugSplitFocusedPane(along: .horizontal)
+            let detachedPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugDetachFocusedPane()
+
+            controller.debugToggleDetachedPane(at: 0)
+
+            XCTAssertEqual(controller.debugActiveDetachedPaneID, detachedPaneID)
+            XCTAssertEqual(controller.debugFocusedPaneID, detachedPaneID)
+            XCTAssertNotNil(controller.debugFloatingPaneFrame)
+            XCTAssertEqual(controller.debugDetachedPaneStatusCellIsActive(for: detachedPaneID), true)
+            XCTAssertEqual(controller.debugPaneIDsInTraversalOrder, [firstPaneID])
+
+            controller.debugToggleDetachedPane(at: 0)
+
+            XCTAssertNil(controller.debugActiveDetachedPaneID)
+            XCTAssertNil(controller.debugFloatingPaneFrame)
+            XCTAssertEqual(controller.debugFocusedPaneID, firstPaneID)
+            XCTAssertEqual(controller.debugDetachedPaneStatusCellIsActive(for: detachedPaneID), false)
+        }
+    }
+
+    func testDetachedPaneKeepsFloatingSizeAcrossHideAndShow() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+
+            controller.debugSplitFocusedPane(along: .horizontal)
+            controller.debugDetachFocusedPane()
+
+            controller.debugToggleDetachedPane(at: 0)
+            let firstFloatingFrame = try XCTUnwrap(controller.debugFloatingPaneFrame)
+
+            controller.debugToggleDetachedPane(at: 0)
+            controller.debugToggleDetachedPane(at: 0)
+
+            let secondFloatingFrame = try XCTUnwrap(controller.debugFloatingPaneFrame)
+            assertRectsEqual(secondFloatingFrame, firstFloatingFrame, accuracy: 0.0001)
+        }
+    }
+
+    func testAttachingDetachedPaneReinsertsBesideFocusedTiledPane() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            let firstPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+
+            controller.debugSplitFocusedPane(along: .horizontal)
+            let detachedPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugDetachFocusedPane()
+            controller.debugToggleDetachedPane(at: 0)
+
+            controller.debugAttachFocusedDetachedPane()
+
+            XCTAssertEqual(controller.debugDetachedPaneIDs, [])
+            XCTAssertNil(controller.debugActiveDetachedPaneID)
+            XCTAssertEqual(controller.debugFocusedPaneID, detachedPaneID)
+            XCTAssertEqual(
+                controller.debugLayoutNode,
+                .split(
+                    axis: .horizontal,
+                    children: [.panel(firstPaneID), .panel(detachedPaneID)],
+                    fractions: [0.5, 0.5]
+                )
+            )
+        }
+    }
+
+    func testLastTiledPaneCanBeDetachedAndReattachedAsRoot() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            let paneID = try XCTUnwrap(controller.debugFocusedPaneID)
+
+            controller.debugDetachFocusedPane()
+
+            XCTAssertNil(controller.debugLayoutNode)
+            XCTAssertEqual(controller.debugPaneIDsInTraversalOrder, [])
+            XCTAssertEqual(controller.debugDetachedPaneIDs, [paneID])
+
+            controller.debugToggleDetachedPane(at: 0)
+            controller.debugAttachFocusedDetachedPane()
+
+            XCTAssertEqual(controller.debugLayoutNode, .panel(paneID))
+            XCTAssertEqual(controller.debugDetachedPaneIDs, [])
+            XCTAssertEqual(controller.debugFocusedPaneID, paneID)
+        }
+    }
+
     func testCommandPaletteCommandListIncludesExistingWorkspaceActions() async throws {
         try await MainActor.run {
             try Self.withRestoredKeybindingUserDefaults {
@@ -908,6 +1101,8 @@ final class WorkspaceViewControllerTests: XCTestCase {
                         "pane.focus.below",
                         "pane.autoResize",
                         "pane.floating.toggle",
+                        "pane.detach",
+                        "pane.detached.attach",
                         "pane.promptEditor",
                         "pane.close",
                         "tab.new",
@@ -922,10 +1117,12 @@ final class WorkspaceViewControllerTests: XCTestCase {
                 XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.focus.next" })?.shortcut, "⌘]")
                 XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.focus.above" })?.shortcut, "⌘K")
                 XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.focus.below" })?.shortcut, "⌘J")
-                XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.resize.equalize" })?.shortcut, "⌃⌘=")
-                XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.resize.left" })?.shortcut, "⌃⌘H")
+                XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.resize.equalize" })?.shortcut, "⇧⌘=")
+                XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.resize.left" })?.shortcut, "⇧⌘H")
                 XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.floating.toggle" })?.shortcut, "⇧⌘F")
                 XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.floating.toggle" })?.title, "Toggle Floating Pane")
+                XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.detach" })?.title, "Detach Pane")
+                XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.detached.attach" })?.title, "Attach Detached Pane")
                 XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.promptEditor" })?.title, "Open Prompt Editor")
                 XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.close" })?.title, "Close Pane")
             }
@@ -943,6 +1140,8 @@ final class WorkspaceViewControllerTests: XCTestCase {
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "tab.focus.next" })?.isEnabled, false)
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.close" })?.isEnabled, true)
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.floating.toggle" })?.isEnabled, true)
+            XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.detach" })?.isEnabled, true)
+            XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.detached.attach" })?.isEnabled, false)
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.promptEditor" })?.isEnabled, true)
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "tab.new" })?.isEnabled, true)
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "tab.title.change" })?.isEnabled, true)

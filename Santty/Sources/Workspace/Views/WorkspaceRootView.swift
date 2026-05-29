@@ -39,6 +39,21 @@ private final class WorkspaceFloatingPaneContainerView: NSView {
         super.layout()
         contentView.frame = bounds
     }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard bounds.contains(point), !isHidden, alphaValue > 0 else {
+            return nil
+        }
+
+        for subview in subviews.reversed() {
+            let convertedPoint = convert(point, to: subview)
+            if let hitView = subview.hitTest(convertedPoint) {
+                return hitView
+            }
+        }
+
+        return self
+    }
 }
 
 @MainActor
@@ -170,10 +185,7 @@ final class WorkspaceRootView: NSView {
             container.frame = initialFrame
             contentView.frame = container.bounds
             floatingOverlayView.addSubview(container)
-            if let layer = container.layer {
-                layer.frame = initialFrame
-                layer.removeAllAnimations()
-            }
+            container.layer?.removeAllAnimations()
             container.layoutSubtreeIfNeeded()
             CATransaction.commit()
         }
@@ -282,6 +294,14 @@ final class WorkspaceRootView: NSView {
         return floatingOverlayView.convert(windowFrame, from: nil)
     }
 
+    func detachedPaneStatusCellFrame(for paneID: PaneID) -> NSRect? {
+        guard let windowFrame = toolbarView.detachedPaneCellFrame(for: paneID) else {
+            return nil
+        }
+
+        return floatingOverlayView.convert(windowFrame, from: nil)
+    }
+
     private func findPlaceholder(for paneID: PaneID, in view: NSView) -> TerminalPanePlaceholderView? {
         for subview in view.subviews {
             if let placeholder = subview as? TerminalPanePlaceholderView,
@@ -303,6 +323,15 @@ final class WorkspaceRootView: NSView {
     func updateTabItems(_ items: [WorkspaceTabStripItem]) {
         tabItems = items
         tabStripView.items = items
+        needsLayout = true
+    }
+
+    func updateDetachedPaneStatusItems(
+        _ items: [DetachedPaneStatusItem],
+        target: AnyObject?,
+        action: Selector
+    ) {
+        toolbarView.updateDetachedPanes(items, target: target, action: action)
         needsLayout = true
     }
 
@@ -355,6 +384,34 @@ final class WorkspaceRootView: NSView {
         }
 
         return floatingOverlayView.convert(frame, to: self)
+    }
+
+    func debugDetachedPaneStatusCellFrame(for paneID: PaneID) -> NSRect? {
+        guard let frame = detachedPaneStatusCellFrame(for: paneID) else {
+            return nil
+        }
+
+        return floatingOverlayView.convert(frame, to: self)
+    }
+
+    func debugDetachedPaneStatusCellIsActive(for paneID: PaneID) -> Bool? {
+        toolbarView.debugDetachedPaneCellIsActive(for: paneID)
+    }
+
+    func debugHitTerminalPaneID(at point: NSPoint) -> PaneID? {
+        guard let hitView = hitTest(point) else {
+            return nil
+        }
+
+        var current: NSView? = hitView
+        while let view = current {
+            if let paneHostView = view as? TerminalPaneHostView {
+                return paneHostView.paneID
+            }
+            current = view.superview
+        }
+
+        return nil
     }
 
     func debugPlaceholderUsesHiddenWindowPresentation(for paneID: PaneID) -> Bool? {

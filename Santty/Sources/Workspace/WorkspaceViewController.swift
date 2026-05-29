@@ -133,6 +133,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     private var terminalSettingsObserver: NSObjectProtocol?
     private var agentSessionObserver: NSObjectProtocol?
     private var agentManagerPopoverController: AgentManagerPopoverController?
+    private var animatingDetachedPaneIDs: Set<PaneID> = []
 
     private var selectedTabIndex: Int? {
         guard let selectedTabID else {
@@ -152,6 +153,14 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 
     private var focusedPaneController: TerminalPaneController? {
         selectedTabState?.focusedPaneController
+    }
+
+    private var focusedPaneIsTiled: Bool {
+        guard let tabState = selectedTabState, let focusedPaneID = tabState.focusedPaneID else {
+            return false
+        }
+
+        return tabState.isPaneTiled(focusedPaneID)
     }
 
     override func loadView() {
@@ -238,7 +247,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(splitPaneHorizontally(_:)), #selector(splitPaneVertically(_:)):
-            focusedPaneController?.isLive == true
+            focusedPaneController?.isLive == true && focusedPaneIsTiled
         case #selector(equalizePaneSplits(_:)):
             canEqualizePaneSplits()
         case #selector(movePaneDividerUp(_:)):
@@ -252,15 +261,27 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         case #selector(closePane(_:)):
             focusedPaneController != nil
         case #selector(showAutoResizeSettings(_:)):
-            focusedPaneController != nil
+            focusedPaneController != nil && focusedPaneIsTiled
         case #selector(toggleFloatingPane(_:)):
-            focusedPaneController != nil
+            focusedPaneController != nil && focusedPaneIsTiled
+        case #selector(detachPane(_:)):
+            canDetachFocusedPane()
+        case #selector(attachDetachedPane(_:)):
+            canAttachFocusedDetachedPane()
+        case #selector(toggleDetachedPaneAtIndex(_:)):
+            if let detachedPaneIDs = selectedTabState?.detachedPaneIDs,
+                detachedPaneIDs.indices.contains(menuItem.tag)
+            {
+                !animatingDetachedPaneIDs.contains(detachedPaneIDs[menuItem.tag])
+            } else {
+                false
+            }
         case #selector(openPromptEditor(_:)):
             focusedPaneController?.isLive == true
         case #selector(focusNextPane(_:)), #selector(focusPreviousPane(_:)),
             #selector(focusLeftPane(_:)), #selector(focusRightPane(_:)),
             #selector(focusAbovePane(_:)), #selector(focusBelowPane(_:)):
-            (selectedTabState?.paneControllers.count ?? 0) > 1
+            focusedPaneIsTiled && (selectedTabState?.tiledPaneIDsInTraversalOrder.count ?? 0) > 1
         case #selector(newTab(_:)):
             true
         case #selector(closeTab(_:)), #selector(changeTabTitle(_:)):
@@ -352,7 +373,11 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     }
 
     @objc func toggleFloatingPane(_: Any?) {
-        guard let tabState = selectedTabState, tabState.focusedPaneController != nil else {
+        guard let tabState = selectedTabState,
+            let focusedPaneID = tabState.focusedPaneID,
+            tabState.focusedPaneController != nil,
+            tabState.isPaneTiled(focusedPaneID)
+        else {
             NSSound.beep()
             return
         }
@@ -362,6 +387,27 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         } else {
             enterFloatingPane(in: tabState, animated: true)
         }
+    }
+
+    @objc func detachPane(_: Any?) {
+        detachFocusedPane(animated: true)
+    }
+
+    @objc func attachDetachedPane(_: Any?) {
+        attachFocusedDetachedPane(animated: true)
+    }
+
+    @objc func toggleDetachedPaneAtIndex(_ sender: Any?) {
+        let index: Int
+        if let menuItem = sender as? NSMenuItem {
+            index = menuItem.tag
+        } else if let control = sender as? NSControl {
+            index = control.tag
+        } else {
+            return
+        }
+
+        toggleDetachedPane(at: index, animated: true)
     }
 
     @objc func openPromptEditor(_: Any?) {
@@ -575,7 +621,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             let focusedPaneController = tabState.focusedPaneController,
             focusedPaneController.isLive,
             let layoutNode = tabState.layoutNode,
-            let focusedPaneID = tabState.focusedPaneID
+            let focusedPaneID = tabState.focusedPaneID,
+            tabState.isPaneTiled(focusedPaneID)
         else {
             NSSound.beep()
             return
@@ -631,12 +678,12 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     }
 
     private func canEqualizePaneSplits() -> Bool {
-        (selectedTabState?.paneControllers.count ?? 0) > 1
+        (selectedTabState?.tiledPaneIDsInTraversalOrder.count ?? 0) > 1
     }
 
     private func movePaneDivider(_ direction: PaneDividerMoveDirection) {
         if let tabState = selectedTabState,
-            tabState.activeFloatingPaneState != nil
+            tabState.activeFloatingPaneState != nil || tabState.activeDetachedPaneID != nil
         {
             resizeFloatingPane(in: tabState, direction: direction)
             return
@@ -691,7 +738,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     }
 
     private func canMovePaneDivider(_ direction: PaneDividerMoveDirection) -> Bool {
-        if selectedTabState?.activeFloatingPaneState != nil {
+        if selectedTabState?.activeFloatingPaneState != nil
+            || selectedTabState?.activeDetachedPaneID != nil
+        {
             return true
         }
         return focusedResizeTarget(for: direction.axis) != nil
@@ -701,12 +750,20 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         in tabState: WorkspaceTabState,
         direction: PaneDividerMoveDirection
     ) {
-        guard var floatingState = tabState.activeFloatingPaneState else { return }
+        let activePaneID: PaneID
+        var floatingState = tabState.activeFloatingPaneState
+        if let state = floatingState {
+            activePaneID = state.paneID
+        } else if let detachedPaneID = tabState.activeDetachedPaneID {
+            activePaneID = detachedPaneID
+        } else {
+            return
+        }
 
         let step = WorkspaceFloatingPaneConfiguration.resizeStep
 
         let currentSize: NSSize = {
-            if let existing = floatingState.size {
+            if let existing = floatingState?.size {
                 return existing
             }
             return rootView.floatingPaneTargetFrame().size
@@ -732,8 +789,11 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             return
         }
 
-        floatingState.size = newSize
-        tabState.activeFloatingPaneState = floatingState
+        if var floatingState {
+            floatingState.size = newSize
+            tabState.activeFloatingPaneState = floatingState
+        }
+        tabState.floatingPaneSizes[activePaneID] = newSize
         rootView.setCustomFloatingPaneSize(newSize)
     }
 
@@ -810,6 +870,29 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     }
 
     private func performClosePane(withID paneID: PaneID, in tabState: WorkspaceTabState) {
+        if tabState.isPaneDetached(paneID) {
+            if tabState.activeDetachedPaneID == paneID {
+                hideActiveDetachedPane(in: tabState, animated: false, reapplyAutoZoom: false)
+            }
+            removePaneControllerState(for: paneID, in: tabState)
+            tabState.detachedPaneIDs.removeAll { $0 == paneID }
+            if tabState.focusedPaneID == paneID {
+                tabState.focusedPaneID = tabState.lastFocusedTiledPaneID
+            }
+
+            if tabState.paneControllers.isEmpty {
+                closeTab(withID: tabState.id, bypassTabConfirmation: true)
+                return
+            }
+
+            if tabState.id == selectedTabID {
+                rebuildWorkspaceLayout(applyAutoZoomAnimated: true)
+            } else {
+                updateTabStrip()
+            }
+            return
+        }
+
         guard let layoutNode = tabState.layoutNode,
             let closePaneResult = layoutNode.closingPane(paneID)
         else {
@@ -819,11 +902,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
         clearActiveAutoZoomState(in: tabState, restoreLayout: false, animated: false)
 
-        tabState.paneControllers.removeValue(forKey: paneID)
-        tabState.paneAutoResizeConfigurations.removeValue(forKey: paneID)
-        tabState.floatingPaneSizes.removeValue(forKey: paneID)
-        tabState.removePaneFromFocusHistory(paneID)
-        AgentSessionStore.shared.removeSessions(forPaneID: paneID)
+        removePaneControllerState(for: paneID, in: tabState)
 
         if let root = closePaneResult.root {
             tabState.layoutNode = root
@@ -840,6 +919,14 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         }
 
         closeTab(withID: tabState.id, bypassTabConfirmation: true)
+    }
+
+    private func removePaneControllerState(for paneID: PaneID, in tabState: WorkspaceTabState) {
+        tabState.paneControllers.removeValue(forKey: paneID)
+        tabState.paneAutoResizeConfigurations.removeValue(forKey: paneID)
+        tabState.floatingPaneSizes.removeValue(forKey: paneID)
+        tabState.removePaneFromFocusHistory(paneID)
+        AgentSessionStore.shared.removeSessions(forPaneID: paneID)
     }
 
     private func focusPaneLocatingTab(withID paneID: PaneID) {
@@ -863,7 +950,15 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             return
         }
 
+        if tabState.isPaneDetached(paneID) {
+            if let index = tabState.detachedPaneIDs.firstIndex(of: paneID) {
+                showDetachedPane(at: index, animated: true)
+            }
+            return
+        }
+
         leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
+        hideActiveDetachedPane(in: tabState, animated: false, reapplyAutoZoom: false)
         restoreActiveAutoZoom(in: tabState, animated: true)
 
         tabState.focusedPaneID = paneID
@@ -887,6 +982,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         let targetPaneID = tabState.paneControllers
             .compactMap { paneID, _ -> DirectionalPaneCandidate? in
                 guard paneID != focusedPaneID,
+                    tabState.isPaneTiled(paneID),
                     let candidateFrame = renderedPaneFrame(for: paneID, in: tabState)
                 else {
                     return nil
@@ -1039,6 +1135,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 
         if let currentTabState = selectedTabState {
             leaveFloatingPane(in: currentTabState, animated: false, reapplyAutoZoom: false)
+            hideActiveDetachedPane(in: currentTabState, animated: false, reapplyAutoZoom: false)
         }
 
         if restorePreviousAutoZoom, let currentTabState = selectedTabState {
@@ -1106,6 +1203,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         let wasSelected = selectedTabID == tabID
         if wasSelected {
             leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
+            hideActiveDetachedPane(in: tabState, animated: false, reapplyAutoZoom: false)
             clearActiveAutoZoomState(in: tabState, restoreLayout: true, animated: false)
         }
 
@@ -1151,6 +1249,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         tabState.paneControllers[paneID]?.updatePresentation(
             isFocused: paneID == tabState.focusedPaneID,
             isFloating: tabState.activeFloatingPaneState?.paneID == paneID
+                || tabState.activeDetachedPaneID == paneID
         )
         updateTabStrip()
 
@@ -1165,6 +1264,299 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         }
 
         performClosePane(withID: paneID, in: tabState)
+    }
+
+    private func canDetachFocusedPane() -> Bool {
+        guard let tabState = selectedTabState,
+            let focusedPaneID = tabState.focusedPaneID,
+            tabState.isPaneTiled(focusedPaneID)
+        else {
+            return false
+        }
+
+        return tabState.detachedPaneIDs.count < 9
+    }
+
+    private func canAttachFocusedDetachedPane() -> Bool {
+        guard let tabState = selectedTabState,
+            let focusedPaneID = tabState.focusedPaneID
+        else {
+            return false
+        }
+
+        return tabState.activeDetachedPaneID == focusedPaneID
+            && tabState.isPaneDetached(focusedPaneID)
+    }
+
+    private func detachFocusedPane(animated: Bool) {
+        guard
+            let tabState = selectedTabState,
+            let paneID = tabState.focusedPaneID,
+            tabState.isPaneTiled(paneID),
+            let layoutNode = tabState.layoutNode,
+            let paneController = tabState.paneControllers[paneID],
+            tabState.detachedPaneIDs.count < 9
+        else {
+            NSSound.beep()
+            return
+        }
+
+        if tabState.activeFloatingPaneState?.paneID == paneID {
+            leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
+        }
+
+        guard let sourceFrame = renderedPaneFrameInFloatingOverlay(for: paneID, in: tabState),
+            let closePaneResult = layoutNode.closingPane(paneID)
+        else {
+            NSSound.beep()
+            return
+        }
+
+        clearActiveAutoZoomState(in: tabState, restoreLayout: false, animated: false)
+        tabState.layoutNode = closePaneResult.root
+        tabState.detachedPaneIDs.append(paneID)
+        tabState.focusedPaneID = closePaneResult.promotedPaneID ?? tabState.lastFocusedTiledPaneID
+        tabState.removePaneFromFocusHistory(paneID)
+        if animated {
+            animatingDetachedPaneIDs.insert(paneID)
+        }
+
+        rebuildWorkspaceLayout(applyAutoZoomAnimated: true)
+        rootView.layoutSubtreeIfNeeded()
+
+        let destinationFrame = rootView.detachedPaneStatusCellFrame(for: paneID) ?? sourceFrame
+        rootView.installFloatingPaneView(
+            paneController.hostView,
+            initialFrame: sourceFrame,
+            animated: animated
+        )
+
+        if animated {
+            rootView.beginFloatingPaneAnimation()
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = WorkspaceFloatingPaneConfiguration.animationDuration
+                rootView.animateFloatingPaneFrame(to: destinationFrame)
+            } completionHandler: { [weak self] in
+                Task { @MainActor in
+                    self?.animatingDetachedPaneIDs.remove(paneID)
+                    self?.rootView.removeFloatingPaneView()
+                    self?.rebuildWorkspaceLayout(applyAutoZoomAnimated: true)
+                }
+            }
+        } else {
+            rootView.setFloatingPaneFrame(destinationFrame)
+            rootView.removeFloatingPaneView()
+            rebuildWorkspaceLayout(applyAutoZoomAnimated: true)
+        }
+    }
+
+    private func attachFocusedDetachedPane(animated: Bool) {
+        guard
+            let tabState = selectedTabState,
+            let paneID = tabState.focusedPaneID,
+            tabState.isPaneDetached(paneID)
+        else {
+            NSSound.beep()
+            return
+        }
+
+        if tabState.activeDetachedPaneID == paneID, animated {
+            hideActiveDetachedPane(in: tabState, animated: true, reapplyAutoZoom: false) {
+                self.finishAttachingDetachedPane(withID: paneID, in: tabState)
+            }
+        } else {
+            hideActiveDetachedPane(in: tabState, animated: false, reapplyAutoZoom: false)
+            finishAttachingDetachedPane(withID: paneID, in: tabState)
+        }
+    }
+
+    private func finishAttachingDetachedPane(withID paneID: PaneID, in tabState: WorkspaceTabState) {
+        guard tabState.isPaneDetached(paneID) else {
+            return
+        }
+
+        tabState.detachedPaneIDs.removeAll { $0 == paneID }
+        if let layoutNode = tabState.layoutNode,
+            let targetPaneID = tabState.lastFocusedTiledPaneID ?? layoutNode.firstPaneID,
+            let updatedLayoutNode = layoutNode.insertingSplit(
+                for: targetPaneID,
+                axis: .horizontal,
+                newPaneID: paneID
+            )
+        {
+            tabState.layoutNode = updatedLayoutNode
+        } else {
+            tabState.layoutNode = .panel(paneID)
+        }
+
+        tabState.focusedPaneID = paneID
+        tabState.markPaneFocused(paneID)
+        rebuildWorkspaceLayout(applyAutoZoomAnimated: true)
+    }
+
+    private func toggleDetachedPane(at index: Int, animated: Bool) {
+        guard let tabState = selectedTabState,
+            tabState.detachedPaneIDs.indices.contains(index)
+        else {
+            NSSound.beep()
+            return
+        }
+
+        let paneID = tabState.detachedPaneIDs[index]
+        guard !animatingDetachedPaneIDs.contains(paneID) else {
+            return
+        }
+
+        if tabState.activeDetachedPaneID == paneID {
+            hideActiveDetachedPane(in: tabState, animated: animated, reapplyAutoZoom: true)
+        } else {
+            showDetachedPane(at: index, animated: animated)
+        }
+    }
+
+    private func showDetachedPane(at index: Int, animated: Bool) {
+        guard
+            let tabState = selectedTabState,
+            tabState.detachedPaneIDs.indices.contains(index),
+            let paneController = tabState.paneControllers[tabState.detachedPaneIDs[index]]
+        else {
+            NSSound.beep()
+            return
+        }
+
+        let paneID = paneController.id
+        guard !animatingDetachedPaneIDs.contains(paneID) else {
+            return
+        }
+
+        if let activeDetachedPaneID = tabState.activeDetachedPaneID,
+            activeDetachedPaneID != paneID
+        {
+            hideActiveDetachedPane(in: tabState, animated: animated, reapplyAutoZoom: false) {
+                self.showDetachedPane(at: index, animated: animated)
+            }
+            return
+        }
+
+        restoreActiveAutoZoom(in: tabState, animated: animated)
+        tabState.activeDetachedPaneID = paneID
+        tabState.focusedPaneID = paneID
+        if animated {
+            animatingDetachedPaneIDs.insert(paneID)
+        }
+        rootView.setCustomFloatingPaneSize(tabState.floatingPaneSizes[paneID])
+        updatePanePresentation(in: tabState)
+        updateTabStrip()
+        updateWindowTitle()
+        rootView.layoutSubtreeIfNeeded()
+
+        let sourceFrame =
+            rootView.detachedPaneStatusCellFrame(for: paneID)
+            ?? rootView.floatingPaneTargetFrame()
+        rootView.installFloatingPaneView(
+            paneController.hostView,
+            initialFrame: sourceFrame,
+            animated: animated
+        )
+
+        let targetFrame = rootView.floatingPaneTargetFrame()
+        if animated {
+            rootView.beginFloatingPaneAnimation()
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = WorkspaceFloatingPaneConfiguration.animationDuration
+                rootView.animateFloatingPaneFrame(to: targetFrame)
+            } completionHandler: { [weak self] in
+                Task { @MainActor in
+                    self?.animatingDetachedPaneIDs.remove(paneID)
+                    self?.updateTabStrip()
+                    self?.rootView.finishFloatingPaneAnimation()
+                    self?.applyFocusedPaneResponder()
+                }
+            }
+        } else {
+            rootView.setFloatingPaneFrame(targetFrame)
+            rootView.finishFloatingPaneAnimation()
+            applyFocusedPaneResponder()
+        }
+    }
+
+    private func hideActiveDetachedPane(
+        in tabState: WorkspaceTabState,
+        animated: Bool,
+        reapplyAutoZoom: Bool,
+        completion: (@MainActor () -> Void)? = nil
+    ) {
+        guard
+            tabState.id == selectedTabID,
+            let paneID = tabState.activeDetachedPaneID,
+            let paneController = tabState.paneControllers[paneID]
+        else {
+            tabState.activeDetachedPaneID = nil
+            completion?()
+            return
+        }
+
+        let destinationFrame =
+            rootView.detachedPaneStatusCellFrame(for: paneID)
+            ?? paneController.hostView.frame
+        let currentFloatingSize =
+            rootView.floatingPaneFrame(for: paneController.hostView)?.size
+            ?? paneController.hostView.frame.size
+
+        if animated {
+            animatingDetachedPaneIDs.insert(paneID)
+            updateTabStrip()
+            rootView.beginFloatingPaneAnimation()
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = WorkspaceFloatingPaneConfiguration.animationDuration
+                rootView.animateFloatingPaneFrame(to: destinationFrame)
+            } completionHandler: { [weak self, weak tabState] in
+                Task { @MainActor in
+                    guard let self, let tabState else {
+                        completion?()
+                        return
+                    }
+
+                    self.finishHidingDetachedPane(
+                        in: tabState,
+                        reapplyAutoZoom: reapplyAutoZoom,
+                        savedFloatingSize: currentFloatingSize
+                    )
+                    completion?()
+                }
+            }
+        } else {
+            rootView.setFloatingPaneFrame(destinationFrame)
+            finishHidingDetachedPane(
+                in: tabState,
+                reapplyAutoZoom: reapplyAutoZoom,
+                savedFloatingSize: currentFloatingSize
+            )
+            completion?()
+        }
+    }
+
+    private func finishHidingDetachedPane(
+        in tabState: WorkspaceTabState,
+        reapplyAutoZoom: Bool,
+        savedFloatingSize: NSSize
+    ) {
+        if let paneID = tabState.activeDetachedPaneID {
+            tabState.floatingPaneSizes[paneID] = savedFloatingSize
+            animatingDetachedPaneIDs.remove(paneID)
+        }
+
+        tabState.activeDetachedPaneID = nil
+        tabState.focusedPaneID = tabState.lastFocusedTiledPaneID
+        rootView.removeFloatingPaneView()
+        rootView.setCustomFloatingPaneSize(nil)
+        if reapplyAutoZoom {
+            applyAutoZoomToFocusedPane(in: tabState, animated: true)
+        }
+        updatePanePresentation(in: tabState)
+        updateTabStrip()
+        updateWindowTitle()
+        applyFocusedPaneResponder()
     }
 
     private func enterFloatingPane(in tabState: WorkspaceTabState, animated: Bool) {
@@ -1311,6 +1703,10 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     ) -> [PaneID: NSView] {
         var result: [PaneID: NSView] = [:]
         for (paneID, paneController) in tabState.paneControllers {
+            guard tabState.isPaneTiled(paneID) else {
+                continue
+            }
+
             if tabState.activeFloatingPaneState?.paneID == paneID {
                 result[paneID] = TerminalPanePlaceholderView(paneID: paneID)
             } else {
@@ -1502,6 +1898,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             paneController.updatePresentation(
                 isFocused: paneID == tabState.focusedPaneID,
                 isFloating: tabState.activeFloatingPaneState?.paneID == paneID
+                    || tabState.activeDetachedPaneID == paneID
             )
         }
     }
@@ -1515,6 +1912,20 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
                     isSelected: tabState.id == selectedTabID
                 )
             }
+        )
+        let detachedItems =
+            selectedTabState?.detachedPaneIDs.enumerated().map { index, paneID in
+                DetachedPaneStatusItem(
+                    paneID: paneID,
+                    number: index + 1,
+                    isActive: selectedTabState?.activeDetachedPaneID == paneID,
+                    isEnabled: !animatingDetachedPaneIDs.contains(paneID)
+                )
+            } ?? []
+        rootView.updateDetachedPaneStatusItems(
+            detachedItems,
+            target: self,
+            action: #selector(toggleDetachedPaneAtIndex(_:))
         )
         updateAgentStatus()
     }
@@ -1577,14 +1988,14 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
                 id: "pane.split.horizontal",
                 title: "Split Horizontally",
                 shortcut: KeybindingSettings.displayShortcut(for: .splitPaneHorizontally),
-                isEnabled: focusedPaneController?.isLive == true,
+                isEnabled: focusedPaneController?.isLive == true && focusedPaneIsTiled,
                 perform: { [weak self] in self?.splitPaneHorizontally(nil) }
             ),
             AppCommand(
                 id: "pane.split.vertical",
                 title: "Split Vertically",
                 shortcut: KeybindingSettings.displayShortcut(for: .splitPaneVertically),
-                isEnabled: focusedPaneController?.isLive == true,
+                isEnabled: focusedPaneController?.isLive == true && focusedPaneIsTiled,
                 perform: { [weak self] in self?.splitPaneVertically(nil) }
             ),
             AppCommand(
@@ -1626,57 +2037,77 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
                 id: "pane.focus.previous",
                 title: "Focus Previous Pane",
                 shortcut: KeybindingSettings.displayShortcut(for: .focusPreviousPane),
-                isEnabled: (selectedTabState?.paneControllers.count ?? 0) > 1,
+                isEnabled: focusedPaneIsTiled
+                    && (selectedTabState?.tiledPaneIDsInTraversalOrder.count ?? 0) > 1,
                 perform: { [weak self] in self?.focusPreviousPane(nil) }
             ),
             AppCommand(
                 id: "pane.focus.next",
                 title: "Focus Next Pane",
                 shortcut: KeybindingSettings.displayShortcut(for: .focusNextPane),
-                isEnabled: (selectedTabState?.paneControllers.count ?? 0) > 1,
+                isEnabled: focusedPaneIsTiled
+                    && (selectedTabState?.tiledPaneIDsInTraversalOrder.count ?? 0) > 1,
                 perform: { [weak self] in self?.focusNextPane(nil) }
             ),
             AppCommand(
                 id: "pane.focus.left",
                 title: "Focus Left Pane",
                 shortcut: KeybindingSettings.displayShortcut(for: .focusLeftPane),
-                isEnabled: (selectedTabState?.paneControllers.count ?? 0) > 1,
+                isEnabled: focusedPaneIsTiled
+                    && (selectedTabState?.tiledPaneIDsInTraversalOrder.count ?? 0) > 1,
                 perform: { [weak self] in self?.focusLeftPane(nil) }
             ),
             AppCommand(
                 id: "pane.focus.right",
                 title: "Focus Right Pane",
                 shortcut: KeybindingSettings.displayShortcut(for: .focusRightPane),
-                isEnabled: (selectedTabState?.paneControllers.count ?? 0) > 1,
+                isEnabled: focusedPaneIsTiled
+                    && (selectedTabState?.tiledPaneIDsInTraversalOrder.count ?? 0) > 1,
                 perform: { [weak self] in self?.focusRightPane(nil) }
             ),
             AppCommand(
                 id: "pane.focus.above",
                 title: "Focus Above Pane",
                 shortcut: KeybindingSettings.displayShortcut(for: .focusAbovePane),
-                isEnabled: (selectedTabState?.paneControllers.count ?? 0) > 1,
+                isEnabled: focusedPaneIsTiled
+                    && (selectedTabState?.tiledPaneIDsInTraversalOrder.count ?? 0) > 1,
                 perform: { [weak self] in self?.focusAbovePane(nil) }
             ),
             AppCommand(
                 id: "pane.focus.below",
                 title: "Focus Below Pane",
                 shortcut: KeybindingSettings.displayShortcut(for: .focusBelowPane),
-                isEnabled: (selectedTabState?.paneControllers.count ?? 0) > 1,
+                isEnabled: focusedPaneIsTiled
+                    && (selectedTabState?.tiledPaneIDsInTraversalOrder.count ?? 0) > 1,
                 perform: { [weak self] in self?.focusBelowPane(nil) }
             ),
             AppCommand(
                 id: "pane.autoResize",
                 title: "Auto Resize",
                 shortcut: KeybindingSettings.displayShortcut(for: .autoResizePane),
-                isEnabled: focusedPaneController != nil,
+                isEnabled: focusedPaneController != nil && focusedPaneIsTiled,
                 perform: { [weak self] in self?.showAutoResizeSettings(nil) }
             ),
             AppCommand(
                 id: "pane.floating.toggle",
                 title: "Toggle Floating Pane",
                 shortcut: KeybindingSettings.displayShortcut(for: .toggleFloatingPane),
-                isEnabled: focusedPaneController != nil,
+                isEnabled: focusedPaneController != nil && focusedPaneIsTiled,
                 perform: { [weak self] in self?.toggleFloatingPane(nil) }
+            ),
+            AppCommand(
+                id: "pane.detach",
+                title: "Detach Pane",
+                shortcut: KeybindingSettings.displayShortcut(for: .detachPane),
+                isEnabled: canDetachFocusedPane(),
+                perform: { [weak self] in self?.detachPane(nil) }
+            ),
+            AppCommand(
+                id: "pane.detached.attach",
+                title: "Attach Detached Pane",
+                shortcut: KeybindingSettings.displayShortcut(for: .attachDetachedPane),
+                isEnabled: canAttachFocusedDetachedPane(),
+                perform: { [weak self] in self?.attachDetachedPane(nil) }
             ),
             AppCommand(
                 id: "pane.promptEditor",
@@ -1854,6 +2285,8 @@ extension WorkspaceViewController {
     var debugActiveFloatingPaneState: ActiveFloatingPaneState? {
         selectedTabState?.activeFloatingPaneState
     }
+    var debugDetachedPaneIDs: [PaneID] { selectedTabState?.detachedPaneIDs ?? [] }
+    var debugActiveDetachedPaneID: PaneID? { selectedTabState?.activeDetachedPaneID }
     var debugTabIDs: [UUID] { tabs.map(\.id) }
     var debugSelectedTabID: UUID? { selectedTabID }
     var debugDidRequestWindowClose: Bool { didRequestWindowCloseForTesting }
@@ -1915,6 +2348,22 @@ extension WorkspaceViewController {
 
     func debugPlaceholderFrame(for paneID: PaneID) -> NSRect? {
         rootView.debugPlaceholderFrame(for: paneID)
+    }
+
+    func debugDetachedPaneStatusCellFrame(for paneID: PaneID) -> NSRect? {
+        rootView.debugDetachedPaneStatusCellFrame(for: paneID)
+    }
+
+    func debugDetachedPaneStatusCellIsActive(for paneID: PaneID) -> Bool? {
+        rootView.debugDetachedPaneStatusCellIsActive(for: paneID)
+    }
+
+    func debugClickWorkspace(at point: NSPoint) {
+        guard let paneID = rootView.debugHitTerminalPaneID(at: point) else {
+            return
+        }
+
+        focusPaneLocatingTab(withID: paneID)
     }
 
     func debugPlaceholderUsesHiddenWindowPresentation(for paneID: PaneID) -> Bool? {
@@ -2076,7 +2525,11 @@ extension WorkspaceViewController {
     }
 
     func debugToggleFloatingPane(animated: Bool = false) {
-        guard let tabState = selectedTabState, tabState.focusedPaneController != nil else {
+        guard let tabState = selectedTabState,
+            let focusedPaneID = tabState.focusedPaneID,
+            tabState.focusedPaneController != nil,
+            tabState.isPaneTiled(focusedPaneID)
+        else {
             return
         }
 
@@ -2085,6 +2538,18 @@ extension WorkspaceViewController {
         } else {
             enterFloatingPane(in: tabState, animated: animated)
         }
+    }
+
+    func debugDetachFocusedPane(animated: Bool = false) {
+        detachFocusedPane(animated: animated)
+    }
+
+    func debugAttachFocusedDetachedPane(animated: Bool = false) {
+        attachFocusedDetachedPane(animated: animated)
+    }
+
+    func debugToggleDetachedPane(at index: Int, animated: Bool = false) {
+        toggleDetachedPane(at: index, animated: animated)
     }
 
     func debugLayoutNode(forTabID tabID: UUID) -> LayoutNode? {

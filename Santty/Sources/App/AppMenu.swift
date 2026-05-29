@@ -205,6 +205,18 @@ enum AppMenu {
 
         addKeybindingMenuItem(
             to: menu,
+            action: .detachPane,
+            selector: #selector(WorkspaceViewController.detachPane(_:))
+        )
+
+        addKeybindingMenuItem(
+            to: menu,
+            action: .attachDetachedPane,
+            selector: #selector(WorkspaceViewController.attachDetachedPane(_:))
+        )
+
+        addKeybindingMenuItem(
+            to: menu,
             action: .autoResizePane,
             selector: #selector(WorkspaceViewController.showAutoResizeSettings(_:))
         )
@@ -222,6 +234,18 @@ enum AppMenu {
             action: .closePane,
             selector: #selector(WorkspaceViewController.closePane(_:))
         )
+
+        menu.addItem(.separator())
+
+        for index in 0..<9 {
+            let menuItem = menu.addItem(
+                withTitle: "Show Detached Pane \(index + 1)",
+                action: #selector(WorkspaceViewController.toggleDetachedPaneAtIndex(_:)),
+                keyEquivalent: "\(index + 1)"
+            )
+            menuItem.tag = index
+            menuItem.keyEquivalentModifierMask = [.command, .shift]
+        }
 
         return item
     }
