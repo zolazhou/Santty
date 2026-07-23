@@ -1,0 +1,88 @@
+[tools]
+tuist = "4.156.0"
+
+[env]
+SPARKLE_BIN = '{{ exec(command="echo ~/Library/Developer/Xcode/DerivedData/Santty-*/SourcePackages/artifacts/sparkle/Sparkle/bin") }}'
+
+[tasks."swift:format"]
+description = "Format Swift sources and manifests with swift-format"
+run = "xcrun swift-format format --configuration .swift-format --in-place --parallel --recursive Pixcall Packages Project.swift Tuist.swift Tuist/Package.swift"
+
+[tasks."tuist:install"]
+description = "Install Tuist dependencies"
+run = "tuist install"
+
+[tasks."tuist:generate"]
+description = "Generate the Xcode workspace without opening Xcode"
+run = "tuist generate --no-open"
+
+[tasks."tuist:clean"]
+description = "Clean Tuist generated artifacts"
+run = "tuist clean"
+
+[tasks."tuist:regen"]
+description = "Install dependencies and regenerate the Xcode workspace"
+run = "tuist install && tuist generate --no-open"
+
+[tasks."sparkle:generate-keys"]
+description = "Generate the Sparkle EdDSA signing key (private key goes to the login keychain)"
+run = '"$SPARKLE_BIN/generate_keys"'
+
+[tasks."sparkle:generate-appcast"]
+description = "Generate the Sparkle appcast from the build directory"
+run = '"$SPARKLE_BIN/generate_appcast" build'
+
+[tasks."release:archive"]
+description = "Build a Release archive into build/Santty.xcarchive"
+run = "xcodebuild -workspace Santty.xcworkspace -scheme Santty -configuration Release -destination 'generic/platform=macOS' -archivePath build/Santty.xcarchive archive"
+
+[tasks."release:export"]
+description = "Export Santty.app from the archive with Developer ID signing into build/export"
+depends = ["release:archive"]
+run = '''
+rm -rf build/export
+cat > build/ExportOptions.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>method</key>
+	<string>developer-id</string>
+	<key>signingStyle</key>
+	<string>automatic</string>
+	<key>teamID</key>
+	<string>${TUIST_SANTTY_DEVELOPMENT_TEAM:?set TUIST_SANTTY_DEVELOPMENT_TEAM in mise.local.toml}</string>
+</dict>
+</plist>
+EOF
+xcodebuild -exportArchive -archivePath build/Santty.xcarchive -exportPath build/export -exportOptionsPlist build/ExportOptions.plist
+'''
+
+[tasks."release:notarize"]
+description = "Notarize the exported app with Apple and staple the ticket"
+depends = ["release:export"]
+run = '''
+NOTARIZE_ZIP="$(mktemp -d)/Santty.zip"
+ditto -c -k --keepParent build/export/Santty.app "$NOTARIZE_ZIP"
+asc notarization submit --file "$NOTARIZE_ZIP" --wait
+rm -f "$NOTARIZE_ZIP"
+xcrun stapler staple build/export/Santty.app
+'''
+
+[tasks."release:zip"]
+description = "Create a distributable build/Santty.zip from the notarized app"
+depends = ["release:notarize"]
+run = "ditto -c -k --keepParent build/export/Santty.app build/Santty.zip"
+
+[tasks."release:package"]
+description = "Archive, export, zip, and generate the Sparkle appcast"
+depends = ["release:zip"]
+depends_post = ["sparkle:generate-appcast"]
+
+[tasks."release:publish"]
+description = "Package and publish a GitHub release tagged from CFBundleShortVersionString"
+depends = ["release:package"]
+run = '''
+VERSION=$(grep -m1 '"CFBundleShortVersionString":' Project.swift | sed -E 's/.*: "([^"]+)".*/\1/')
+gh release create "v$VERSION" build/Santty.zip build/appcast.xml --title "Santty $VERSION" --generate-notes
+'''
