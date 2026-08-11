@@ -16,8 +16,8 @@ let sparklePublicKey = environment["TUIST_SANTTY_SPARKLE_PUBLIC_KEY"] ?? ""
 var infoPlistEntries: [String: Plist.Value] = [
     "NSPrincipalClass": "NSApplication",
     "LSApplicationCategoryType": "public.app-category.productivity",
-    "CFBundleShortVersionString": "1.0.0",
-    "CFBundleVersion": "1",
+    "CFBundleShortVersionString": "1.1.0",
+    "CFBundleVersion": "2",
 ]
 if !sparkleFeedURL.isEmpty, !sparklePublicKey.isEmpty {
     infoPlistEntries["SUFeedURL"] = .string(sparkleFeedURL)
