@@ -306,6 +306,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             }
         case #selector(openPromptEditor(_:)):
             focusedPaneController?.isLive == true
+        case #selector(enterScrollMode(_:)):
+            focusedPaneController?.isLive == true
+                && focusedPaneController?.isScrollModeActive == false
         case #selector(focusNextPane(_:)), #selector(focusPreviousPane(_:)),
             #selector(focusLeftPane(_:)), #selector(focusRightPane(_:)),
             #selector(focusAbovePane(_:)), #selector(focusBelowPane(_:)):
@@ -475,6 +478,19 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         }
 
         paneController.showPromptEditor(relativeTo: window)
+    }
+
+    @objc func enterScrollMode(_: Any?) {
+        guard let paneController = focusedPaneController, paneController.isLive else {
+            NSSound.beep()
+            return
+        }
+
+        paneController.enterScrollMode()
+    }
+
+    func handleScrollModeKeyEvent(_ event: NSEvent) -> Bool {
+        focusedPaneController?.handleScrollModeKeyEvent(event) ?? false
     }
 
     @objc func showAgentManager(_: Any?) {
@@ -1077,6 +1093,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             return
         }
 
+        tabState.focusedPaneController?.exitScrollMode()
+
         if tabState.isPaneDetached(paneID) {
             if let index = tabState.detachedPaneIDs.firstIndex(of: paneID) {
                 showDetachedPane(at: index, animated: true)
@@ -1271,6 +1289,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             rebuildWorkspaceLayout()
             return
         }
+
+
+        selectedTabState?.focusedPaneController?.exitScrollMode()
 
         if let currentTabState = selectedTabState {
             suspendActiveFloatingPresentation(in: currentTabState)
@@ -2398,6 +2419,14 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
                 perform: { [weak self] in self?.openPromptEditor(nil) }
             ),
             AppCommand(
+                id: "pane.scrollMode.enter",
+                title: "Enter Scroll Mode",
+                shortcut: KeybindingSettings.displayShortcut(for: .enterScrollMode),
+                isEnabled: focusedPaneController?.isLive == true
+                    && focusedPaneController?.isScrollModeActive == false,
+                perform: { [weak self] in self?.enterScrollMode(nil) }
+            ),
+            AppCommand(
                 id: "pane.close",
                 title: "Close Pane",
                 shortcut: KeybindingSettings.displayShortcut(for: .closePane),
@@ -2580,6 +2609,9 @@ extension WorkspaceViewController {
         selectedTabState?.layoutNode?.paneIDsInTraversalOrder ?? []
     }
     var debugFocusedPaneID: PaneID? { selectedTabState?.focusedPaneID }
+    var debugFocusedPaneIsInScrollMode: Bool {
+        focusedPaneController?.isScrollModeActive == true
+    }
     var debugActiveAutoZoomState: ActiveAutoZoomState? { selectedTabState?.activeAutoZoomState }
     var debugActiveFloatingPaneState: ActiveFloatingPaneState? {
         selectedTabState?.activeFloatingPaneState
@@ -2639,6 +2671,16 @@ extension WorkspaceViewController {
 
     func debugPaneBounds(for paneID: PaneID) -> NSRect? {
         selectedTabState?.paneControllers[paneID]?.debugPaneBounds
+    }
+
+    func debugScrollModeIndicatorIsVisible(for paneID: PaneID) -> Bool? {
+        selectedTabState?.paneControllers[paneID]?.debugScrollModeIndicatorIsVisible
+    }
+
+    func debugScrollModeIndicatorFrames(
+        for paneID: PaneID
+    ) -> (background: NSRect, label: NSRect)? {
+        selectedTabState?.paneControllers[paneID]?.debugScrollModeIndicatorFrames
     }
 
     func debugRenderedTerminalConfig(for paneID: PaneID) -> String? {
@@ -2843,6 +2885,10 @@ extension WorkspaceViewController {
         }
 
         command.perform()
+    }
+
+    func debugHandleScrollModeKeyEvent(_ event: NSEvent) -> Bool {
+        handleScrollModeKeyEvent(event)
     }
 
     func debugToggleFloatingPane(animated: Bool = false) {

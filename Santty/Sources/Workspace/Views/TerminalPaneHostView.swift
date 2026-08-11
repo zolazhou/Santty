@@ -97,6 +97,8 @@ final class TerminalPaneHostView: NSView {
     )
     private let statusBackgroundView = NSView()
     private let statusLabel = NSTextField(labelWithString: "")
+    private let scrollModeBackgroundView = NSView()
+    private let scrollModeLabel = NSTextField(labelWithString: "SCROLL")
     private var isFocused = false
     private var isFloating = false
     private var terminalPadding = TerminalSettings.padding
@@ -145,6 +147,19 @@ final class TerminalPaneHostView: NSView {
         statusLabel.isHidden = true
         addSubview(statusLabel)
 
+        scrollModeLabel.font = .monospacedSystemFont(ofSize: 10, weight: .bold)
+        scrollModeLabel.textColor = .black
+        scrollModeLabel.alignment = .center
+        scrollModeLabel.isHidden = true
+        scrollModeLabel.setAccessibilityLabel("Scroll mode active")
+
+        scrollModeBackgroundView.wantsLayer = true
+        scrollModeBackgroundView.layer?.cornerRadius = 5
+        scrollModeBackgroundView.layer?.backgroundColor = NSColor.systemYellow.cgColor
+        scrollModeBackgroundView.isHidden = true
+        addSubview(scrollModeBackgroundView)
+        addSubview(scrollModeLabel)
+
         registerForDraggedTypes(Array(TerminalPasteboardText.dropTypes))
         installPasteKeyMonitor()
         installContentConstraints()
@@ -191,6 +206,20 @@ final class TerminalPaneHostView: NSView {
             y: origin.y + verticalPadding,
             width: max(0, backgroundWidth - horizontalPadding * 2),
             height: labelSize.height
+        )
+
+        let scrollModeSize = scrollModeLabel.intrinsicContentSize
+        scrollModeBackgroundView.frame = NSRect(
+            x: max(8, bounds.width - scrollModeSize.width - 24),
+            y: max(8, bounds.height - scrollModeSize.height - 16),
+            width: scrollModeSize.width + 16,
+            height: scrollModeSize.height + 8
+        )
+        scrollModeLabel.frame = NSRect(
+            x: scrollModeBackgroundView.frame.minX + 8,
+            y: scrollModeBackgroundView.frame.midY - scrollModeSize.height / 2,
+            width: scrollModeSize.width,
+            height: scrollModeSize.height
         )
     }
 
@@ -246,6 +275,12 @@ final class TerminalPaneHostView: NSView {
         statusBackgroundView.isHidden = isLive
         statusLabel.isHidden = isLive
         statusLabel.stringValue = displayTitle
+        needsLayout = true
+    }
+
+    func setScrollModeActive(_ active: Bool) {
+        scrollModeBackgroundView.isHidden = !active
+        scrollModeLabel.isHidden = !active
         needsLayout = true
     }
 
@@ -441,5 +476,14 @@ final class TerminalPaneHostView: NSView {
 
     var debugPaneBounds: NSRect {
         bounds
+    }
+
+    var debugScrollModeIndicatorIsVisible: Bool {
+        !scrollModeLabel.isHidden
+    }
+
+    var debugScrollModeIndicatorFrames: (background: NSRect, label: NSRect) {
+        layoutSubtreeIfNeeded()
+        return (scrollModeBackgroundView.frame, scrollModeLabel.frame)
     }
 }

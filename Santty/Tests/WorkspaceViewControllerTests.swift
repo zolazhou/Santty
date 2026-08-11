@@ -1375,6 +1375,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
                         "pane.detach",
                         "pane.detached.attach",
                         "pane.promptEditor",
+                        "pane.scrollMode.enter",
                         "pane.close",
                         "tab.new",
                         "tab.close",
@@ -1400,6 +1401,8 @@ final class WorkspaceViewControllerTests: XCTestCase {
                 XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.detach" })?.title, "Detach Pane")
                 XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.detached.attach" })?.title, "Attach Detached Pane")
                 XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.promptEditor" })?.title, "Open Prompt Editor")
+                XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.scrollMode.enter" })?.title, "Enter Scroll Mode")
+                XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.scrollMode.enter" })?.shortcut, "⇧⌘S")
                 XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.close" })?.title, "Close Pane")
             }
         }
@@ -1420,6 +1423,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.detach" })?.isEnabled, true)
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.detached.attach" })?.isEnabled, false)
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.promptEditor" })?.isEnabled, true)
+            XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.scrollMode.enter" })?.isEnabled, true)
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "tab.new" })?.isEnabled, true)
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "tab.title.change" })?.isEnabled, true)
 
@@ -1440,6 +1444,114 @@ final class WorkspaceViewControllerTests: XCTestCase {
 
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.floating.toggle" })?.isEnabled, true)
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.move.left" })?.isEnabled, false)
+        }
+    }
+
+    func testScrollModeCommandEntersAndEscapeExitsMode() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            let paneID = try XCTUnwrap(controller.debugFocusedPaneID)
+
+            XCTAssertFalse(controller.debugFocusedPaneIsInScrollMode)
+            XCTAssertEqual(controller.debugScrollModeIndicatorIsVisible(for: paneID), false)
+            XCTAssertTrue(controller.performKeybindingAction(.enterScrollMode))
+            XCTAssertTrue(controller.debugFocusedPaneIsInScrollMode)
+            XCTAssertEqual(controller.debugScrollModeIndicatorIsVisible(for: paneID), true)
+            let indicatorFrames = try XCTUnwrap(
+                controller.debugScrollModeIndicatorFrames(for: paneID)
+            )
+            XCTAssertEqual(
+                indicatorFrames.label.midX,
+                indicatorFrames.background.midX,
+                accuracy: 0.001
+            )
+            XCTAssertEqual(
+                indicatorFrames.label.midY,
+                indicatorFrames.background.midY,
+                accuracy: 0.001
+            )
+            XCTAssertFalse(
+                controller.debugCommandSnapshots.first(where: {
+                    $0.id == "pane.scrollMode.enter"
+                })?.isEnabled ?? true
+            )
+
+            let escape = try XCTUnwrap(Self.makeKeyEvent("\u{1b}", keyCode: 53))
+            XCTAssertTrue(controller.debugHandleScrollModeKeyEvent(escape))
+            XCTAssertFalse(controller.debugFocusedPaneIsInScrollMode)
+            XCTAssertEqual(controller.debugScrollModeIndicatorIsVisible(for: paneID), false)
+            XCTAssertFalse(controller.debugHandleScrollModeKeyEvent(escape))
+        }
+    }
+
+    func testChangingFocusedPaneExitsScrollMode() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            let firstPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugSplitFocusedPane(along: .horizontal)
+            let secondPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+
+            controller.debugPerformCommand(withID: "pane.scrollMode.enter")
+            XCTAssertTrue(controller.debugFocusedPaneIsInScrollMode)
+
+            controller.debugFocusPane(withID: firstPaneID)
+
+            XCTAssertNotEqual(firstPaneID, secondPaneID)
+            XCTAssertFalse(controller.debugFocusedPaneIsInScrollMode)
+        }
+    }
+
+    func testScrollModeMapsVimKeysToGhosttyBindingActions() async throws {
+        try await MainActor.run {
+            func action(
+                _ key: String,
+                modifiers: NSEvent.ModifierFlags = [],
+                keyCode: UInt16 = 0,
+                awaitingSecondG: Bool = false
+            ) throws -> TerminalScrollModeKeyAction {
+                TerminalScrollModeKeyAction(
+                    event: try XCTUnwrap(
+                        Self.makeKeyEvent(key, modifiers: modifiers, keyCode: keyCode)
+                    ),
+                    awaitingSecondG: awaitingSecondG
+                )
+            }
+
+            XCTAssertEqual(
+                try action("j"),
+                .performBindingAction("scroll_page_lines:1")
+            )
+            XCTAssertEqual(
+                try action("k"),
+                .performBindingAction("scroll_page_lines:-1")
+            )
+            XCTAssertEqual(
+                try action("d", modifiers: .control),
+                .performBindingAction("scroll_page_fractional:0.5")
+            )
+            XCTAssertEqual(
+                try action("u", modifiers: .control),
+                .performBindingAction("scroll_page_fractional:-0.5")
+            )
+            XCTAssertEqual(
+                try action("f", modifiers: .control),
+                .performBindingAction("scroll_page_down")
+            )
+            XCTAssertEqual(
+                try action("b", modifiers: .control),
+                .performBindingAction("scroll_page_up")
+            )
+            XCTAssertEqual(try action("g"), .awaitSecondG)
+            XCTAssertEqual(
+                try action("g", awaitingSecondG: true),
+                .performBindingAction("scroll_to_top")
+            )
+            XCTAssertEqual(
+                try action("g", modifiers: .shift),
+                .performBindingAction("scroll_to_bottom")
+            )
+            XCTAssertEqual(try action("q"), .exit)
+            XCTAssertEqual(try action("x"), .consume)
         }
     }
 
@@ -1553,6 +1665,25 @@ final class WorkspaceViewControllerTests: XCTestCase {
         let controller = WorkspaceViewController()
         controller.debugLoadForTesting()
         return controller
+    }
+
+    private static func makeKeyEvent(
+        _ characters: String,
+        modifiers: NSEvent.ModifierFlags = [],
+        keyCode: UInt16 = 0
+    ) -> NSEvent? {
+        NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: modifiers,
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: characters.lowercased(),
+            isARepeat: false,
+            keyCode: keyCode
+        )
     }
 
     private static func withRestoredKeybindingUserDefaults(_ operation: () throws -> Void) rethrows {

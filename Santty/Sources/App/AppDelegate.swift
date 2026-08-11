@@ -167,6 +167,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return nil
             }
 
+            if self.workspaceViewController?.handleScrollModeKeyEvent(event) == true {
+                return nil
+            }
+
             guard AppMenuKeyEquivalents.perform(event, in: NSApp.mainMenu) else {
                 return event
             }

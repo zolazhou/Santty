@@ -17,6 +17,8 @@ final class TerminalPaneController: NSObject {
     private(set) var lastKnownTitle = "Shell"
     private(set) var currentWorkingDirectory: String?
     private var isFloating = false
+    private(set) var isScrollModeActive = false
+    private var isAwaitingSecondScrollModeG = false
 
     var onFocusRequest: ((PaneID) -> Void)? {
         didSet {
@@ -134,6 +136,52 @@ final class TerminalPaneController: NSObject {
         terminalView.copy(sender)
     }
 
+    func enterScrollMode() {
+        guard isLive else {
+            return
+        }
+
+        isScrollModeActive = true
+        isAwaitingSecondScrollModeG = false
+        hostView.setScrollModeActive(true)
+        terminalView.window?.makeFirstResponder(terminalView)
+    }
+
+    func exitScrollMode() {
+        guard isScrollModeActive else {
+            return
+        }
+
+        isScrollModeActive = false
+        isAwaitingSecondScrollModeG = false
+        hostView.setScrollModeActive(false)
+    }
+
+    func handleScrollModeKeyEvent(_ event: NSEvent) -> Bool {
+        guard isScrollModeActive, event.type == .keyDown else {
+            return false
+        }
+
+        let action = TerminalScrollModeKeyAction(
+            event: event,
+            awaitingSecondG: isAwaitingSecondScrollModeG
+        )
+        isAwaitingSecondScrollModeG = false
+
+        switch action {
+        case .exit:
+            exitScrollMode()
+        case let .performBindingAction(actionName):
+            terminalView.performBindingAction(actionName)
+        case .awaitSecondG:
+            isAwaitingSecondScrollModeG = true
+        case .consume:
+            break
+        }
+
+        return true
+    }
+
     func showPromptEditor(relativeTo window: NSWindow) {
         guard isLive else {
             NSSound.beep()
@@ -248,6 +296,14 @@ final class TerminalPaneController: NSObject {
         terminalController.renderedConfig
     }
 
+    var debugScrollModeIndicatorIsVisible: Bool {
+        hostView.debugScrollModeIndicatorIsVisible
+    }
+
+    var debugScrollModeIndicatorFrames: (background: NSRect, label: NSRect) {
+        hostView.debugScrollModeIndicatorFrames
+    }
+
     private static func terminalConfiguration(
         for paneID: PaneID,
         workingDirectory: String?
@@ -312,6 +368,7 @@ extension TerminalPaneController: TerminalSurfaceCloseDelegate {
         }
 
         isLive = false
+        exitScrollMode()
         onExit?(id)
     }
 }
@@ -323,6 +380,58 @@ extension TerminalPaneController: TerminalSurfaceFocusDelegate {
         }
 
         onFocusRequest?(id)
+    }
+}
+
+enum TerminalScrollModeKeyAction: Equatable {
+    case exit
+    case performBindingAction(String)
+    case awaitSecondG
+    case consume
+
+    init(event: NSEvent, awaitingSecondG: Bool) {
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+
+        if event.keyCode == 53 || event.characters == "\u{1b}" {
+            self = .exit
+            return
+        }
+
+        if modifiers.isEmpty, key == "q" || key == "i" || event.keyCode == 36 {
+            self = .exit
+            return
+        }
+
+        if awaitingSecondG {
+            self = modifiers.isEmpty && key == "g"
+                ? .performBindingAction("scroll_to_top")
+                : .consume
+            return
+        }
+
+        switch (modifiers, key, event.keyCode) {
+        case ([], "j", _):
+            self = .performBindingAction("scroll_page_lines:1")
+        case ([], "k", _):
+            self = .performBindingAction("scroll_page_lines:-1")
+        case ([.control], "d", _):
+            self = .performBindingAction("scroll_page_fractional:0.5")
+        case ([.control], "u", _):
+            self = .performBindingAction("scroll_page_fractional:-0.5")
+        case ([.control], "f", _), ([], _, 121):
+            self = .performBindingAction("scroll_page_down")
+        case ([.control], "b", _), ([], _, 116):
+            self = .performBindingAction("scroll_page_up")
+        case ([.shift], "g", _), ([], _, 119):
+            self = .performBindingAction("scroll_to_bottom")
+        case ([], "g", _):
+            self = .awaitSecondG
+        case ([], _, 115):
+            self = .performBindingAction("scroll_to_top")
+        default:
+            self = .consume
+        }
     }
 }
 

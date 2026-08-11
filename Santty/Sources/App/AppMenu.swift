@@ -281,6 +281,13 @@ enum AppMenu {
             target: target
         )
 
+        addKeybindingMenuItem(
+            to: menu,
+            action: .enterScrollMode,
+            selector: #selector(WorkspaceViewController.enterScrollMode(_:)),
+            target: target
+        )
+
         menu.addItem(.separator())
 
         addKeybindingMenuItem(
