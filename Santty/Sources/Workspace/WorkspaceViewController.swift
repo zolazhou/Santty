@@ -1194,7 +1194,10 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             selectTab(withID: tabState.id)
         }
 
-        if tabState.id == selectedTabID, tabState.activeFloatingPaneState != nil {
+        if tabState.id == selectedTabID,
+            tabState.activeFloatingPaneState != nil,
+            tabState.activeFloatingPaneState?.paneID != paneID
+        {
             clearFloatingPaneImmediately(in: tabState, reapplyAutoZoom: false)
         }
 
@@ -2926,6 +2929,10 @@ extension WorkspaceViewController {
 
     func debugFocusPane(withID paneID: PaneID) {
         focusPane(withID: paneID)
+    }
+
+    func debugHandlePaneFocusRequest(withID paneID: PaneID) {
+        handlePaneFocusRequest(withID: paneID)
     }
 
     func debugFocusPane(in direction: PaneFocusDirection) {

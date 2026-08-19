@@ -60,7 +60,11 @@ final class BrowserPaneHostView: NSView {
         addSubview(addressField)
 
         webView.onMouseDown = { [weak self] in
-            self?.onFocusRequest?(paneID)
+            guard let self, !self.isFloating else {
+                return
+            }
+
+            self.onFocusRequest?(paneID)
         }
         updateAppearance()
     }
@@ -143,6 +147,15 @@ final class BrowserPaneHostView: NSView {
     }
 
     @objc private func submitAddress(_ sender: NSTextField) {
+        // First-responder churn (tab switches, pane rebuilds) can detach the
+        // field editor and make AppKit deliver the action spuriously. Only a
+        // visible field with non-empty text is a genuine user submission.
+        guard !addressField.isHidden,
+            !sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return
+        }
+
         onSubmitURL?(sender.stringValue)
     }
 }
@@ -185,6 +198,10 @@ final class BrowserPaneController: NSObject, PaneControlling {
     }
 
     func startIfNeeded() {
+        guard browserHostView.isAddressFieldVisible else {
+            return
+        }
+
         browserHostView.focusAddressField()
     }
 

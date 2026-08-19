@@ -76,7 +76,8 @@ run = "ditto -c -k --keepParent build/export/Santty.app build/Santty.zip"
 
 [tasks."release:package"]
 description = "Archive, export, zip, and generate the Sparkle appcast"
-depends = ["release:zip", "sparkle:generate-appcast"]
+depends = ["release:zip"]
+run = '"$SPARKLE_BIN/generate_appcast" build'
 
 [tasks."release:publish"]
 description = "Package and publish a GitHub release tagged from CFBundleShortVersionString"

@@ -923,6 +923,27 @@ final class WorkspaceViewControllerTests: XCTestCase {
         }
     }
 
+    func testFocusRequestFromFloatingPaneKeepsItFloating() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            let firstPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+
+            controller.debugSplitFocusedPane(along: .horizontal)
+            let floatingPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugToggleFloatingPane()
+            XCTAssertEqual(controller.debugActiveFloatingPaneState?.paneID, floatingPaneID)
+
+            controller.debugHandlePaneFocusRequest(withID: floatingPaneID)
+
+            XCTAssertEqual(controller.debugActiveFloatingPaneState?.paneID, floatingPaneID)
+            XCTAssertEqual(controller.debugFocusedPaneID, floatingPaneID)
+
+            controller.debugHandlePaneFocusRequest(withID: firstPaneID)
+
+            XCTAssertNil(controller.debugActiveFloatingPaneState)
+        }
+    }
+
     func testFloatingPaneStaysFloatingAcrossTabSwitch() async throws {
         try await MainActor.run {
             let controller = Self.makeController()

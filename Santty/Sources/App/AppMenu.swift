@@ -98,6 +98,7 @@ enum AppMenu {
                 settingsAction: settingsAction
             )
         )
+        mainMenu.addItem(makeEditMenuItem())
         mainMenu.addItem(makePaneMenuItem(target: workspaceTarget))
         mainMenu.addItem(makeTabMenuItem(target: workspaceTarget))
         mainMenu.addItem(makeWindowMenuItem())
@@ -147,6 +148,28 @@ enum AppMenu {
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
+
+        return item
+    }
+
+    private static func makeEditMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "Edit")
+        item.submenu = menu
+
+        // Standard editing shortcuts (Cmd+Z/X/C/V/A) are dispatched through
+        // the main menu's key equivalents. Without an Edit menu they never
+        // reach WKWebView or text fields. Targets stay nil so the actions
+        // walk the responder chain to the first responder.
+        menu.addItem(withTitle: "Undo", action: #selector(UndoManager.undo), keyEquivalent: "z")
+        menu.addItem(withTitle: "Redo", action: #selector(UndoManager.redo), keyEquivalent: "Z")
+
+        menu.addItem(.separator())
+
+        menu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        menu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        menu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
         return item
     }
