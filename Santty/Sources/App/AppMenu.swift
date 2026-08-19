@@ -170,6 +170,29 @@ enum AppMenu {
             target: target
         )
 
+        menu.addItem(.separator())
+
+        addKeybindingMenuItem(
+            to: menu,
+            action: .newBrowserPane,
+            selector: #selector(WorkspaceViewController.newBrowserPane(_:)),
+            target: target
+        )
+
+        addKeybindingMenuItem(
+            to: menu,
+            action: .convertPaneToBrowser,
+            selector: #selector(WorkspaceViewController.convertFocusedPaneToBrowser(_:)),
+            target: target
+        )
+
+        addKeybindingMenuItem(
+            to: menu,
+            action: .convertPaneToTerminal,
+            selector: #selector(WorkspaceViewController.convertFocusedPaneToTerminal(_:)),
+            target: target
+        )
+
         menu.addItem(makeResizeSplitMenuItem(target: target))
 
         menu.addItem(.separator())

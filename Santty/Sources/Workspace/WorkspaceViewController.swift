@@ -171,8 +171,16 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         return tabs[selectedTabIndex]
     }
 
-    private var focusedPaneController: TerminalPaneController? {
+    private var focusedPaneController: (any PaneControlling)? {
         selectedTabState?.focusedPaneController
+    }
+
+    private var focusedTerminalPaneController: TerminalPaneController? {
+        focusedPaneController as? TerminalPaneController
+    }
+
+    private var focusedBrowserPaneController: BrowserPaneController? {
+        focusedPaneController as? BrowserPaneController
     }
 
     private var focusedPaneIsTiled: Bool {
@@ -267,7 +275,17 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(splitPaneHorizontally(_:)), #selector(splitPaneVertically(_:)):
-            focusedPaneController?.isLive == true && focusedPaneIsTiled
+            if focusedTerminalPaneController != nil {
+                focusedTerminalPaneController?.isLive == true && focusedPaneIsTiled
+            } else {
+                focusedPaneController != nil && focusedPaneIsTiled
+            }
+        case #selector(newBrowserPane(_:)):
+            focusedPaneController != nil && focusedPaneIsTiled
+        case #selector(convertFocusedPaneToBrowser(_:)):
+            focusedTerminalPaneController != nil && focusedPaneIsTiled
+        case #selector(convertFocusedPaneToTerminal(_:)):
+            focusedBrowserPaneController != nil && focusedPaneIsTiled
         case #selector(equalizePaneSplits(_:)):
             canEqualizePaneSplits()
         case #selector(movePaneDividerUp(_:)):
@@ -305,10 +323,10 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
                 false
             }
         case #selector(openPromptEditor(_:)):
-            focusedPaneController?.isLive == true
+            focusedTerminalPaneController?.isLive == true
         case #selector(enterScrollMode(_:)):
-            focusedPaneController?.isLive == true
-                && focusedPaneController?.isScrollModeActive == false
+            focusedTerminalPaneController?.isLive == true
+                && focusedTerminalPaneController?.isScrollModeActive == false
         case #selector(focusNextPane(_:)), #selector(focusPreviousPane(_:)),
             #selector(focusLeftPane(_:)), #selector(focusRightPane(_:)),
             #selector(focusAbovePane(_:)), #selector(focusBelowPane(_:)):
@@ -341,6 +359,34 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 
     @objc func splitPaneVertically(_: Any?) {
         splitFocusedPane(along: .vertical)
+    }
+
+    @objc func newBrowserPane(_: Any?) {
+        splitFocusedPane(along: .horizontal) {
+            self.makeBrowserPaneController()
+        }
+    }
+
+    @objc func convertFocusedPaneToBrowser(_: Any?) {
+        guard selectedTabState?.focusedPaneController is TerminalPaneController,
+            let paneID = selectedTabState?.focusedPaneID
+        else {
+            NSSound.beep()
+            return
+        }
+
+        replaceFocusedPane(with: makeBrowserPaneController(id: paneID))
+    }
+
+    @objc func convertFocusedPaneToTerminal(_: Any?) {
+        guard selectedTabState?.focusedPaneController is BrowserPaneController,
+            let paneID = selectedTabState?.focusedPaneID
+        else {
+            NSSound.beep()
+            return
+        }
+
+        replaceFocusedPane(with: makeTerminalPaneController(id: paneID))
     }
 
     @objc func equalizePaneSplits(_: Any?) {
@@ -470,7 +516,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     @objc func openPromptEditor(_: Any?) {
         guard
             let window = view.window,
-            let paneController = focusedPaneController,
+            let paneController = focusedTerminalPaneController,
             paneController.isLive
         else {
             NSSound.beep()
@@ -481,7 +527,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     }
 
     @objc func enterScrollMode(_: Any?) {
-        guard let paneController = focusedPaneController, paneController.isLive else {
+        guard let paneController = focusedTerminalPaneController, paneController.isLive else {
             NSSound.beep()
             return
         }
@@ -490,7 +536,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     }
 
     func handleScrollModeKeyEvent(_ event: NSEvent) -> Bool {
-        focusedPaneController?.handleScrollModeKeyEvent(event) ?? false
+        focusedTerminalPaneController?.handleScrollModeKeyEvent(event) ?? false
     }
 
     @objc func showAgentManager(_: Any?) {
@@ -643,7 +689,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     }
 
     private func makeTabState(startImmediately: Bool) -> WorkspaceTabState {
-        let paneController = makePaneController()
+        let paneController: any PaneControlling = makeTerminalPaneController()
         let tabState = WorkspaceTabState(
             layoutNode: .panel(paneController.id),
             paneControllers: [paneController.id: paneController],
@@ -660,8 +706,11 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         return tabState
     }
 
-    private func makePaneController(workingDirectory: String? = nil) -> TerminalPaneController {
-        let paneController = TerminalPaneController(workingDirectory: workingDirectory)
+    private func makeTerminalPaneController(
+        id: PaneID = UUID(),
+        workingDirectory: String? = nil
+    ) -> TerminalPaneController {
+        let paneController = TerminalPaneController(id: id, workingDirectory: workingDirectory)
         paneController.updateAppearance()
 
         paneController.onFocusRequest = { [weak self] paneID in
@@ -679,17 +728,61 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         return paneController
     }
 
+    private func makeBrowserPaneController(id: PaneID = UUID()) -> BrowserPaneController {
+        let paneController = BrowserPaneController(id: id)
+        paneController.updateAppearance()
+
+        paneController.onFocusRequest = { [weak self] paneID in
+            self?.handlePaneFocusRequest(withID: paneID)
+        }
+
+        paneController.onTitleChange = { [weak self] paneID in
+            self?.handleTitleChange(for: paneID)
+        }
+
+        return paneController
+    }
+
     private func applyTerminalSettingsToPanes() {
-        for paneController in tabs.flatMap({ $0.paneControllers.values }) {
-            paneController.applyTerminalSettings()
+        for tabState in tabs {
+            for case let paneController as TerminalPaneController in tabState.paneControllers.values
+            {
+                paneController.applyTerminalSettings()
+            }
         }
     }
 
     private func splitFocusedPane(along axis: SplitAxis) {
+        guard let focusedPaneController, focusedPaneIsTiled else {
+            NSSound.beep()
+            return
+        }
+
+        if let focusedTerminalPaneController {
+            guard focusedTerminalPaneController.isLive else {
+                NSSound.beep()
+                return
+            }
+
+            splitFocusedPane(along: axis) {
+                self.makeTerminalPaneController(
+                    workingDirectory: focusedTerminalPaneController.workingDirectoryForNewPane
+                )
+            }
+        } else {
+            splitFocusedPane(along: axis) {
+                self.makeTerminalPaneController()
+            }
+        }
+    }
+
+    private func splitFocusedPane(
+        along axis: SplitAxis,
+        makeNewPaneController: () -> any PaneControlling
+    ) {
         guard
             let tabState = selectedTabState,
-            let focusedPaneController = tabState.focusedPaneController,
-            focusedPaneController.isLive,
+            tabState.focusedPaneController != nil,
             let layoutNode = tabState.layoutNode,
             let focusedPaneID = tabState.focusedPaneID,
             tabState.isPaneTiled(focusedPaneID)
@@ -701,9 +794,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
         clearActiveAutoZoomState(in: tabState, restoreLayout: false, animated: false)
 
-        let newPaneController = makePaneController(
-            workingDirectory: focusedPaneController.workingDirectoryForNewPane
-        )
+        let newPaneController = makeNewPaneController()
         guard
             let updatedLayoutNode = layoutNode.insertingSplit(
                 for: focusedPaneID,
@@ -720,6 +811,38 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         tabState.layoutNode = updatedLayoutNode
         tabState.focusedPaneID = newPaneController.id
         tabState.markPaneFocused(newPaneController.id)
+        rebuildWorkspaceLayout(applyAutoZoomAnimated: true)
+
+        if hasAppeared {
+            newPaneController.startIfNeeded()
+            applyFocusedPaneResponder()
+        }
+    }
+
+    private func replaceFocusedPane(with newPaneController: any PaneControlling) {
+        guard
+            let tabState = selectedTabState,
+            let focusedPaneID = tabState.focusedPaneID,
+            tabState.focusedPaneController != nil,
+            tabState.isPaneTiled(focusedPaneID)
+        else {
+            NSSound.beep()
+            return
+        }
+
+        leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
+        clearActiveAutoZoomState(in: tabState, restoreLayout: false, animated: false)
+
+        if tabState.paneControllers[focusedPaneID] is TerminalPaneController {
+            AgentSessionStore.shared.removeSessions(forPaneID: focusedPaneID)
+        }
+
+        tabState.paneControllers[focusedPaneID] = newPaneController
+        tabState.paneAutoResizeConfigurations[focusedPaneID] =
+            WorkspaceFocusZoomConfiguration.defaultAutoResizeConfiguration
+        tabState.focusedPaneID = focusedPaneID
+        tabState.markPaneFocused(focusedPaneID)
+
         rebuildWorkspaceLayout(applyAutoZoomAnimated: true)
 
         if hasAppeared {
@@ -1093,7 +1216,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             return
         }
 
-        tabState.focusedPaneController?.exitScrollMode()
+        (tabState.focusedPaneController as? TerminalPaneController)?.exitScrollMode()
 
         if tabState.isPaneDetached(paneID) {
             if let index = tabState.detachedPaneIDs.firstIndex(of: paneID) {
@@ -1291,7 +1414,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         }
 
 
-        selectedTabState?.focusedPaneController?.exitScrollMode()
+        (selectedTabState?.focusedPaneController as? TerminalPaneController)?.exitScrollMode()
 
         if let currentTabState = selectedTabState {
             suspendActiveFloatingPresentation(in: currentTabState)
@@ -2262,15 +2385,40 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
                 id: "pane.split.horizontal",
                 title: "Split Horizontally",
                 shortcut: KeybindingSettings.displayShortcut(for: .splitPaneHorizontally),
-                isEnabled: focusedPaneController?.isLive == true && focusedPaneIsTiled,
+                isEnabled: focusedTerminalPaneController != nil
+                    ? focusedTerminalPaneController?.isLive == true && focusedPaneIsTiled
+                    : focusedPaneController != nil && focusedPaneIsTiled,
                 perform: { [weak self] in self?.splitPaneHorizontally(nil) }
             ),
             AppCommand(
                 id: "pane.split.vertical",
                 title: "Split Vertically",
                 shortcut: KeybindingSettings.displayShortcut(for: .splitPaneVertically),
-                isEnabled: focusedPaneController?.isLive == true && focusedPaneIsTiled,
+                isEnabled: focusedTerminalPaneController != nil
+                    ? focusedTerminalPaneController?.isLive == true && focusedPaneIsTiled
+                    : focusedPaneController != nil && focusedPaneIsTiled,
                 perform: { [weak self] in self?.splitPaneVertically(nil) }
+            ),
+            AppCommand(
+                id: "pane.browser.new",
+                title: "New Browser Pane",
+                shortcut: KeybindingSettings.displayShortcut(for: .newBrowserPane),
+                isEnabled: focusedPaneController != nil && focusedPaneIsTiled,
+                perform: { [weak self] in self?.newBrowserPane(nil) }
+            ),
+            AppCommand(
+                id: "pane.browser.convert",
+                title: "Switch Pane to Browser",
+                shortcut: KeybindingSettings.displayShortcut(for: .convertPaneToBrowser),
+                isEnabled: focusedTerminalPaneController != nil && focusedPaneIsTiled,
+                perform: { [weak self] in self?.convertFocusedPaneToBrowser(nil) }
+            ),
+            AppCommand(
+                id: "pane.terminal.convert",
+                title: "Switch Pane to Terminal",
+                shortcut: KeybindingSettings.displayShortcut(for: .convertPaneToTerminal),
+                isEnabled: focusedBrowserPaneController != nil && focusedPaneIsTiled,
+                perform: { [weak self] in self?.convertFocusedPaneToTerminal(nil) }
             ),
             AppCommand(
                 id: "pane.resize.equalize",
@@ -2415,15 +2563,15 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
                 id: "pane.promptEditor",
                 title: "Open Prompt Editor",
                 shortcut: KeybindingSettings.displayShortcut(for: .openPromptEditor),
-                isEnabled: focusedPaneController?.isLive == true,
+                isEnabled: focusedTerminalPaneController?.isLive == true,
                 perform: { [weak self] in self?.openPromptEditor(nil) }
             ),
             AppCommand(
                 id: "pane.scrollMode.enter",
                 title: "Enter Scroll Mode",
                 shortcut: KeybindingSettings.displayShortcut(for: .enterScrollMode),
-                isEnabled: focusedPaneController?.isLive == true
-                    && focusedPaneController?.isScrollModeActive == false,
+                isEnabled: focusedTerminalPaneController?.isLive == true
+                    && focusedTerminalPaneController?.isScrollModeActive == false,
                 perform: { [weak self] in self?.enterScrollMode(nil) }
             ),
             AppCommand(
@@ -2609,8 +2757,14 @@ extension WorkspaceViewController {
         selectedTabState?.layoutNode?.paneIDsInTraversalOrder ?? []
     }
     var debugFocusedPaneID: PaneID? { selectedTabState?.focusedPaneID }
+    var debugFocusedPaneIsTerminal: Bool {
+        focusedPaneController is TerminalPaneController
+    }
+    var debugFocusedPaneIsBrowser: Bool {
+        focusedPaneController is BrowserPaneController
+    }
     var debugFocusedPaneIsInScrollMode: Bool {
-        focusedPaneController?.isScrollModeActive == true
+        focusedTerminalPaneController?.isScrollModeActive == true
     }
     var debugActiveAutoZoomState: ActiveAutoZoomState? { selectedTabState?.activeAutoZoomState }
     var debugActiveFloatingPaneState: ActiveFloatingPaneState? {
@@ -2642,49 +2796,49 @@ extension WorkspaceViewController {
     }
 
     func debugPaneBorderColor(for paneID: PaneID) -> NSColor? {
-        selectedTabState?.paneControllers[paneID]?.debugBorderColor
+        selectedTabState?.terminalPaneController(for: paneID)?.debugBorderColor
     }
 
     func debugPaneBorderWidth(for paneID: PaneID) -> CGFloat? {
-        selectedTabState?.paneControllers[paneID]?.debugBorderWidth
+        selectedTabState?.terminalPaneController(for: paneID)?.debugBorderWidth
     }
 
     func debugPaneUsesHiddenWindowPresentation(for paneID: PaneID) -> Bool? {
-        selectedTabState?.paneControllers[paneID]?.debugUsesHiddenWindowPresentation
+        selectedTabState?.terminalPaneController(for: paneID)?.debugUsesHiddenWindowPresentation
     }
 
     func debugPaneVibrancyBlendingMode(for paneID: PaneID) -> NSVisualEffectView.BlendingMode? {
-        selectedTabState?.paneControllers[paneID]?.debugVibrancyBlendingMode
+        selectedTabState?.terminalPaneController(for: paneID)?.debugVibrancyBlendingMode
     }
 
     func debugPaneVibrancyTintAlpha(for paneID: PaneID) -> CGFloat? {
-        selectedTabState?.paneControllers[paneID]?.debugVibrancyTintAlpha
+        selectedTabState?.terminalPaneController(for: paneID)?.debugVibrancyTintAlpha
     }
 
     func debugTerminalFrame(for paneID: PaneID) -> NSRect? {
-        selectedTabState?.paneControllers[paneID]?.debugTerminalFrame
+        selectedTabState?.terminalPaneController(for: paneID)?.debugTerminalFrame
     }
 
     func debugTerminalPadding(for paneID: PaneID) -> CGFloat? {
-        selectedTabState?.paneControllers[paneID]?.debugTerminalPadding
+        selectedTabState?.terminalPaneController(for: paneID)?.debugTerminalPadding
     }
 
     func debugPaneBounds(for paneID: PaneID) -> NSRect? {
-        selectedTabState?.paneControllers[paneID]?.debugPaneBounds
+        selectedTabState?.terminalPaneController(for: paneID)?.debugPaneBounds
     }
 
     func debugScrollModeIndicatorIsVisible(for paneID: PaneID) -> Bool? {
-        selectedTabState?.paneControllers[paneID]?.debugScrollModeIndicatorIsVisible
+        selectedTabState?.terminalPaneController(for: paneID)?.debugScrollModeIndicatorIsVisible
     }
 
     func debugScrollModeIndicatorFrames(
         for paneID: PaneID
     ) -> (background: NSRect, label: NSRect)? {
-        selectedTabState?.paneControllers[paneID]?.debugScrollModeIndicatorFrames
+        selectedTabState?.terminalPaneController(for: paneID)?.debugScrollModeIndicatorFrames
     }
 
     func debugRenderedTerminalConfig(for paneID: PaneID) -> String? {
-        selectedTabState?.paneControllers[paneID]?.debugRenderedTerminalConfig
+        selectedTabState?.terminalPaneController(for: paneID)?.debugRenderedTerminalConfig
     }
 
     func debugPlaceholderFrame(for paneID: PaneID) -> NSRect? {
@@ -2797,7 +2951,7 @@ extension WorkspaceViewController {
 
     func debugSimulatePaneExit(withID paneID: PaneID) {
         tabState(containing: paneID)?
-            .paneControllers[paneID]?
+            .terminalPaneController(for: paneID)?
             .terminalDidClose(processAlive: false)
     }
 
@@ -2857,7 +3011,7 @@ extension WorkspaceViewController {
     func debugSetPaneTitle(_ title: String, for paneID: PaneID) {
         guard
             let tabState = tabState(containing: paneID),
-            let paneController = tabState.paneControllers[paneID]
+            let paneController = tabState.terminalPaneController(for: paneID)
         else {
             return
         }
@@ -2868,7 +3022,7 @@ extension WorkspaceViewController {
     func debugSetPaneWorkingDirectory(_ workingDirectory: String, for paneID: PaneID) {
         guard
             let tabState = tabState(containing: paneID),
-            let paneController = tabState.paneControllers[paneID]
+            let paneController = tabState.terminalPaneController(for: paneID)
         else {
             return
         }
