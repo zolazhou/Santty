@@ -19,6 +19,9 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
     case movePaneRight
     case movePaneUp
     case movePaneDown
+    case newBrowserPane
+    case convertPaneToBrowser
+    case convertPaneToTerminal
     case toggleFloatingPane
     case detachPane
     case attachDetachedPane
@@ -69,6 +72,12 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             "pane.move.up"
         case .movePaneDown:
             "pane.move.down"
+        case .newBrowserPane:
+            "pane.browser.new"
+        case .convertPaneToBrowser:
+            "pane.browser.convert"
+        case .convertPaneToTerminal:
+            "pane.terminal.convert"
         case .toggleFloatingPane:
             "pane.floating.toggle"
         case .detachPane:
@@ -130,6 +139,12 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             "Move Pane Up"
         case .movePaneDown:
             "Move Pane Down"
+        case .newBrowserPane:
+            "New Browser Pane"
+        case .convertPaneToBrowser:
+            "Switch Pane to Browser"
+        case .convertPaneToTerminal:
+            "Switch Pane to Terminal"
         case .toggleFloatingPane:
             "Toggle Floating Pane"
         case .detachPane:
@@ -161,9 +176,9 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             .movePaneDividerUp, .movePaneDividerDown, .movePaneDividerLeft,
             .movePaneDividerRight, .focusPreviousPane, .focusNextPane, .focusLeftPane,
             .focusRightPane, .focusAbovePane, .focusBelowPane, .movePaneLeft,
-            .movePaneRight, .movePaneUp, .movePaneDown, .toggleFloatingPane, .detachPane,
-            .attachDetachedPane, .openPromptEditor, .enterScrollMode, .autoResizePane,
-            .closePane:
+            .movePaneRight, .movePaneUp, .movePaneDown, .newBrowserPane,
+            .convertPaneToBrowser, .convertPaneToTerminal, .toggleFloatingPane, .detachPane,
+            .attachDetachedPane, .openPromptEditor, .enterScrollMode, .autoResizePane, .closePane:
             "Pane"
         case .newTab, .closeTab, .focusPreviousTab, .focusNextTab:
             "Tab"
@@ -206,6 +221,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             .init(.k, modifiers: [.option, .command])
         case .movePaneDown:
             .init(.j, modifiers: [.option, .command])
+        case .newBrowserPane, .convertPaneToBrowser, .convertPaneToTerminal:
+            nil
         case .toggleFloatingPane:
             .init(.f, modifiers: [.command, .shift])
         case .detachPane, .attachDetachedPane:

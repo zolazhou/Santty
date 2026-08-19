@@ -3,9 +3,13 @@ import Darwin
 import GhosttyTerminal
 
 @MainActor
-final class TerminalPaneController: NSObject {
+final class TerminalPaneController: NSObject, PaneControlling {
     let id: PaneID
-    let hostView: TerminalPaneHostView
+    private let terminalHostView: TerminalPaneHostView
+
+    var hostView: NSView {
+        terminalHostView
+    }
 
     private let terminalView: TerminalView
     private let terminalController: TerminalController
@@ -22,7 +26,7 @@ final class TerminalPaneController: NSObject {
 
     var onFocusRequest: ((PaneID) -> Void)? {
         didSet {
-            hostView.onFocusRequest = onFocusRequest
+            terminalHostView.onFocusRequest = onFocusRequest
         }
     }
 
@@ -34,7 +38,7 @@ final class TerminalPaneController: NSObject {
     }
 
     var focusTargetView: NSView {
-        isLive ? terminalView : hostView
+        isLive ? terminalView : terminalHostView
     }
 
     var foregroundProcessID: Int? {
@@ -87,7 +91,7 @@ final class TerminalPaneController: NSObject {
             terminalView?.foregroundPid
         }
         self.processWorkingDirectoryProvider = processWorkingDirectoryProvider
-        hostView = TerminalPaneHostView(paneID: id, terminalView: terminalView)
+        terminalHostView = TerminalPaneHostView(paneID: id, terminalView: terminalView)
 
         super.init()
 
@@ -124,7 +128,7 @@ final class TerminalPaneController: NSObject {
 
     func updatePresentation(isFocused: Bool, isFloating: Bool = false) {
         self.isFloating = isFloating
-        hostView.updatePresentation(
+        terminalHostView.updatePresentation(
             isFocused: isFocused,
             isFloating: isFloating,
             isLive: isLive,
@@ -143,7 +147,7 @@ final class TerminalPaneController: NSObject {
 
         isScrollModeActive = true
         isAwaitingSecondScrollModeG = false
-        hostView.setScrollModeActive(true)
+        terminalHostView.setScrollModeActive(true)
         terminalView.window?.makeFirstResponder(terminalView)
     }
 
@@ -154,7 +158,7 @@ final class TerminalPaneController: NSObject {
 
         isScrollModeActive = false
         isAwaitingSecondScrollModeG = false
-        hostView.setScrollModeActive(false)
+        terminalHostView.setScrollModeActive(false)
     }
 
     func handleScrollModeKeyEvent(_ event: NSEvent) -> Bool {
@@ -247,7 +251,7 @@ final class TerminalPaneController: NSObject {
     }
 
     func updateAppearance() {
-        hostView.updateAppearance()
+        terminalHostView.updateAppearance()
     }
 
     func applyTerminalSettings() {
@@ -261,35 +265,35 @@ final class TerminalPaneController: NSObject {
     }
 
     var debugBorderColor: NSColor {
-        hostView.debugBorderColor
+        terminalHostView.debugBorderColor
     }
 
     var debugBorderWidth: CGFloat {
-        hostView.debugBorderWidth
+        terminalHostView.debugBorderWidth
     }
 
     var debugUsesHiddenWindowPresentation: Bool {
-        hostView.debugUsesHiddenWindowPresentation
+        terminalHostView.debugUsesHiddenWindowPresentation
     }
 
     var debugVibrancyBlendingMode: NSVisualEffectView.BlendingMode {
-        hostView.debugVibrancyBlendingMode
+        terminalHostView.debugVibrancyBlendingMode
     }
 
     var debugVibrancyTintAlpha: CGFloat? {
-        hostView.debugVibrancyTintAlpha
+        terminalHostView.debugVibrancyTintAlpha
     }
 
     var debugTerminalFrame: NSRect {
-        hostView.debugTerminalFrame
+        terminalHostView.debugTerminalFrame
     }
 
     var debugTerminalPadding: CGFloat {
-        hostView.debugTerminalPadding
+        terminalHostView.debugTerminalPadding
     }
 
     var debugPaneBounds: NSRect {
-        hostView.debugPaneBounds
+        terminalHostView.debugPaneBounds
     }
 
     var debugRenderedTerminalConfig: String {
@@ -297,11 +301,11 @@ final class TerminalPaneController: NSObject {
     }
 
     var debugScrollModeIndicatorIsVisible: Bool {
-        hostView.debugScrollModeIndicatorIsVisible
+        terminalHostView.debugScrollModeIndicatorIsVisible
     }
 
     var debugScrollModeIndicatorFrames: (background: NSRect, label: NSRect) {
-        hostView.debugScrollModeIndicatorFrames
+        terminalHostView.debugScrollModeIndicatorFrames
     }
 
     private static func terminalConfiguration(

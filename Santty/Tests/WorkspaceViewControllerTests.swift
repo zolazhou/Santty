@@ -16,6 +16,72 @@ final class WorkspaceViewControllerTests: XCTestCase {
         }
     }
 
+    func testConvertPaneToBrowserAndBackPreservesPaneID() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            let paneID = try XCTUnwrap(controller.debugFocusedPaneID)
+
+            XCTAssertTrue(controller.debugFocusedPaneIsTerminal)
+
+            controller.debugPerformCommand(withID: "pane.browser.convert")
+
+            XCTAssertTrue(controller.debugFocusedPaneIsBrowser)
+            XCTAssertEqual(controller.debugFocusedPaneID, paneID)
+
+            controller.debugPerformCommand(withID: "pane.terminal.convert")
+
+            XCTAssertTrue(controller.debugFocusedPaneIsTerminal)
+            XCTAssertEqual(controller.debugFocusedPaneID, paneID)
+        }
+    }
+
+    func testNewBrowserPaneSplitsFocusedPane() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+
+            controller.debugPerformCommand(withID: "pane.browser.new")
+
+            XCTAssertEqual(controller.debugPaneIDsInTraversalOrder.count, 2)
+            XCTAssertTrue(controller.debugFocusedPaneIsBrowser)
+        }
+    }
+
+    func testSplitFromBrowserPaneCreatesTerminalPane() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            controller.debugPerformCommand(withID: "pane.browser.new")
+
+            XCTAssertTrue(controller.debugFocusedPaneIsBrowser)
+
+            controller.debugSplitFocusedPane(along: .horizontal)
+
+            XCTAssertEqual(controller.debugPaneIDsInTraversalOrder.count, 3)
+            XCTAssertTrue(controller.debugFocusedPaneIsTerminal)
+        }
+    }
+
+    func testBrowserPaneHostViewWebViewCoversBounds() async throws {
+        try await MainActor.run {
+            let hostView = BrowserPaneHostView(paneID: UUID())
+            hostView.frame = NSRect(x: 0, y: 0, width: 640, height: 400)
+            hostView.layoutSubtreeIfNeeded()
+
+            XCTAssertEqual(hostView.appearance?.name, .darkAqua)
+            XCTAssertTrue(hostView.webView.isHidden)
+            XCTAssertEqual(hostView.webView.frame, hostView.bounds)
+
+            hostView.showWebView()
+
+            XCTAssertFalse(hostView.webView.isHidden)
+            XCTAssertTrue(hostView.addressField.isHidden)
+
+            hostView.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
+            hostView.layoutSubtreeIfNeeded()
+
+            XCTAssertEqual(hostView.webView.frame, hostView.bounds)
+        }
+    }
+
     func testNewTabSelectsItAndCreatesIndependentPaneTree() async throws {
         try await MainActor.run {
             let controller = Self.makeController()
@@ -1355,6 +1421,9 @@ final class WorkspaceViewControllerTests: XCTestCase {
                     [
                         "pane.split.horizontal",
                         "pane.split.vertical",
+                        "pane.browser.new",
+                        "pane.browser.convert",
+                        "pane.terminal.convert",
                         "pane.resize.equalize",
                         "pane.resize.up",
                         "pane.resize.down",
@@ -1662,6 +1731,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
 
     @MainActor
     private static func makeController() -> WorkspaceViewController {
+        AppAppearanceSettings.resetWorkspaceEdgePadding()
         let controller = WorkspaceViewController()
         controller.debugLoadForTesting()
         return controller

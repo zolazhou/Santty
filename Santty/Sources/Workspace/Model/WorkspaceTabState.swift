@@ -10,7 +10,7 @@ struct ActiveFloatingPaneState: Equatable {
 final class WorkspaceTabState {
     let id: UUID
     var layoutNode: LayoutNode?
-    var paneControllers: [PaneID: TerminalPaneController]
+    var paneControllers: [PaneID: any PaneControlling]
     var paneAutoResizeConfigurations: [PaneID: PaneAutoResizeConfiguration]
     var focusedPaneID: PaneID?
     var customTitle: String?
@@ -24,7 +24,7 @@ final class WorkspaceTabState {
     init(
         id: UUID = UUID(),
         layoutNode: LayoutNode?,
-        paneControllers: [PaneID: TerminalPaneController],
+        paneControllers: [PaneID: any PaneControlling],
         paneAutoResizeConfigurations: [PaneID: PaneAutoResizeConfiguration],
         focusedPaneID: PaneID?,
         customTitle: String? = nil,
@@ -42,12 +42,16 @@ final class WorkspaceTabState {
         self.activeFloatingPaneState = activeFloatingPaneState
     }
 
-    var focusedPaneController: TerminalPaneController? {
+    var focusedPaneController: (any PaneControlling)? {
         guard let focusedPaneID else {
             return nil
         }
 
         return paneControllers[focusedPaneID]
+    }
+
+    func terminalPaneController(for paneID: PaneID) -> TerminalPaneController? {
+        paneControllers[paneID] as? TerminalPaneController
     }
 
     var displayTitle: String {

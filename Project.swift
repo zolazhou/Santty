@@ -16,8 +16,11 @@ let sparklePublicKey = environment["TUIST_SANTTY_SPARKLE_PUBLIC_KEY"] ?? ""
 var infoPlistEntries: [String: Plist.Value] = [
     "NSPrincipalClass": "NSApplication",
     "LSApplicationCategoryType": "public.app-category.productivity",
-    "CFBundleShortVersionString": "1.1.0",
-    "CFBundleVersion": "2",
+    "CFBundleShortVersionString": "1.2.0",
+    "CFBundleVersion": "3",
+    "NSAppTransportSecurity": [
+        "NSAllowsArbitraryLoadsInWebContent": true
+    ],
 ]
 if !sparkleFeedURL.isEmpty, !sparklePublicKey.isEmpty {
     infoPlistEntries["SUFeedURL"] = .string(sparkleFeedURL)
@@ -85,6 +88,7 @@ let project = Project(
                 .sdk(name: "CoreGraphics", type: .framework),
                 .sdk(name: "CoreText", type: .framework),
                 .sdk(name: "QuartzCore", type: .framework),
+                .sdk(name: "WebKit", type: .framework),
                 .sdk(name: "Metal", type: .framework),
                 .sdk(name: "MetalKit", type: .framework),
                 .sdk(name: "IOKit", type: .framework),
