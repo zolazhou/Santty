@@ -60,7 +60,11 @@ final class BrowserPaneHostView: NSView {
         addSubview(addressField)
 
         webView.onMouseDown = { [weak self] in
-            self?.onFocusRequest?(paneID)
+            guard let self, !self.isFloating else {
+                return
+            }
+
+            self.onFocusRequest?(paneID)
         }
         updateAppearance()
     }
