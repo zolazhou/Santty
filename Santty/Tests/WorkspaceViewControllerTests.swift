@@ -73,7 +73,8 @@ final class WorkspaceViewControllerTests: XCTestCase {
             hostView.showWebView()
 
             XCTAssertFalse(hostView.webView.isHidden)
-            XCTAssertTrue(hostView.addressField.isHidden)
+            // The location bar floats above the web content at the bottom.
+            XCTAssertEqual(hostView.locationBar.frame.minY, BrowserLocationBarView.bottomMargin)
 
             hostView.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
             hostView.layoutSubtreeIfNeeded()
@@ -1443,6 +1444,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
                         "pane.split.horizontal",
                         "pane.split.vertical",
                         "pane.browser.new",
+                        "pane.browser.location",
                         "pane.browser.convert",
                         "pane.terminal.convert",
                         "pane.resize.equalize",
