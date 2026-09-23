@@ -20,6 +20,7 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
     case movePaneUp
     case movePaneDown
     case newBrowserPane
+    case focusBrowserLocation
     case convertPaneToBrowser
     case convertPaneToTerminal
     case toggleFloatingPane
@@ -74,6 +75,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             "pane.move.down"
         case .newBrowserPane:
             "pane.browser.new"
+        case .focusBrowserLocation:
+            "pane.browser.location"
         case .convertPaneToBrowser:
             "pane.browser.convert"
         case .convertPaneToTerminal:
@@ -141,6 +144,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             "Move Pane Down"
         case .newBrowserPane:
             "New Browser Pane"
+        case .focusBrowserLocation:
+            "Focus Location Bar"
         case .convertPaneToBrowser:
             "Switch Pane to Browser"
         case .convertPaneToTerminal:
@@ -177,6 +182,7 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             .movePaneDividerRight, .focusPreviousPane, .focusNextPane, .focusLeftPane,
             .focusRightPane, .focusAbovePane, .focusBelowPane, .movePaneLeft,
             .movePaneRight, .movePaneUp, .movePaneDown, .newBrowserPane,
+            .focusBrowserLocation,
             .convertPaneToBrowser, .convertPaneToTerminal, .toggleFloatingPane, .detachPane,
             .attachDetachedPane, .openPromptEditor, .enterScrollMode, .autoResizePane, .closePane:
             "Pane"
@@ -223,6 +229,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             .init(.j, modifiers: [.option, .command])
         case .newBrowserPane, .convertPaneToBrowser, .convertPaneToTerminal:
             nil
+        case .focusBrowserLocation:
+            .init(.l, modifiers: [.control])
         case .toggleFloatingPane:
             .init(.f, modifiers: [.command, .shift])
         case .detachPane, .attachDetachedPane:

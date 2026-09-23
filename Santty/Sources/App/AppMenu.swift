@@ -204,6 +204,13 @@ enum AppMenu {
 
         addKeybindingMenuItem(
             to: menu,
+            action: .focusBrowserLocation,
+            selector: #selector(WorkspaceViewController.focusBrowserLocationBar(_:)),
+            target: target
+        )
+
+        addKeybindingMenuItem(
+            to: menu,
             action: .convertPaneToBrowser,
             selector: #selector(WorkspaceViewController.convertFocusedPaneToBrowser(_:)),
             target: target

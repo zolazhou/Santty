@@ -282,6 +282,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             }
         case #selector(newBrowserPane(_:)):
             focusedPaneController != nil && focusedPaneIsTiled
+        case #selector(focusBrowserLocationBar(_:)):
+            focusedBrowserPaneController != nil
         case #selector(convertFocusedPaneToBrowser(_:)):
             focusedTerminalPaneController != nil && focusedPaneIsTiled
         case #selector(convertFocusedPaneToTerminal(_:)):
@@ -365,6 +367,15 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         splitFocusedPane(along: .horizontal) {
             self.makeBrowserPaneController()
         }
+    }
+
+    @objc func focusBrowserLocationBar(_: Any?) {
+        guard let focusedBrowserPaneController else {
+            NSSound.beep()
+            return
+        }
+
+        focusedBrowserPaneController.focusLocationBar()
     }
 
     @objc func convertFocusedPaneToBrowser(_: Any?) {
@@ -2408,6 +2419,13 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
                 shortcut: KeybindingSettings.displayShortcut(for: .newBrowserPane),
                 isEnabled: focusedPaneController != nil && focusedPaneIsTiled,
                 perform: { [weak self] in self?.newBrowserPane(nil) }
+            ),
+            AppCommand(
+                id: "pane.browser.location",
+                title: "Focus Location Bar",
+                shortcut: KeybindingSettings.displayShortcut(for: .focusBrowserLocation),
+                isEnabled: focusedBrowserPaneController != nil,
+                perform: { [weak self] in self?.focusBrowserLocationBar(nil) }
             ),
             AppCommand(
                 id: "pane.browser.convert",
