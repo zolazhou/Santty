@@ -10,10 +10,16 @@ run = "xcrun swift-format format --configuration .swift-format --in-place --para
 
 [tasks."tuist:install"]
 description = "Install Tuist dependencies"
+depends = ["ghostty:prepare"]
 run = "tuist install"
+
+[tasks."ghostty:prepare"]
+description = "Prepare pinned Ghostty Swift package with pane text reading API"
+run = "sh Scripts/prepare-ghostty.sh"
 
 [tasks."tuist:generate"]
 description = "Generate the Xcode workspace without opening Xcode"
+depends = ["ghostty:prepare"]
 run = "tuist generate --no-open"
 
 [tasks."tuist:clean"]
@@ -22,6 +28,7 @@ run = "tuist clean"
 
 [tasks."tuist:regen"]
 description = "Install dependencies and regenerate the Xcode workspace"
+depends = ["ghostty:prepare"]
 run = "tuist install && tuist generate --no-open"
 
 [tasks."sparkle:generate-keys"]

@@ -77,6 +77,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         self.window = window
         self.workspaceViewController = workspaceViewController
+        CLIControlServer.shared.workspace = workspaceViewController
+        CLIControlServer.shared.start()
         installMainMenu()
     }
 
@@ -99,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NotificationCenter.default.removeObserver(keybindingSettingsObserver)
         }
         AgentEventMonitor.shared.stop()
+        CLIControlServer.shared.stop()
     }
 
     private func installEnabledAgentIntegrations() {

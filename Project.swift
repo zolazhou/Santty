@@ -50,10 +50,9 @@ let project = Project(
         )
     ),
     packages: [
-        .remote(
-            url: "https://github.com/Lakr233/libghostty-spm",
-            requirement: .upToNextMajor(from: "1.3.1")
-        ),
+        // Prepared by `mise run ghostty:prepare`: pinned upstream Swift source
+        // plus one text-reading API. The C core is still a binary dependency.
+        .local(path: "Vendor/libghostty-spm"),
         .remote(
             url: "https://github.com/sindresorhus/KeyboardShortcuts",
             requirement: .upToNextMajor(from: "2.4.0")
@@ -77,9 +76,25 @@ let project = Project(
             bundleId: "$(SANTTY_BUNDLE_IDENTIFIER)",
             deploymentTargets: .macOS("14.0"),
             infoPlist: .extendingDefault(with: infoPlistEntries),
-            sources: ["Santty/Sources/**"],
-            resources: ["Santty/Resources/**"],
+            sources: ["Santty/Sources/**", "Santty/Shared/**"],
+            resources: [
+                .glob(pattern: "Santty/Resources/**", excluding: ["Santty/Resources/Skills/**"]),
+                .folderReference(path: "Santty/Resources/Skills"),
+            ],
+            scripts: [
+                .post(
+                    script: """
+                    set -eu
+                    mkdir -p "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers"
+                    /usr/bin/ditto "$BUILT_PRODUCTS_DIR/santty" "$TARGET_BUILD_DIR/$CONTENTS_FOLDER_PATH/Helpers/santty"
+                    """,
+                    name: "Embed Santty CLI",
+                    inputPaths: ["$(BUILT_PRODUCTS_DIR)/santty"],
+                    outputPaths: ["$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/santty"]
+                )
+            ],
             dependencies: [
+                .target(name: "SanttyCLI"),
                 .package(product: "GhosttyTheme"),
                 .package(product: "GhosttyTerminal"),
                 .package(product: "KeyboardShortcuts"),
@@ -117,6 +132,21 @@ let project = Project(
                     ),
                 ]
             )
+        ),
+        .target(
+            name: "SanttyCLI",
+            destinations: .macOS,
+            product: .commandLineTool,
+            productName: "santty",
+            bundleId: "\(bundleIdentifier).cli",
+            deploymentTargets: .macOS("14.0"),
+            infoPlist: nil,
+            sources: ["SanttyCLI/**", "Santty/Shared/**"],
+            settings: .settings(base: signingSettings.merging([
+                "PRODUCT_MODULE_NAME": "SanttyCLI",
+                "SKIP_INSTALL": "YES",
+                "ENABLE_HARDENED_RUNTIME": "YES",
+            ]) { _, new in new })
         ),
         .target(
             name: "SanttyTests",
