@@ -31,7 +31,7 @@ struct AgentForegroundProcessObservation: Equatable {
 }
 
 struct AgentForegroundProcessInspector {
-    struct ProcessRecord: Equatable {
+    struct ProcessRecord: Equatable, Sendable {
         let processID: Int
         let parentProcessID: Int
         let processGroupID: Int
@@ -137,7 +137,7 @@ struct AgentForegroundProcessInspector {
         return agentKind(forExecutableName: executableName)
     }
 
-    private static func currentProcessTable() -> [ProcessRecord] {
+    static func currentProcessTable() -> [ProcessRecord] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
         process.arguments = ["-ewwaxo", "pid=,ppid=,pgid=,command="]

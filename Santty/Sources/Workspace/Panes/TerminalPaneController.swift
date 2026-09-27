@@ -140,6 +140,15 @@ final class TerminalPaneController: NSObject, PaneControlling {
         terminalView.copy(sender)
     }
 
+    func readForCLI(_ request: CLIRequest) throws -> CLIResponse {
+        // ponytail: snapshot the retained buffer before trimming; add a ranged
+        // Ghostty read API if polling large scrollback buffers becomes costly.
+        guard let text = terminalView.readScreenText() else {
+            throw CLIError("Terminal content is unavailable; the pane may not have started or may have closed.")
+        }
+        return try CLITextSnapshot.response(text, request: request)
+    }
+
     func enterScrollMode() {
         guard isLive else {
             return
@@ -317,6 +326,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
                 builder.withCustom("working-directory", workingDirectory)
             }
             builder.withCustom("env", "SANTTY_PANE_ID=\(paneID.uuidString)")
+            builder.withCustom("env", "SANTTY_CONTROL_SOCKET=\(CLITransport.socketPath)")
             builder.withCustom("env", "SANTTY_RUNTIME_OWNER=\(AgentIntegrationPaths.runtimeOwner)")
             builder.withCustom(
                 "env",

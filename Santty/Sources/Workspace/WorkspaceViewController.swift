@@ -144,6 +144,31 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 
     private var tabs: [WorkspaceTabState] = []
     private var selectedTabID: UUID?
+
+    func handleCLIRequest(_ request: CLIRequest) throws -> CLIResponse {
+        try request.validate()
+        if request.command == "list" {
+            return CLIResponse(tabs: tabs.map { tab in
+                CLITab(id: tab.id, title: tab.displayTitle, isSelected: tab.id == selectedTabID,
+                    panes: tab.paneControllers.values.sorted { $0.id.uuidString < $1.id.uuidString }.map { pane in
+                        let terminal = pane as? TerminalPaneController
+                        return CLIPane(id: pane.id, title: pane.displayTitle,
+                            kind: terminal == nil ? "browser" : "terminal",
+                            cwd: terminal?.workingDirectoryForNewPane,
+                            foregroundProcessGroupID: terminal?.foregroundProcessID,
+                            isFocused: tab.focusedPaneID == pane.id, isLive: pane.isLive,
+                            isDetached: tab.isPaneDetached(pane.id))
+                    })
+            })
+        }
+        guard let id = request.paneID,
+            let pane = tabs.lazy.compactMap({ $0.paneControllers[id] }).first
+        else { throw CLIError("Pane not found. Run santty list --json to refresh pane IDs.") }
+        guard let terminal = pane as? TerminalPaneController else {
+            throw CLIError("Only terminal panes support reading text.")
+        }
+        return try terminal.readForCLI(request)
+    }
     private var tilingView: WorkspaceTilingView?
     private var autoResizePanelController: PaneAutoResizePanelController?
     private var hasAppeared = false
