@@ -2710,6 +2710,10 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 
     @discardableResult
     func performKeybindingAction(_ action: KeybindingAction) -> Bool {
+        guard action != .focusBrowserLocation || focusedBrowserPaneController != nil else {
+            return false
+        }
+
         guard let command = commandPaletteCommands.first(where: { $0.id == action.commandID })
         else {
             return false

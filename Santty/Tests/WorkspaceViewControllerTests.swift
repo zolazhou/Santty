@@ -35,6 +35,67 @@ final class WorkspaceViewControllerTests: XCTestCase {
         }
     }
 
+    func testLocationShortcutNeverRegistersAsGlobalHotkey() async throws {
+        try await MainActor.run {
+            try Self.withRestoredKeybindingUserDefaults {
+                let action = KeybindingAction.focusBrowserLocation
+                UserDefaults.standard.removeObject(forKey: "KeyboardShortcuts_Santty.focusBrowserLocation")
+                let name = action.shortcutName
+                XCTAssertFalse(KeyboardShortcuts.isEnabled(for: name), "Creating the default must not capture Ctrl+L globally")
+
+                KeybindingSettings.resetShortcut(for: action)
+                XCTAssertFalse(KeyboardShortcuts.isEnabled(for: name), "Resetting must keep dispatch local")
+
+                KeyboardShortcuts.setShortcut(.init(.l, modifiers: [.control, .shift]), for: name)
+                KeybindingSettings.notifyChange(for: action)
+                XCTAssertFalse(KeyboardShortcuts.isEnabled(for: name), "Recording a shortcut must keep dispatch local")
+                XCTAssertEqual(KeybindingSettings.effectiveShortcut(for: action), .init(.l, modifiers: [.control, .shift]))
+            }
+        }
+    }
+
+    func testFocusLocationShortcutOnlyConsumesEventsInBrowserPane() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            let terminalPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+            let menu = NSMenu()
+            let paneMenu = NSMenu()
+            let parent = NSMenuItem()
+            parent.submenu = paneMenu
+            menu.addItem(parent)
+            let item = paneMenu.addItem(
+                withTitle: "Focus Location Bar",
+                action: #selector(WorkspaceViewController.focusBrowserLocationBar(_:)),
+                keyEquivalent: "l"
+            )
+            item.target = controller
+            item.keyEquivalentModifierMask = [.control]
+            let event = try XCTUnwrap(NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [.control],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: "\u{0C}",
+                charactersIgnoringModifiers: "\u{0C}",
+                isARepeat: false,
+                keyCode: UInt16(KeyboardShortcuts.Key.l.rawValue)
+            ))
+
+            XCTAssertFalse(controller.performKeybindingAction(.focusBrowserLocation))
+            XCTAssertFalse(AppMenuKeyEquivalents.perform(event, in: menu))
+
+            controller.debugPerformCommand(withID: "pane.browser.new")
+            XCTAssertTrue(controller.performKeybindingAction(.focusBrowserLocation))
+            XCTAssertTrue(AppMenuKeyEquivalents.perform(event, in: menu))
+
+            controller.debugFocusPane(withID: terminalPaneID)
+            XCTAssertFalse(controller.performKeybindingAction(.focusBrowserLocation))
+            XCTAssertFalse(AppMenuKeyEquivalents.perform(event, in: menu))
+        }
+    }
+
     func testNewBrowserPaneSplitsFocusedPane() async throws {
         try await MainActor.run {
             let controller = Self.makeController()

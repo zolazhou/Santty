@@ -255,7 +255,10 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
     }
 
     var shortcutName: KeyboardShortcuts.Name {
-        KeyboardShortcuts.Name("Santty.\(rawValue)", default: defaultShortcut)
+        let name = KeyboardShortcuts.Name("Santty.\(rawValue)", default: defaultShortcut)
+        // Defaults register global hotkeys; Santty dispatches shortcuts locally.
+        KeyboardShortcuts.disable(name)
+        return name
     }
 }
 
@@ -276,6 +279,8 @@ enum KeybindingSettings {
     }
 
     static func notifyChange(for action: KeybindingAction) {
+        // Recording and resetting shortcuts also register them globally.
+        KeyboardShortcuts.disable(action.shortcutName)
         NotificationCenter.default.post(name: didChangeNotification, object: action)
     }
 

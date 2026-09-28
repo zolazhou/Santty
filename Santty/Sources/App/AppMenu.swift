@@ -35,6 +35,8 @@ enum AppMenuKeyEquivalents {
     }
 
     private static func matchingItem(for event: NSEvent, in menu: NSMenu) -> NSMenuItem? {
+        menu.update()
+
         for item in menu.items {
             if let submenu = item.submenu,
                 let match = matchingItem(for: event, in: submenu)
