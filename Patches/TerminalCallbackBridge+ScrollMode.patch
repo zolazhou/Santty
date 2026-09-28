@@ -1,0 +1,14 @@
+--- a/Sources/GhosttyTerminal/InMemory/TerminalCallbackBridge.swift
++++ b/Sources/GhosttyTerminal/InMemory/TerminalCallbackBridge.swift
+@@ -22,0 +23 @@
++    var scrollModeViewport: TerminalScrollViewport?
+@@ -29,0 +31,9 @@
++        case GHOSTTY_ACTION_SCROLLBAR:
++            let value = action.action.scrollbar
++            let viewport = TerminalScrollViewport(
++                total: Int(clamping: value.total), offset: Int(clamping: value.offset),
++                rows: Int(clamping: value.len)
++            )
++            scrollModeViewport = viewport
++            (delegate as? any TerminalScrollViewportDelegate)?.terminalDidScroll(viewport)
++

@@ -1593,7 +1593,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
         }
     }
 
-    func testScrollModeMapsVimKeysToGhosttyBindingActions() async throws {
+    func testScrollModeMapsVimKeysToNavigation() async throws {
         try await MainActor.run {
             func action(
                 _ key: String,
@@ -1611,37 +1611,57 @@ final class WorkspaceViewControllerTests: XCTestCase {
 
             XCTAssertEqual(
                 try action("j"),
-                .performBindingAction("scroll_page_lines:1")
+                .move(.down)
             )
             XCTAssertEqual(
                 try action("k"),
-                .performBindingAction("scroll_page_lines:-1")
+                .move(.up)
             )
             XCTAssertEqual(
                 try action("d", modifiers: .control),
-                .performBindingAction("scroll_page_fractional:0.5")
+                .move(.halfDown)
             )
             XCTAssertEqual(
                 try action("u", modifiers: .control),
-                .performBindingAction("scroll_page_fractional:-0.5")
+                .move(.halfUp)
             )
             XCTAssertEqual(
                 try action("f", modifiers: .control),
-                .performBindingAction("scroll_page_down")
+                .move(.pageDown)
             )
             XCTAssertEqual(
                 try action("b", modifiers: .control),
-                .performBindingAction("scroll_page_up")
+                .move(.pageUp)
             )
             XCTAssertEqual(try action("g"), .awaitSecondG)
             XCTAssertEqual(
                 try action("g", awaitingSecondG: true),
-                .performBindingAction("scroll_to_top")
+                .move(.top)
             )
             XCTAssertEqual(
                 try action("g", modifiers: .shift),
-                .performBindingAction("scroll_to_bottom")
+                .move(.bottom)
             )
+            XCTAssertEqual(try action("h"), .move(.left))
+            XCTAssertEqual(try action("l"), .move(.right))
+            let wordActions: [(String, TerminalScrollMovement, TerminalScrollMovement)] = [
+                ("w", .wordForward(big: false), .wordForward(big: true)),
+                ("b", .wordBackward(big: false), .wordBackward(big: true)),
+                ("e", .wordEnd(big: false), .wordEnd(big: true)),
+            ]
+            for (key, small, big) in wordActions {
+                XCTAssertEqual(try action(key), .move(small))
+                XCTAssertEqual(try action(key, modifiers: .shift), .move(big))
+            }
+            XCTAssertEqual(try action("^", modifiers: .shift), .move(.firstNonblank))
+            XCTAssertEqual(try action("0"), .move(.lineStart))
+            XCTAssertEqual(try action("$", modifiers: .shift), .move(.lineEnd))
+            XCTAssertEqual(try action("v"), .select(linewise: false))
+            XCTAssertEqual(try action("v", modifiers: .shift), .select(linewise: true))
+            XCTAssertEqual(try action("y"), .copy)
+            XCTAssertEqual(try action("c", modifiers: .command), .copy)
+            XCTAssertEqual(try action("\u{1b}", keyCode: 53), .cancel)
+            XCTAssertEqual(try action("y", awaitingSecondG: true), .copy)
             XCTAssertEqual(try action("q"), .exit)
             XCTAssertEqual(try action("x"), .consume)
         }
