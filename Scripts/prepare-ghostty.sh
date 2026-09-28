@@ -24,3 +24,8 @@ if [ "$(cat "$package_dir/.santty-revision" 2>/dev/null || true)" != "$revision"
 fi
 cp "$repo_dir/Patches/TerminalSurface+ReadText.swift" \
    "$package_dir/Sources/GhosttyTerminal/Surface/TerminalSurface+ReadText.swift"
+cp "$repo_dir/Patches/TerminalSurface+ScrollMode.swift" \
+   "$package_dir/Sources/GhosttyTerminal/Surface/TerminalSurface+ScrollMode.swift"
+if ! grep -q 'var scrollModeViewport:' "$package_dir/Sources/GhosttyTerminal/InMemory/TerminalCallbackBridge.swift"; then
+    patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/TerminalCallbackBridge+ScrollMode.patch"
+fi

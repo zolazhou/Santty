@@ -38,7 +38,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
     }
 
     var focusTargetView: NSView {
-        isLive ? terminalView : terminalHostView
+        terminalHostView.scrollModeView ?? (isLive ? terminalView : terminalHostView)
     }
 
     var foregroundProcessID: Int? {
@@ -137,7 +137,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
     }
 
     func copySelection(_ sender: Any?) {
-        terminalView.copy(sender)
+        terminalHostView.copy(sender)
     }
 
     func readForCLI(_ request: CLIRequest) throws -> CLIResponse {
@@ -150,14 +150,21 @@ final class TerminalPaneController: NSObject, PaneControlling {
     }
 
     func enterScrollMode() {
-        guard isLive else {
+        guard isLive, !isScrollModeActive else {
             return
         }
 
+        guard terminalController.setTerminalConfiguration(Self.terminalConfiguration(
+            for: id, workingDirectory: currentWorkingDirectory, scrollMode: true
+        )) else {
+            NSSound.beep()
+            return
+        }
+        terminalView.clearScrollModeSelection()
+
         isScrollModeActive = true
         isAwaitingSecondScrollModeG = false
-        terminalHostView.setScrollModeActive(true)
-        terminalView.window?.makeFirstResponder(terminalView)
+        terminalHostView.showScrollMode()
     }
 
     func exitScrollMode() {
@@ -167,12 +174,20 @@ final class TerminalPaneController: NSObject, PaneControlling {
 
         isScrollModeActive = false
         isAwaitingSecondScrollModeG = false
-        terminalHostView.setScrollModeActive(false)
+        terminalHostView.hideScrollMode()
+        terminalController.setTerminalConfiguration(Self.terminalConfiguration(
+            for: id, workingDirectory: currentWorkingDirectory
+        ))
     }
 
     func handleScrollModeKeyEvent(_ event: NSEvent) -> Bool {
         guard isScrollModeActive, event.type == .keyDown else {
             return false
+        }
+        if let eventWindow = event.window {
+            guard eventWindow === terminalView.window,
+                  eventWindow.firstResponder === terminalHostView.scrollModeView
+            else { return false }
         }
 
         let action = TerminalScrollModeKeyAction(
@@ -184,8 +199,14 @@ final class TerminalPaneController: NSObject, PaneControlling {
         switch action {
         case .exit:
             exitScrollMode()
-        case let .performBindingAction(actionName):
-            terminalView.performBindingAction(actionName)
+        case .cancel:
+            if terminalHostView.scrollModeView?.cancelSelection() != true { exitScrollMode() }
+        case let .move(movement):
+            terminalHostView.scrollModeView?.move(movement)
+        case let .select(linewise):
+            terminalHostView.scrollModeView?.toggleSelection(linewise: linewise)
+        case .copy:
+            terminalHostView.scrollModeView?.copySelection()
         case .awaitSecondG:
             isAwaitingSecondScrollModeG = true
         case .consume:
@@ -268,7 +289,8 @@ final class TerminalPaneController: NSObject, PaneControlling {
         let _ = terminalController.setTerminalConfiguration(
             Self.terminalConfiguration(
                 for: id,
-                workingDirectory: currentWorkingDirectory
+                workingDirectory: currentWorkingDirectory,
+                scrollMode: isScrollModeActive
             )
         )
     }
@@ -319,9 +341,18 @@ final class TerminalPaneController: NSObject, PaneControlling {
 
     private static func terminalConfiguration(
         for paneID: PaneID,
-        workingDirectory: String?
+        workingDirectory: String?,
+        scrollMode: Bool = false
     ) -> TerminalConfiguration {
         TerminalConfiguration(startingFrom: TerminalDefaults.configuration) { builder in
+            if scrollMode {
+                // Synthetic selection gestures must never reach the running app,
+                // activate links or move the shell's input cursor.
+                builder.withCustom("mouse-reporting", "false")
+                builder.withCustom("cursor-click-to-move", "false")
+                builder.withCustom("copy-on-select", "false")
+                builder.withCustom("link-url", "false")
+            }
             if let workingDirectory {
                 builder.withCustom("working-directory", workingDirectory)
             }
@@ -365,7 +396,15 @@ extension TerminalPaneController: TerminalSurfaceTitleDelegate {
 }
 
 extension TerminalPaneController: TerminalSurfaceResizeDelegate {
-    func terminalDidResize(columns _: Int, rows _: Int) {}
+    func terminalDidResize(columns _: Int, rows _: Int) {
+        terminalHostView.scrollModeView?.needsLayout = true
+    }
+}
+
+extension TerminalPaneController: TerminalScrollViewportDelegate {
+    func terminalDidScroll(_ viewport: TerminalScrollViewport) {
+        terminalHostView.scrollModeView?.updateViewport(viewport)
+    }
 }
 
 extension TerminalPaneController: TerminalSurfacePwdDelegate {
@@ -399,7 +438,10 @@ extension TerminalPaneController: TerminalSurfaceFocusDelegate {
 
 enum TerminalScrollModeKeyAction: Equatable {
     case exit
-    case performBindingAction(String)
+    case cancel
+    case move(TerminalScrollMovement)
+    case select(linewise: Bool)
+    case copy
     case awaitSecondG
     case consume
 
@@ -408,7 +450,7 @@ enum TerminalScrollModeKeyAction: Equatable {
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
 
         if event.keyCode == 53 || event.characters == "\u{1b}" {
-            self = .exit
+            self = .cancel
             return
         }
 
@@ -418,31 +460,43 @@ enum TerminalScrollModeKeyAction: Equatable {
         }
 
         if awaitingSecondG {
-            self = modifiers.isEmpty && key == "g"
-                ? .performBindingAction("scroll_to_top")
-                : .consume
-            return
+            if modifiers.isEmpty, key == "g" {
+                self = .move(.top)
+                return
+            }
         }
 
         switch (modifiers, key, event.keyCode) {
-        case ([], "j", _):
-            self = .performBindingAction("scroll_page_lines:1")
-        case ([], "k", _):
-            self = .performBindingAction("scroll_page_lines:-1")
+        case ([], "h", _), ([], _, 123): self = .move(.left)
+        case ([], "l", _), ([], _, 124): self = .move(.right)
+        case ([], "j", _), ([], _, 125): self = .move(.down)
+        case ([], "k", _), ([], _, 126): self = .move(.up)
+        case ([], "0", _): self = .move(.lineStart)
+        case ([.shift], "^", _), ([.shift], "6", _), ([], "^", _): self = .move(.firstNonblank)
+        case ([], "w", _): self = .move(.wordForward(big: false))
+        case ([], "b", _): self = .move(.wordBackward(big: false))
+        case ([], "e", _): self = .move(.wordEnd(big: false))
+        case ([.shift], "w", _): self = .move(.wordForward(big: true))
+        case ([.shift], "b", _): self = .move(.wordBackward(big: true))
+        case ([.shift], "e", _): self = .move(.wordEnd(big: true))
+        case ([.shift], "$", _), ([.shift], "4", _), ([], "$", _): self = .move(.lineEnd)
+        case ([], "v", _): self = .select(linewise: false)
+        case ([.shift], "v", _): self = .select(linewise: true)
+        case ([], "y", _), ([.command], "c", _): self = .copy
         case ([.control], "d", _):
-            self = .performBindingAction("scroll_page_fractional:0.5")
+            self = .move(.halfDown)
         case ([.control], "u", _):
-            self = .performBindingAction("scroll_page_fractional:-0.5")
+            self = .move(.halfUp)
         case ([.control], "f", _), ([], _, 121):
-            self = .performBindingAction("scroll_page_down")
+            self = .move(.pageDown)
         case ([.control], "b", _), ([], _, 116):
-            self = .performBindingAction("scroll_page_up")
+            self = .move(.pageUp)
         case ([.shift], "g", _), ([], _, 119):
-            self = .performBindingAction("scroll_to_bottom")
+            self = .move(.bottom)
         case ([], "g", _):
             self = .awaitSecondG
         case ([], _, 115):
-            self = .performBindingAction("scroll_to_top")
+            self = .move(.top)
         default:
             self = .consume
         }

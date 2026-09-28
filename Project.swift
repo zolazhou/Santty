@@ -51,7 +51,7 @@ let project = Project(
     ),
     packages: [
         // Prepared by `mise run ghostty:prepare`: pinned upstream Swift source
-        // plus one text-reading API. The C core is still a binary dependency.
+        // plus text/selection bridges. The C core is still a binary dependency.
         .local(path: "Vendor/libghostty-spm"),
         .remote(
             url: "https://github.com/sindresorhus/KeyboardShortcuts",

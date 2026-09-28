@@ -99,6 +99,7 @@ final class TerminalPaneHostView: NSView {
     private let statusLabel = NSTextField(labelWithString: "")
     private let scrollModeBackgroundView = NSView()
     private let scrollModeLabel = NSTextField(labelWithString: "SCROLL")
+    private(set) var scrollModeView: TerminalScrollModeView?
     private var isFocused = false
     private var isFloating = false
     private var terminalPadding = TerminalSettings.padding
@@ -237,10 +238,15 @@ final class TerminalPaneHostView: NSView {
     }
 
     @objc func copy(_ sender: Any?) {
+        if let scrollModeView {
+            scrollModeView.copySelection()
+            return
+        }
         terminalView.copy(sender)
     }
 
     @objc func paste(_ sender: Any?) {
+        guard scrollModeView == nil else { return }
         if pasteTerminalURLsFromGeneralPasteboard() {
             return
         }
@@ -249,6 +255,7 @@ final class TerminalPaneHostView: NSView {
     }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        guard scrollModeView == nil else { return [] }
         guard let types = sender.draggingPasteboard.types else {
             return []
         }
@@ -257,6 +264,7 @@ final class TerminalPaneHostView: NSView {
     }
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        guard scrollModeView == nil else { return false }
         guard let text = TerminalPasteboardText.dropInsertionText(from: sender.draggingPasteboard)
         else {
             return false
@@ -282,6 +290,37 @@ final class TerminalPaneHostView: NSView {
         scrollModeBackgroundView.isHidden = !active
         scrollModeLabel.isHidden = !active
         needsLayout = true
+    }
+
+    func showScrollMode() {
+        let view = TerminalScrollModeView(terminalView: terminalView)
+        view.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(view, positioned: .above, relativeTo: terminalView)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: terminalView.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: terminalView.trailingAnchor),
+            view.topAnchor.constraint(equalTo: terminalView.topAnchor),
+            view.bottomAnchor.constraint(equalTo: terminalView.bottomAnchor),
+        ])
+        scrollModeView = view
+        view.onSelectionChange = { [weak self] title in
+            self?.scrollModeLabel.stringValue = title
+            self?.scrollModeLabel.setAccessibilityLabel("\(title.lowercased()) mode active")
+            self?.needsLayout = true
+        }
+        scrollModeLabel.stringValue = "SCROLL"
+        setScrollModeActive(true)
+        layoutSubtreeIfNeeded()
+        window?.makeFirstResponder(view)
+    }
+
+    func hideScrollMode() {
+        let hadFocus = window?.firstResponder === scrollModeView
+        scrollModeView?.cancelSelection()
+        scrollModeView?.removeFromSuperview()
+        scrollModeView = nil
+        setScrollModeActive(false)
+        if hadFocus { window?.makeFirstResponder(terminalView) }
     }
 
     private func applyPaneBackgroundColor() {
