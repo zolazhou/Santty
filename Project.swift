@@ -55,7 +55,7 @@ let project = Project(
         .local(path: "Vendor/libghostty-spm"),
         .remote(
             url: "https://github.com/sindresorhus/KeyboardShortcuts",
-            requirement: .upToNextMajor(from: "2.4.0")
+            requirement: .upToNextMajor(from: "3.1.0")
         ),
         .remote(
             url: "https://github.com/sparkle-project/Sparkle",

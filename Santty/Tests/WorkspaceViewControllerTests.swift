@@ -4,6 +4,31 @@ import XCTest
 @testable import Santty
 
 final class WorkspaceViewControllerTests: XCTestCase {
+    func testClearingKeybindingDoesNotRestoreDefaultShortcut() async throws {
+        try await MainActor.run {
+            try Self.withRestoredKeybindingUserDefaults {
+                let action = KeybindingAction.splitPaneHorizontally
+                KeybindingSettings.resetShortcut(for: action)
+                XCTAssertNotNil(KeybindingSettings.effectiveShortcut(for: action))
+
+                KeyboardShortcuts.setShortcut(nil, for: action.shortcutName)
+                KeybindingSettings.notifyChange(for: action)
+
+                XCTAssertNil(KeybindingSettings.effectiveShortcut(for: action))
+                XCTAssertNil(KeybindingSettings.displayShortcut(for: action))
+                let menuItem = NSMenuItem()
+                KeybindingSettings.applyShortcut(for: action, to: menuItem)
+                XCTAssertTrue(menuItem.keyEquivalent.isEmpty)
+                let event = try XCTUnwrap(Self.makeKeyEvent(
+                    "\\", modifiers: [.command, .shift],
+                    keyCode: UInt16(KeyboardShortcuts.Key.backslash.rawValue)
+                ))
+                XCTAssertNil(KeybindingSettings.action(matching: event))
+                XCTAssertFalse(KeyboardShortcuts.isEnabled(for: action.shortcutName))
+            }
+        }
+    }
+
     func testInitialWorkspaceCreatesOneTabWithOnePane() async throws {
         try await MainActor.run {
             let controller = Self.makeController()
@@ -1860,6 +1885,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
         )
     }
 
+    @MainActor
     private static func withRestoredKeybindingUserDefaults(_ operation: () throws -> Void) rethrows {
         let keys = KeybindingAction.allCases.map {
             "KeyboardShortcuts_\($0.shortcutName.rawValue)"

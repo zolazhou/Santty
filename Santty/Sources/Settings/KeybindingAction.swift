@@ -254,14 +254,16 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
         }
     }
 
+    @MainActor
     var shortcutName: KeyboardShortcuts.Name {
-        let name = KeyboardShortcuts.Name("Santty.\(rawValue)", default: defaultShortcut)
+        let name = KeyboardShortcuts.Name("Santty.\(rawValue)", initial: defaultShortcut)
         // Defaults register global hotkeys; Santty dispatches shortcuts locally.
         KeyboardShortcuts.disable(name)
         return name
     }
 }
 
+@MainActor
 enum KeybindingSettings {
     static let didChangeNotification = Notification.Name("SanttyKeybindingSettingsDidChange")
 
@@ -270,7 +272,7 @@ enum KeybindingSettings {
     }
 
     static func effectiveShortcut(for action: KeybindingAction) -> KeyboardShortcuts.Shortcut? {
-        shortcut(for: action) ?? action.defaultShortcut
+        shortcut(for: action)
     }
 
     static func resetShortcut(for action: KeybindingAction) {
@@ -284,7 +286,6 @@ enum KeybindingSettings {
         NotificationCenter.default.post(name: didChangeNotification, object: action)
     }
 
-    @MainActor
     static func displayShortcut(for action: KeybindingAction) -> String? {
         effectiveShortcut(for: action)?.description
     }
@@ -299,7 +300,6 @@ enum KeybindingSettings {
         }
     }
 
-    @MainActor
     static func applyShortcut(for action: KeybindingAction, to menuItem: NSMenuItem) {
         guard let shortcut = effectiveShortcut(for: action),
             let keyEquivalent = shortcut.nsMenuItemKeyEquivalent
