@@ -152,7 +152,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
                 CLITab(id: tab.id, title: tab.displayTitle, isSelected: tab.id == selectedTabID,
                     panes: tab.paneControllers.values.sorted { $0.id.uuidString < $1.id.uuidString }.map { pane in
                         let terminal = pane as? TerminalPaneController
-                        return CLIPane(id: pane.id, title: pane.displayTitle,
+                        return CLIPane(id: pane.id, title: pane.displayTitle, name: pane.name,
                             kind: terminal == nil ? "browser" : "terminal",
                             cwd: terminal?.workingDirectoryForNewPane,
                             foregroundProcessGroupID: terminal?.foregroundProcessID,
@@ -179,6 +179,10 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     private var agentSessionObserver: NSObjectProtocol?
     private var agentManagerPopoverController: AgentManagerPopoverController?
     private var animatingDetachedPaneIDs: Set<PaneID> = []
+    private var paneNameRevealTask: Task<Void, Never>?
+    private var paneNamesVisible = false
+    private var isCommandHeld = false
+    private var paneNameFocusObservers: [NSObjectProtocol] = []
 
     private var selectedTabIndex: Int? {
         guard let selectedTabID else {
@@ -268,10 +272,30 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             }
         }
         updateAgentStatus()
+        for notification in [NSWindow.didResignKeyNotification, NSApplication.didResignActiveNotification] {
+            paneNameFocusObservers.append(NotificationCenter.default.addObserver(
+                forName: notification, object: nil, queue: .main
+            ) { [weak self] note in
+                let isAppDeactivation = note.name == NSApplication.didResignActiveNotification
+                let window = note.object as? NSWindow
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if isAppDeactivation || window === self.view.window
+                    {
+                        self.cancelPaneNameReveal()
+                        self.isCommandHeld = false
+                    }
+                }
+            })
+        }
     }
 
     deinit {
         MainActor.assumeIsolated {
+            paneNameRevealTask?.cancel()
+            for observer in paneNameFocusObservers {
+                NotificationCenter.default.removeObserver(observer)
+            }
             if let appearanceSettingsObserver {
                 NotificationCenter.default.removeObserver(appearanceSettingsObserver)
             }
@@ -295,6 +319,44 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         }
 
         applyFocusedPaneResponder()
+    }
+
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        cancelPaneNameReveal()
+        isCommandHeld = false
+    }
+
+    func handlePaneNameEvent(_ event: NSEvent) {
+        let wasCommandHeld = isCommandHeld
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .control, .option, .function])
+        isCommandHeld = modifiers.contains(.command)
+        guard event.type == .flagsChanged, modifiers == [.command] else {
+            cancelPaneNameReveal()
+            return
+        }
+        // A shortcut or another modifier suppresses this hold until Cmd is released.
+        guard !wasCommandHeld else { return }
+        paneNameRevealTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(350)) }
+            catch { return }
+            self?.setPaneNamesVisible(true)
+        }
+    }
+
+    private func cancelPaneNameReveal() {
+        paneNameRevealTask?.cancel()
+        paneNameRevealTask = nil
+        setPaneNamesVisible(false)
+    }
+
+    private func setPaneNamesVisible(_ visible: Bool) {
+        paneNamesVisible = visible
+        for tab in tabs {
+            for pane in tab.paneControllers.values {
+                pane.setNameVisible(visible && tab.id == selectedTabID)
+            }
+        }
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -331,7 +393,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             canMovePane(.left)
         case #selector(movePaneRight(_:)):
             canMovePane(.right)
-        case #selector(closePane(_:)):
+        case #selector(closePane(_:)), #selector(renamePane(_:)):
             focusedPaneController != nil
         case #selector(showAutoResizeSettings(_:)):
             focusedPaneController != nil && focusedPaneIsTiled
@@ -686,6 +748,33 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         updateSelectedTabTitle(textField.stringValue)
     }
 
+    @objc func renamePane(_: Any?) {
+        guard let pane = focusedPaneController else {
+            NSSound.beep()
+            return
+        }
+        cancelPaneNameReveal()
+        let alert = NSAlert()
+        alert.messageText = "Rename Pane"
+        alert.informativeText = "Hold Command to show pane names. Leave empty to remove the name."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.usesSingleLineMode = true
+        field.stringValue = pane.name ?? ""
+        field.placeholderString = "Pane name"
+        field.selectText(nil)
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        updatePaneName(field.stringValue, for: pane)
+    }
+
+    private func updatePaneName(_ name: String, for pane: any PaneControlling) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        pane.name = trimmed.isEmpty ? nil : trimmed
+    }
+
     @objc func focusNextTab(_: Any?) {
         guard let selectedTabIndex, !tabs.isEmpty else {
             return
@@ -873,6 +962,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             AgentSessionStore.shared.removeSessions(forPaneID: focusedPaneID)
         }
 
+        newPaneController.name = tabState.paneControllers[focusedPaneID]?.name
         tabState.paneControllers[focusedPaneID] = newPaneController
         tabState.paneAutoResizeConfigurations[focusedPaneID] =
             WorkspaceFocusZoomConfiguration.defaultAutoResizeConfiguration
@@ -1443,6 +1533,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         guard tabs.contains(where: { $0.id == tabID }) else {
             return
         }
+
+        cancelPaneNameReveal()
 
         if tabID == selectedTabID {
             if let selectedTabState {
@@ -2328,6 +2420,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 
     private func updatePanePresentation(in tabState: WorkspaceTabState) {
         for (paneID, paneController) in tabState.paneControllers {
+            paneController.setNameVisible(paneNamesVisible && tabState.id == selectedTabID)
             paneController.updatePresentation(
                 isFocused: paneID == tabState.focusedPaneID,
                 isFloating: tabState.activeFloatingPaneState?.paneID == paneID
@@ -2420,6 +2513,13 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 
     var commandPaletteCommands: [AppCommand] {
         [
+            AppCommand(
+                id: "pane.rename",
+                title: "Rename Pane",
+                shortcut: nil,
+                isEnabled: focusedPaneController != nil,
+                perform: { [weak self] in self?.renamePane(nil) }
+            ),
             AppCommand(
                 id: "pane.split.horizontal",
                 title: "Split Horizontally",
@@ -2796,6 +2896,15 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 }
 
 extension WorkspaceViewController {
+    func debugSetFocusedPaneName(_ name: String) {
+        if let pane = focusedPaneController { updatePaneName(name, for: pane) }
+    }
+
+    func debugPaneNameBadge(for paneID: PaneID) -> PaneNameBadgeView? {
+        let host = tabState(containing: paneID)?.paneControllers[paneID]?.hostView
+        return host?.subviews.compactMap { $0 as? PaneNameBadgeView }.first
+    }
+
     func debugLoadForTesting(frame: NSRect = NSRect(x: 0, y: 0, width: 1200, height: 800)) {
         loadViewIfNeeded()
         view.frame = frame

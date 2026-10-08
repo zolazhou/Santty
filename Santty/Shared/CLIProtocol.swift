@@ -62,6 +62,7 @@ struct CLIRequest: Codable, Sendable {
 struct CLIPane: Codable, Sendable {
     let id: UUID
     let title: String
+    var name: String? = nil
     let kind: String
     let cwd: String?
     let foregroundProcessGroupID: Int?
@@ -69,6 +70,26 @@ struct CLIPane: Codable, Sendable {
     let isFocused: Bool
     let isLive: Bool
     let isDetached: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, name, kind, cwd, foregroundProcessGroupID, processes
+        case isFocused, isLive, isDetached
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        // Keep the name key present even for unnamed panes.
+        try container.encode(name, forKey: .name)
+        try container.encode(kind, forKey: .kind)
+        try container.encodeIfPresent(cwd, forKey: .cwd)
+        try container.encodeIfPresent(foregroundProcessGroupID, forKey: .foregroundProcessGroupID)
+        try container.encode(processes, forKey: .processes)
+        try container.encode(isFocused, forKey: .isFocused)
+        try container.encode(isLive, forKey: .isLive)
+        try container.encode(isDetached, forKey: .isDetached)
+    }
 }
 
 struct CLIProcess: Codable, Sendable {

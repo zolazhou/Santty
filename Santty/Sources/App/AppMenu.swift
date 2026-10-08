@@ -181,6 +181,14 @@ enum AppMenu {
         let menu = NSMenu(title: "Pane")
         item.submenu = menu
 
+        let renameItem = menu.addItem(
+            withTitle: "Rename Pane...",
+            action: #selector(WorkspaceViewController.renamePane(_:)),
+            keyEquivalent: ""
+        )
+        renameItem.target = target
+        menu.addItem(.separator())
+
         addKeybindingMenuItem(
             to: menu,
             action: .splitPaneHorizontally,

@@ -4,6 +4,122 @@ import XCTest
 @testable import Santty
 
 final class WorkspaceViewControllerTests: XCTestCase {
+    @MainActor
+    func testPaneNamesRevealAfterCommandHoldAndCancelForShortcutsAndFocusLoss() async throws {
+        let controller = Self.makeController()
+        let firstID = try XCTUnwrap(controller.debugFocusedPaneID)
+        controller.debugSetFocusedPaneName("API")
+        controller.debugSplitFocusedPane(along: .horizontal)
+        let secondID = try XCTUnwrap(controller.debugFocusedPaneID)
+        controller.debugSetFocusedPaneName("Frontend")
+        controller.debugSplitFocusedPane(along: .vertical)
+        let unnamedID = try XCTUnwrap(controller.debugFocusedPaneID)
+        let badges = try [firstID, secondID, unnamedID].map {
+            try XCTUnwrap(controller.debugPaneNameBadge(for: $0))
+        }
+        let terminalFrame = controller.debugTerminalFrame(for: firstID)
+        func flags(_ modifiers: NSEvent.ModifierFlags) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(
+                with: .flagsChanged, location: .zero, modifierFlags: modifiers,
+                timestamp: 0, windowNumber: 0, context: nil, characters: "",
+                charactersIgnoringModifiers: "", isARepeat: false, keyCode: 55))
+        }
+        let down = try flags(.command)
+        let up = try flags([])
+        XCTAssertTrue(badges.allSatisfy(\.isHidden))
+        controller.handlePaneNameEvent(down)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(badges.allSatisfy(\.isHidden))
+        controller.handlePaneNameEvent(up)
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertTrue(badges.allSatisfy(\.isHidden))
+
+        controller.handlePaneNameEvent(down)
+        try await Task.sleep(for: .milliseconds(450))
+        XCTAssertFalse(badges[0].isHidden)
+        XCTAssertFalse(badges[1].isHidden)
+        XCTAssertTrue(badges[2].isHidden)
+        controller.view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(controller.debugTerminalFrame(for: firstID), terminalFrame)
+        XCTAssertNil(badges[0].hitTest(.zero))
+        controller.handlePaneNameEvent(up)
+        XCTAssertTrue(badges.allSatisfy(\.isHidden))
+
+        controller.handlePaneNameEvent(down)
+        controller.handlePaneNameEvent(try XCTUnwrap(Self.makeKeyEvent("c", modifiers: .command)))
+        controller.handlePaneNameEvent(down)
+        try await Task.sleep(for: .milliseconds(450))
+        XCTAssertTrue(badges.allSatisfy(\.isHidden))
+
+        controller.handlePaneNameEvent(up)
+        controller.handlePaneNameEvent(down)
+        controller.handlePaneNameEvent(try flags([.command, .shift]))
+        controller.handlePaneNameEvent(down)
+        try await Task.sleep(for: .milliseconds(450))
+        XCTAssertTrue(badges.allSatisfy(\.isHidden))
+
+        controller.handlePaneNameEvent(up)
+        controller.handlePaneNameEvent(down)
+        try await Task.sleep(for: .milliseconds(450))
+        XCTAssertFalse(badges[0].isHidden)
+        controller.handlePaneNameEvent(try XCTUnwrap(NSEvent.mouseEvent(
+            with: .leftMouseDown, location: .zero, modifierFlags: .command,
+            timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)))
+        XCTAssertTrue(badges.allSatisfy(\.isHidden))
+        controller.handlePaneNameEvent(up)
+        controller.handlePaneNameEvent(down)
+        try await Task.sleep(for: .milliseconds(450))
+        XCTAssertFalse(badges[0].isHidden)
+        NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp)
+        XCTAssertTrue(badges.allSatisfy(\.isHidden))
+        controller.handlePaneNameEvent(down)
+        controller.debugNewTab()
+        try await Task.sleep(for: .milliseconds(450))
+        XCTAssertTrue(badges.allSatisfy(\.isHidden))
+    }
+
+    @MainActor
+    func testNameBadgeDoesNotTruncateShortNamesAfterRenaming() throws {
+        let terminal = TerminalPaneController()
+        let browser = BrowserPaneController()
+        for pane in [terminal as any PaneControlling, browser as any PaneControlling] {
+            pane.hostView.frame = NSRect(x: 0, y: 0, width: 640, height: 240)
+            let badge = try XCTUnwrap(pane.hostView.subviews.compactMap { $0 as? PaneNameBadgeView }.first)
+            let label = try XCTUnwrap(badge.subviews.compactMap { $0 as? NSTextField }.first)
+            pane.setNameVisible(true)
+            for name in ["API", "Frontend", "中文", "Dev", "ssh", "a", "server", "Santty"] {
+                pane.name = name
+                pane.hostView.layoutSubtreeIfNeeded()
+                XCTAssertGreaterThanOrEqual(label.bounds.width, ceil(try XCTUnwrap(label.cell).cellSize.width), name)
+                func renderedText() throws -> Data {
+                    let bitmap = try XCTUnwrap(label.bitmapImageRepForCachingDisplay(in: label.bounds))
+                    label.cacheDisplay(in: label.bounds, to: bitmap)
+                    return try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                }
+                let truncated = try renderedText()
+                label.lineBreakMode = .byClipping
+                let full = try renderedText()
+                XCTAssertEqual(truncated, full, "Short name rendered with an ellipsis: \(name)")
+                label.lineBreakMode = .byTruncatingTail
+            }
+        }
+    }
+
+    @MainActor
+    func testNameBadgeClipsLongNamesWithoutResizingBrowserContent() {
+        let host = BrowserPaneHostView(paneID: UUID())
+        host.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
+        host.nameBadge.name = String(repeating: "长名字", count: 100)
+        host.nameBadge.isRevealed = true
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(host.webView.frame, host.bounds)
+        XCTAssertEqual(host.nameBadge.frame.minX, 8, accuracy: 0.001)
+        XCTAssertEqual(host.nameBadge.frame.maxY, host.bounds.maxY - 8, accuracy: 0.001)
+        XCTAssertLessThanOrEqual(host.nameBadge.frame.maxX, host.bounds.maxX - 8)
+        XCTAssertGreaterThan(host.nameBadge.frame.height, 0)
+        XCTAssertNil(host.nameBadge.hitTest(host.nameBadge.frame.origin))
+    }
+
     func testClearingKeybindingDoesNotRestoreDefaultShortcut() async throws {
         try await MainActor.run {
             try Self.withRestoredKeybindingUserDefaults {

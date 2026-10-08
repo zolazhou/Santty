@@ -99,7 +99,8 @@ do {
         for tab in response.tabs ?? [] {
             print("\(tab.isSelected ? "*" : " ") Tab \(tab.id): \(tab.title)")
             for pane in tab.panes {
-                print("  \(pane.id)  \(pane.kind)  \(pane.title)  \(pane.cwd ?? "")")
+                let name = pane.name.map { "  name=\($0)" } ?? ""
+                print("  \(pane.id)  \(pane.kind)  \(pane.title)\(name)  \(pane.cwd ?? "")")
                 for process in pane.processes { print("    \(process.pid) \(process.command)") }
             }
         }

@@ -88,6 +88,7 @@ final class TerminalPanePlaceholderView: NSView {
 @MainActor
 final class TerminalPaneHostView: NSView {
     let paneID: PaneID
+    let nameBadge = PaneNameBadgeView()
 
     var onFocusRequest: ((PaneID) -> Void)?
 
@@ -161,6 +162,8 @@ final class TerminalPaneHostView: NSView {
         addSubview(scrollModeBackgroundView)
         addSubview(scrollModeLabel)
 
+        addSubview(nameBadge)
+
         registerForDraggedTypes(Array(TerminalPasteboardText.dropTypes))
         installPasteKeyMonitor()
         installContentConstraints()
@@ -190,12 +193,14 @@ final class TerminalPaneHostView: NSView {
     override func layout() {
         super.layout()
 
+        nameBadge.layout(in: self)
         let labelSize = statusLabel.intrinsicContentSize
         let horizontalPadding: CGFloat = 8
         let verticalPadding: CGFloat = 4
         let backgroundWidth = min(bounds.width - 16, labelSize.width + horizontalPadding * 2)
         let backgroundHeight = labelSize.height + verticalPadding * 2
-        let origin = NSPoint(x: 8, y: max(8, bounds.height - backgroundHeight - 8))
+        let topInset: CGFloat = nameBadge.isHidden ? 8 : nameBadge.intrinsicContentSize.height + 12
+        let origin = NSPoint(x: 8, y: max(8, bounds.height - backgroundHeight - topInset))
 
         statusBackgroundView.frame = NSRect(
             origin: origin,
@@ -329,6 +334,7 @@ final class TerminalPaneHostView: NSView {
     }
 
     func updateAppearance() {
+        nameBadge.isFocused = isFocused
         terminalPadding = TerminalSettings.padding
         vibrancyView.isHidden = !(AppAppearanceSettings.isWindowHidden || isFloating)
         vibrancyView.blendingMode =

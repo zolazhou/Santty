@@ -19,6 +19,9 @@ final class TerminalPaneController: NSObject, PaneControlling {
     private(set) var isLive = true
     private(set) var hasStarted = false
     private(set) var lastKnownTitle = "Shell"
+    var name: String? {
+        didSet { terminalHostView.nameBadge.name = name }
+    }
     private(set) var currentWorkingDirectory: String?
     private var isFloating = false
     private(set) var isScrollModeActive = false
@@ -124,6 +127,10 @@ final class TerminalPaneController: NSObject, PaneControlling {
 
     func fitToSize() {
         terminalView.fitToSize()
+    }
+
+    func setNameVisible(_ visible: Bool) {
+        terminalHostView.nameBadge.isRevealed = visible
     }
 
     func updatePresentation(isFocused: Bool, isFloating: Bool = false) {
