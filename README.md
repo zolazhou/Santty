@@ -69,6 +69,14 @@ Resizing cancels the selection because text may reflow. This prototype tracks
 row indices: if ongoing output evicts old scrollback, its cursor and selection
 anchor may drift. Stable anchors require additional support from the core.
 
+## Pane Names
+
+Use **Pane → Rename Pane...** or **Rename Pane** in the command palette to name
+the focused terminal or browser pane. Leave the field empty to remove its name.
+Names stay hidden until Command is held alone for 350 ms, then appear as overlays
+on named panes in the current tab. Releasing Command, using a shortcut or mouse
+action, or leaving the window hides them without resizing the content.
+
 ## Read Pane Logs from an Agent
 
 In **Settings → General → Command Line**, click **Install Command Line Tool**.
@@ -84,9 +92,11 @@ santty search <pane-id> "error" --ignore-case --limit 20 --json
 santty read <pane-id> --start-line 120 --end-line 160 --json
 ```
 
-`list` includes every tab, including inactive tabs, with pane UUIDs, titles,
+`list` includes every tab, including inactive tabs, with pane UUIDs, names, titles,
 types, working directories and foreground process-group members. Process
-arguments are a snapshot, not shell command history. Browser panes are listed
+arguments are a snapshot, not shell command history. Each pane's JSON `name` is
+its custom name, or `null` when unnamed; `title` remains the dynamic terminal or
+page title. Plain output includes `name=...` for named panes. Browser panes are listed
 but cannot be read. `read` returns plain text from the active terminal buffer,
 including retained scrollback, without changing focus, selection or clipboard.
 Full-screen programs use their alternate buffer; discarded history is unavailable.

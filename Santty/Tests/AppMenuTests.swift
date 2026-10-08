@@ -22,6 +22,9 @@ final class AppMenuTests: XCTestCase {
         )
 
         let mainMenu = try XCTUnwrap(NSApp.mainMenu)
+        let paneMenu = try XCTUnwrap(mainMenu.items.first { $0.submenu?.title == "Pane" }?.submenu)
+        XCTAssertEqual(paneMenu.item(withTitle: "Rename Pane...")?.action,
+            #selector(WorkspaceViewController.renamePane(_:)))
         let editMenu = try XCTUnwrap(
             mainMenu.items.first { $0.submenu?.title == "Edit" }?.submenu
         )

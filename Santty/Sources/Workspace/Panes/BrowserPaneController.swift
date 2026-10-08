@@ -49,6 +49,7 @@ final class BrowserWebView: WKWebView {
 @MainActor
 final class BrowserPaneHostView: NSView {
     let paneID: PaneID
+    let nameBadge = PaneNameBadgeView()
     let webView: BrowserWebView
     let locationBar = BrowserLocationBarView()
     private let vibrancyView = AppAppearanceDefaults.makeVibrancyView(
@@ -135,6 +136,7 @@ final class BrowserPaneHostView: NSView {
         addSubview(errorView)
 
         addSubview(locationBar)
+        addSubview(nameBadge)
 
         webView.onMouseDown = { [weak self] in
             guard let self else {
@@ -171,6 +173,7 @@ final class BrowserPaneHostView: NSView {
 
     override func layout() {
         super.layout()
+        nameBadge.layout(in: self)
         vibrancyView.frame = bounds
         webView.frame = bounds
 
@@ -226,6 +229,7 @@ final class BrowserPaneHostView: NSView {
     }
 
     func updateAppearance() {
+        nameBadge.isFocused = isFocused
         vibrancyView.isHidden = !(AppAppearanceSettings.isWindowHidden || isFloating)
         vibrancyView.blendingMode =
             isFloating
@@ -293,6 +297,9 @@ final class BrowserPaneController: NSObject, PaneControlling, WKNavigationDelega
 
     private(set) var isLive = false
     private(set) var displayTitle = "Browser"
+    var name: String? {
+        didSet { browserHostView.nameBadge.name = name }
+    }
 
     private var loadState: LoadState = .empty
     private var progressObservation: NSKeyValueObservation?
@@ -346,6 +353,10 @@ final class BrowserPaneController: NSObject, PaneControlling, WKNavigationDelega
     func fitToSize() {
         browserHostView.needsLayout = true
         browserHostView.layoutSubtreeIfNeeded()
+    }
+
+    func setNameVisible(_ visible: Bool) {
+        browserHostView.nameBadge.isRevealed = visible
     }
 
     func updatePresentation(isFocused: Bool, isFloating: Bool) {

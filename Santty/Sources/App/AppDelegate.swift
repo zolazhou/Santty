@@ -163,10 +163,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func installMenuKeyEquivalentMonitor() {
-        menuKeyEquivalentMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        menuKeyEquivalentMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .flagsChanged, .leftMouseDown, .rightMouseDown, .otherMouseDown,
+                .scrollWheel, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged]
+        ) { event in
             guard let window = self.window, event.window === window else {
                 return event
             }
+
+            self.workspaceViewController?.handlePaneNameEvent(event)
+            guard event.type == .keyDown else { return event }
 
             if let action = KeybindingSettings.action(matching: event),
                 self.workspaceViewController?.performKeybindingAction(action) == true

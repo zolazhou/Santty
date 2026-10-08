@@ -5,6 +5,51 @@ import XCTest
 @testable import Santty
 
 final class CLITests: XCTestCase {
+    @MainActor
+    func testPaneNamesStaySeparateFromTitlesAndSurvivePanePresentationChanges() throws {
+        let workspace = WorkspaceViewController()
+        workspace.debugLoadForTesting()
+        let paneID = try XCTUnwrap(workspace.debugFocusedPaneID)
+        workspace.debugSetPaneTitle("zsh", for: paneID)
+        workspace.debugSetFocusedPaneName("  API 中文  ")
+        func pane() throws -> CLIPane {
+            try XCTUnwrap(workspace.handleCLIRequest(CLIRequest(command: "list"))
+                .tabs?.flatMap(\.panes).first { $0.id == paneID })
+        }
+        XCTAssertEqual(try pane().name, "API 中文")
+        workspace.debugSetPaneTitle("swift run", for: paneID)
+        XCTAssertEqual(try pane().name, "API 中文")
+        XCTAssertEqual(try pane().title, "swift run")
+        workspace.debugSplitFocusedPane(along: .horizontal)
+        workspace.debugFocusPane(withID: paneID)
+        workspace.debugPerformCommand(withID: "pane.move.right")
+        workspace.debugToggleFloatingPane()
+        XCTAssertEqual(try pane().name, "API 中文")
+        workspace.debugToggleFloatingPane()
+        workspace.debugDetachFocusedPane()
+        XCTAssertEqual(try pane().name, "API 中文")
+        workspace.debugToggleDetachedPane(at: 0)
+        workspace.debugAttachFocusedDetachedPane()
+        workspace.debugFocusPane(withID: paneID)
+        workspace.debugPerformCommand(withID: "pane.browser.convert")
+        XCTAssertEqual(try pane().name, "API 中文")
+        XCTAssertEqual(try pane().kind, "browser")
+        workspace.debugPerformCommand(withID: "pane.terminal.convert")
+        XCTAssertEqual(try pane().name, "API 中文")
+
+        let named = try pane()
+        let encoded = try JSONEncoder().encode(named)
+        XCTAssertEqual(try JSONDecoder().decode(CLIPane.self, from: encoded).name, "API 中文")
+        workspace.debugSetFocusedPaneName(" \n ")
+        let unnamed = try pane()
+        XCTAssertNil(unnamed.name)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(unnamed)) as? [String: Any])
+        XCTAssertTrue(json["name"] is NSNull)
+        var legacy = json
+        legacy.removeValue(forKey: "name")
+        XCTAssertNil(try JSONDecoder().decode(CLIPane.self, from: JSONSerialization.data(withJSONObject: legacy)).name)
+    }
+
     func testSearchThenReadUsesTheSameLineNumbers() throws {
         let text = "ready\nError: first\n\nerror: second\nregex.* is literal\n完成\n"
         let paneID = UUID()
@@ -177,6 +222,7 @@ final class CLITests: XCTestCase {
         let workspace = WorkspaceViewController()
         _ = workspace.view
         server.workspace = workspace
+        workspace.debugSetFocusedPaneName("API 中文")
         server.start()
         defer {
             server.stop()
@@ -211,6 +257,16 @@ final class CLITests: XCTestCase {
         let response = try JSONDecoder().decode(CLIResponse.self, from: result.1)
         XCTAssertEqual(response.tabs?.first?.id, workspace.debugSelectedTabID)
         XCTAssertEqual(response.tabs?.first?.panes.first?.id, workspace.debugFocusedPaneID)
+        XCTAssertEqual(response.tabs?.first?.panes.first?.name, "API 中文")
+        let plain = try await run(["list"])
+        XCTAssertEqual(plain.0, 0)
+        XCTAssertTrue(String(decoding: plain.1, as: UTF8.self).contains("name=API 中文"))
+        workspace.debugSetFocusedPaneName("")
+        let unnamed = try await run(["list", "--json"])
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: unnamed.1) as? [String: Any])
+        let tab = try XCTUnwrap((object["tabs"] as? [[String: Any]])?.first)
+        let pane = try XCTUnwrap((tab["panes"] as? [[String: Any]])?.first)
+        XCTAssertTrue(pane["name"] is NSNull)
         for args in [
             ["read", UUID().uuidString, "--start-line", "2", "--end-line", "4"],
             ["search", UUID().uuidString, "error", "--ignore-case", "--limit", "5"],
