@@ -153,7 +153,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
                     panes: tab.paneControllers.values.sorted { $0.id.uuidString < $1.id.uuidString }.map { pane in
                         let terminal = pane as? TerminalPaneController
                         return CLIPane(id: pane.id, title: pane.displayTitle, name: pane.name,
-                            kind: terminal == nil ? "browser" : "terminal",
+                            kind: terminal != nil ? "terminal" : pane is NotesPaneController ? "notes" : "browser",
                             cwd: terminal?.workingDirectoryForNewPane,
                             foregroundProcessGroupID: terminal?.foregroundProcessID,
                             isFocused: tab.focusedPaneID == pane.id, isLive: pane.isLive,
@@ -182,6 +182,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     private var paneNameRevealTask: Task<Void, Never>?
     private var paneNamesVisible = false
     private var isCommandHeld = false
+    private var isClosingNotes = false
     private var paneNameFocusObservers: [NSObjectProtocol] = []
 
     private var selectedTabIndex: Int? {
@@ -360,14 +361,17 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        switch menuItem.action {
+        if let keyWindow = NSApp.keyWindow, keyWindow is NSPanel, !keyWindow.canBecomeMain {
+            return false
+        }
+        return switch menuItem.action {
         case #selector(splitPaneHorizontally(_:)), #selector(splitPaneVertically(_:)):
             if focusedTerminalPaneController != nil {
                 focusedTerminalPaneController?.isLive == true && focusedPaneIsTiled
             } else {
                 focusedPaneController != nil && focusedPaneIsTiled
             }
-        case #selector(newBrowserPane(_:)):
+        case #selector(newBrowserPane(_:)), #selector(newNotesPane(_:)):
             focusedPaneController != nil && focusedPaneIsTiled
         case #selector(focusBrowserLocationBar(_:)):
             focusedBrowserPaneController != nil
@@ -439,7 +443,16 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             return true
         }
 
-        return confirmCloseWindowIfNeeded()
+        guard confirmCloseWindowIfNeeded() else { return false }
+        guard hasNotesPanes else { return true }
+        guard !isClosingNotes else { return false }
+        isClosingNotes = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { isClosingNotes = false }
+            if await prepareNotesToClose() { requestWindowClose() }
+        }
+        return false
     }
 
     @objc func splitPaneHorizontally(_: Any?) {
@@ -454,6 +467,18 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         splitFocusedPane(along: .horizontal) {
             self.makeBrowserPaneController()
         }
+    }
+
+    @objc func newNotesPane(_: Any?) {
+        splitFocusedPane(along: .horizontal) { self.makeNotesPaneController() }
+    }
+
+    func handleNotesKeyEvent(_ event: NSEvent) -> Bool {
+        guard let pane = focusedPaneController as? NotesPaneController,
+            let responder = view.window?.firstResponder as? NSView,
+            responder.isDescendant(of: pane.hostView)
+        else { return false }
+        return pane.content.handleCommand(event)
     }
 
     @objc func focusBrowserLocationBar(_: Any?) {
@@ -868,6 +893,30 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         return paneController
     }
 
+    private func makeNotesPaneController() -> NotesPaneController {
+        let pane = NotesPaneController()
+        pane.onFocusRequest = { [weak self] in self?.handlePaneFocusRequest(withID: $0) }
+        pane.onTitleChange = { [weak self] in self?.handleTitleChange(for: $0) }
+        return pane
+    }
+
+    private var notesPanes: [NotesPaneController] {
+        tabs.flatMap { $0.paneControllers.values.compactMap { $0 as? NotesPaneController } }
+    }
+
+    var hasNotesPanes: Bool { !notesPanes.isEmpty }
+
+    func prepareNotesToClose(_ panes: [NotesPaneController]? = nil) async -> Bool {
+        for pane in panes ?? notesPanes {
+            guard await pane.content.prepareToClose() else {
+                focusPaneLocatingTab(withID: pane.id)
+                NSSound.beep()
+                return false
+            }
+        }
+        return true
+    }
+
     private func applyTerminalSettingsToPanes() {
         for tabState in tabs {
             for case let paneController as TerminalPaneController in tabState.paneControllers.values
@@ -1239,7 +1288,19 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         performClosePane(withID: paneID, in: tabState)
     }
 
-    private func performClosePane(withID paneID: PaneID, in tabState: WorkspaceTabState) {
+    private func performClosePane(withID paneID: PaneID, in tabState: WorkspaceTabState, notesPrepared: Bool = false) {
+        if !notesPrepared, let pane = tabState.paneControllers[paneID] as? NotesPaneController {
+            guard !isClosingNotes else { return }
+            isClosingNotes = true
+            Task { [weak self] in
+                guard let self else { return }
+                defer { isClosingNotes = false }
+                if await prepareNotesToClose([pane]) {
+                    performClosePane(withID: paneID, in: tabState, notesPrepared: true)
+                }
+            }
+            return
+        }
         if tabState.isPaneDetached(paneID) {
             if tabState.activeDetachedPaneID == paneID {
                 hideActiveDetachedPane(in: tabState, animated: false, reapplyAutoZoom: false)
@@ -1588,12 +1649,25 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         updateTabStrip()
     }
 
-    private func closeTab(withID tabID: UUID, bypassTabConfirmation: Bool = false) {
+    private func closeTab(withID tabID: UUID, bypassTabConfirmation: Bool = false, notesPrepared: Bool = false) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else {
             return
         }
 
         let tabState = tabs[index]
+        let notes = tabState.paneControllers.values.compactMap { $0 as? NotesPaneController }
+        if !notesPrepared, !notes.isEmpty {
+            guard !isClosingNotes else { return }
+            isClosingNotes = true
+            Task { [weak self] in
+                guard let self else { return }
+                defer { isClosingNotes = false }
+                if await prepareNotesToClose(notes) {
+                    closeTab(withID: tabID, bypassTabConfirmation: bypassTabConfirmation, notesPrepared: true)
+                }
+            }
+            return
+        }
 
         if tabs.count == 1 {
             guard confirmCloseWindowIfNeeded() else {
@@ -2539,6 +2613,13 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
                 perform: { [weak self] in self?.splitPaneVertically(nil) }
             ),
             AppCommand(
+                id: "pane.notes.new",
+                title: "Open Notes in Pane",
+                shortcut: KeybindingSettings.displayShortcut(for: .newNotesPane),
+                isEnabled: focusedPaneController != nil && focusedPaneIsTiled,
+                perform: { [weak self] in self?.newNotesPane(nil) }
+            ),
+            AppCommand(
                 id: "pane.browser.new",
                 title: "New Browser Pane",
                 shortcut: KeybindingSettings.displayShortcut(for: .newBrowserPane),
@@ -2896,6 +2977,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 }
 
 extension WorkspaceViewController {
+    var debugFocusedNotesPane: NotesPaneController? { focusedPaneController as? NotesPaneController }
+
     func debugSetFocusedPaneName(_ name: String) {
         if let pane = focusedPaneController { updatePaneName(name, for: pane) }
     }

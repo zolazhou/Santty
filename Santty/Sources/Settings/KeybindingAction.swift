@@ -2,6 +2,7 @@ import AppKit
 import KeyboardShortcuts
 
 enum KeybindingAction: String, CaseIterable, Identifiable {
+    case toggleNotes
     case splitPaneHorizontally
     case splitPaneVertically
     case equalizePaneSplits
@@ -20,6 +21,7 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
     case movePaneUp
     case movePaneDown
     case newBrowserPane
+    case newNotesPane
     case focusBrowserLocation
     case convertPaneToBrowser
     case convertPaneToTerminal
@@ -36,9 +38,12 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
     case focusNextTab
 
     var id: String { rawValue }
+    var isGlobal: Bool { self == .toggleNotes }
 
     var commandID: String {
         switch self {
+        case .toggleNotes:
+            "app.notes"
         case .splitPaneHorizontally:
             "pane.split.horizontal"
         case .splitPaneVertically:
@@ -73,6 +78,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             "pane.move.up"
         case .movePaneDown:
             "pane.move.down"
+        case .newNotesPane:
+            "pane.notes.new"
         case .newBrowserPane:
             "pane.browser.new"
         case .focusBrowserLocation:
@@ -108,6 +115,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .toggleNotes:
+            "Toggle Notes"
         case .splitPaneHorizontally:
             "Split Horizontally"
         case .splitPaneVertically:
@@ -142,6 +151,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             "Move Pane Up"
         case .movePaneDown:
             "Move Pane Down"
+        case .newNotesPane:
+            "Open Notes in Pane"
         case .newBrowserPane:
             "New Browser Pane"
         case .focusBrowserLocation:
@@ -177,11 +188,13 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
 
     var groupTitle: String {
         switch self {
+        case .toggleNotes:
+            "Application"
         case .splitPaneHorizontally, .splitPaneVertically, .equalizePaneSplits,
             .movePaneDividerUp, .movePaneDividerDown, .movePaneDividerLeft,
             .movePaneDividerRight, .focusPreviousPane, .focusNextPane, .focusLeftPane,
             .focusRightPane, .focusAbovePane, .focusBelowPane, .movePaneLeft,
-            .movePaneRight, .movePaneUp, .movePaneDown, .newBrowserPane,
+            .movePaneRight, .movePaneUp, .movePaneDown, .newBrowserPane, .newNotesPane,
             .focusBrowserLocation,
             .convertPaneToBrowser, .convertPaneToTerminal, .toggleFloatingPane, .detachPane,
             .attachDetachedPane, .openPromptEditor, .enterScrollMode, .autoResizePane, .closePane:
@@ -193,6 +206,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
 
     var defaultShortcut: KeyboardShortcuts.Shortcut? {
         switch self {
+        case .toggleNotes:
+            .init(.n, modifiers: [.control, .option])
         case .splitPaneHorizontally:
             .init(.backslash, modifiers: [.command, .shift])
         case .splitPaneVertically:
@@ -227,7 +242,7 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             .init(.k, modifiers: [.option, .command])
         case .movePaneDown:
             .init(.j, modifiers: [.option, .command])
-        case .newBrowserPane, .convertPaneToBrowser, .convertPaneToTerminal:
+        case .newBrowserPane, .newNotesPane, .convertPaneToBrowser, .convertPaneToTerminal:
             nil
         case .focusBrowserLocation:
             .init(.l, modifiers: [.control])
@@ -256,9 +271,10 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
 
     @MainActor
     var shortcutName: KeyboardShortcuts.Name {
-        let name = KeyboardShortcuts.Name("Santty.\(rawValue)", initial: defaultShortcut)
-        // Defaults register global hotkeys; Santty dispatches shortcuts locally.
-        KeyboardShortcuts.disable(name)
+        let identifier = isGlobal ? "SanttyToggleNotes" : "Santty.\(rawValue)"
+        let name = KeyboardShortcuts.Name(identifier, initial: defaultShortcut)
+        // Notes is global; workspace shortcuts must remain local to Santty.
+        if !isGlobal { KeyboardShortcuts.disable(name) }
         return name
     }
 }
@@ -281,8 +297,8 @@ enum KeybindingSettings {
     }
 
     static func notifyChange(for action: KeybindingAction) {
-        // Recording and resetting shortcuts also register them globally.
-        KeyboardShortcuts.disable(action.shortcutName)
+        if action.isGlobal { KeyboardShortcuts.enable(action.shortcutName) }
+        else { KeyboardShortcuts.disable(action.shortcutName) }
         NotificationCenter.default.post(name: didChangeNotification, object: action)
     }
 
@@ -296,7 +312,7 @@ enum KeybindingSettings {
         }
 
         return KeybindingAction.allCases.first {
-            effectiveShortcut(for: $0) == eventShortcut
+            !$0.isGlobal && effectiveShortcut(for: $0) == eventShortcut
         }
     }
 

@@ -25,7 +25,7 @@ struct KeybindingSettingsPane: View {
     }
 
     private var groupedActions: [(title: String, actions: [KeybindingAction])] {
-        ["Pane", "Tab"].compactMap { title in
+        ["Application", "Pane", "Tab"].compactMap { title in
             let actions = KeybindingAction.allCases.filter { $0.groupTitle == title }
             return actions.isEmpty ? nil : (title, actions)
         }
@@ -38,6 +38,7 @@ private struct KeybindingActionRow: View {
     let isRecording: Bool
     let onStartRecording: () -> Void
     let onFinishRecording: () -> Void
+    @State private var shortcutDisplay = ""
 
     var body: some View {
         HStack(spacing: 12) {
@@ -54,14 +55,21 @@ private struct KeybindingActionRow: View {
                 )
                 .frame(width: 170, alignment: .trailing)
             } else {
-                Text(KeybindingSettings.displayShortcut(for: action) ?? "")
+                Text(shortcutDisplay)
                     .font(.system(size: 14, weight: .medium, design: .monospaced))
                     .lineLimit(1)
                     .foregroundStyle(.primary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
                     .contentShape(Rectangle())
                     .onTapGesture(count: 2, perform: onStartRecording)
+                    .contextMenu {
+                        Button("Reset to Default") { KeybindingSettings.resetShortcut(for: action) }
+                    }
             }
+        }
+        .onAppear { shortcutDisplay = KeybindingSettings.displayShortcut(for: action) ?? "" }
+        .onReceive(NotificationCenter.default.publisher(for: KeybindingSettings.didChangeNotification)) { _ in
+            shortcutDisplay = KeybindingSettings.displayShortcut(for: action) ?? ""
         }
     }
 }

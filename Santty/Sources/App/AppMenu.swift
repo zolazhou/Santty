@@ -87,7 +87,8 @@ enum AppMenu {
         workspaceTarget: AnyObject,
         commandPaletteAction: Selector,
         checkForUpdatesAction: Selector,
-        settingsAction: Selector
+        settingsAction: Selector,
+        notesAction: Selector
     ) {
         let mainMenu = NSMenu()
         NSApp.mainMenu = mainMenu
@@ -97,7 +98,8 @@ enum AppMenu {
                 target: applicationTarget,
                 commandPaletteAction: commandPaletteAction,
                 checkForUpdatesAction: checkForUpdatesAction,
-                settingsAction: settingsAction
+                settingsAction: settingsAction,
+                notesAction: notesAction
             )
         )
         mainMenu.addItem(makeEditMenuItem())
@@ -110,7 +112,8 @@ enum AppMenu {
         target: AnyObject,
         commandPaletteAction: Selector,
         checkForUpdatesAction: Selector,
-        settingsAction: Selector
+        settingsAction: Selector,
+        notesAction: Selector
     ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Santty")
@@ -123,6 +126,10 @@ enum AppMenu {
         )
         commandPaletteItem.target = target
         commandPaletteItem.keyEquivalentModifierMask = [.command]
+
+        // The global hotkey owns keyboard dispatch; the menu is a click-only entry.
+        let notesItem = menu.addItem(withTitle: "Notes", action: notesAction, keyEquivalent: "")
+        notesItem.target = target
 
         menu.addItem(.separator())
 
@@ -204,6 +211,13 @@ enum AppMenu {
         )
 
         menu.addItem(.separator())
+
+        addKeybindingMenuItem(
+            to: menu,
+            action: .newNotesPane,
+            selector: #selector(WorkspaceViewController.newNotesPane(_:)),
+            target: target
+        )
 
         addKeybindingMenuItem(
             to: menu,

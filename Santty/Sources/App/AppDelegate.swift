@@ -1,5 +1,6 @@
 import Cocoa
 import GhosttyTerminal
+import KeyboardShortcuts
 
 @MainActor
 enum MainWindowAutosave {
@@ -32,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var workspaceViewController: WorkspaceViewController?
     private let commandPaletteWindowController = CommandPaletteWindowController()
     private let settingsWindowController = SettingsWindowController()
+    private var notesWindowController: NotesWindowController?
     private var menuKeyEquivalentMonitor: Any?
     private var terminalSettingsObserver: NSObjectProtocol?
     private var keybindingSettingsObserver: NSObjectProtocol?
@@ -42,6 +44,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installEnabledAgentIntegrations()
         installMenuKeyEquivalentMonitor()
         installKeybindingSettingsObserver()
+        KeyboardShortcuts.onKeyUp(for: KeybindingAction.toggleNotes.shortcutName) { [weak self] in
+            self?.toggleNotes(nil)
+        }
 
         let _ = TerminalController.shared.setTheme(TerminalDefaults.theme)
         let _ = TerminalController.shared.setTerminalConfiguration(TerminalDefaults.configuration)
@@ -90,7 +95,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
+        guard notesWindowController != nil || workspaceViewController?.hasNotesPanes == true else { return .terminateNow }
+        Task { @MainActor in
+            guard await workspaceViewController?.prepareNotesToClose() != false else {
+                NSApp.reply(toApplicationShouldTerminate: false)
+                return
+            }
+            let saved = await notesWindowController?.prepareToTerminate() ?? true
+            NSApp.reply(toApplicationShouldTerminate: saved)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_: Notification) {
+        KeyboardShortcuts.disable(KeybindingAction.toggleNotes.shortcutName)
         if let menuKeyEquivalentMonitor {
             NSEvent.removeMonitor(menuKeyEquivalentMonitor)
         }
@@ -158,7 +177,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             workspaceTarget: workspaceViewController,
             commandPaletteAction: #selector(showCommandPalette(_:)),
             checkForUpdatesAction: #selector(checkForUpdates(_:)),
-            settingsAction: #selector(showSettings(_:))
+            settingsAction: #selector(showSettings(_:)),
+            notesAction: #selector(toggleNotes(_:))
         )
     }
 
@@ -173,6 +193,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             self.workspaceViewController?.handlePaneNameEvent(event)
             guard event.type == .keyDown else { return event }
+
+            if self.workspaceViewController?.handleNotesKeyEvent(event) == true { return nil }
 
             if let action = KeybindingSettings.action(matching: event),
                 self.workspaceViewController?.performKeybindingAction(action) == true
@@ -237,10 +259,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindowController.show(relativeTo: window)
     }
 
+    @objc private func toggleNotes(_: Any?) {
+        if notesWindowController == nil { notesWindowController = NotesWindowController() }
+        notesWindowController?.toggle()
+    }
+
     private func configureCommandPalette() {
         commandPaletteWindowController.onCommand = { [weak self] command in
             command.perform()
-            self?.workspaceViewController?.restoreFocusAfterCommandPalette()
+            if command.id != KeybindingAction.toggleNotes.commandID {
+                self?.workspaceViewController?.restoreFocusAfterCommandPalette()
+            }
         }
         commandPaletteWindowController.onDismiss = { [weak self] in
             self?.workspaceViewController?.restoreFocusAfterCommandPalette()
@@ -249,6 +278,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func makeCommandPaletteCommands() -> [AppCommand] {
         var commands = workspaceViewController?.commandPaletteCommands ?? []
+        commands.append(AppCommand(
+            id: KeybindingAction.toggleNotes.commandID,
+            title: "Notes",
+            shortcut: KeybindingSettings.displayShortcut(for: .toggleNotes),
+            isEnabled: true,
+            perform: { [weak self] in self?.toggleNotes(nil) }
+        ))
         commands.append(contentsOf: makeWindowCommands())
         return commands
     }
