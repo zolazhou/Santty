@@ -36,6 +36,53 @@ XCFramework. Run `mise run ghostty:prepare` before invoking `tuist generate`
 directly, and after editing the patches. The generated vendor directory is
 ignored by Git.
 
+## Notes
+
+Press **Control-Option-N** from any app to open Notes. The shortcut focuses an
+already-visible note, or saves and hides it when Notes has keyboard focus.
+You can also use **Santty → Notes** or **Notes** in the command palette.
+Customize the global shortcut in **Settings → Keybindings → Application**.
+Double-click the shortcut to record a replacement, press Delete while recording
+to clear it, or right-click its displayed value and choose **Reset to Default**.
+
+Notes uses a native TextKit 2 editor with live Markdown styling, links, lists,
+code blocks, and clickable `- [ ]` / `- [x]` task checkboxes. Markdown markers
+appear when editing the corresponding text. Standard copy, paste, undo, redo,
+spelling, grammar, and system Writing Tools are supported where available.
+Parsing uses `swift-markdown`; Santty owns the text styling and TextKit 2 block
+decorations. The editor shares SwiftUI's single scrolling viewport. On macOS 26
+and later, the header and footer use `safeAreaBar` with the system's soft scroll
+edge effect.
+Syntax outside the formatting toolbar's supported set remains editable source.
+Press **Command-Shift-P** to open or close the note browser. Use **Control-P** /
+**Control-N** or the arrow keys to select a note, then Return to open it.
+
+Use **Pane → Open Notes in Pane** or the command palette to open Notes beside
+another pane. Multiple Notes panes can coexist with the standalone Notes window;
+each selects its own note and keeps its own cursor and scroll position. Notes
+panes remain visible when focus changes and support the usual pane layout controls.
+
+The standalone Notes window hides when it loses focus. Click the pin button to keep it visible above
+other apps; use this mode with external correction tools that activate their
+own windows. Escape, Command-W, or the close button saves and hides Notes.
+Input-method composition and active Writing Tools sessions take precedence.
+Hiding preserves the editor's selection, scroll position, and undo history.
+
+Each note is a separate UTF-8 `.md` file, saved after a short typing pause and
+before switching, closing, or quitting. Release builds use
+`~/Library/Application Support/Santty/Notes/`; Debug builds use
+`~/Library/Application Support/Santty-Dev/Notes/`. An existing `note.md` is kept.
+Read failures disable
+editing to protect the existing file; write failures preserve the in-memory note
+and provide a retry action. Unsaved changes prevent a normal quit until saving
+succeeds or quitting is cancelled. Window geometry and pin state are local.
+The standalone Notes window stays hidden on launch and is available while Santty
+is running. Notes watches both the current file and its directory: saved changes
+from another pane, the window, or an external editor refresh idle views. External
+updates clear the affected editor's undo history. If local changes are unsaved,
+or the file is deleted, Notes retains the text and pauses saving until you choose
+**Use File Version** or **Overwrite File**. Simultaneous edits are not merged.
+
 ## Scroll Mode (Experimental)
 
 Press **Shift-Command-S** to navigate and select within Ghostty's current viewport
@@ -43,20 +90,20 @@ and retained scrollback. Ghostty keeps rendering the terminal and selection,
 preserving ANSI colors, fonts and grid layout. A transparent overlay adds a
 keyboard cursor. Output remains live; entry and exit keep the current viewport.
 
-| Key | Action |
-| --- | --- |
-| `h/j/k/l` or arrow keys | Move the cursor |
-| `0` / `$` | Beginning / end of the displayed line |
-| `^` | First nonblank cell of the displayed line |
-| `w` / `b` / `e` | Next word start / previous word start / word end (punctuation is separate) |
-| `W` / `B` / `E` | Same motions for whitespace-delimited words |
-| `Ctrl-U/D` | Move half a page |
-| `Ctrl-B/F`, Page Up/Down | Move a page |
-| `gg` / `G`, Home/End | Beginning / end of the retained buffer |
-| `v` / `V` | Toggle character / whole displayed row selection |
-| `y` or Command-C | Copy, preserving mode, selection, cursor and scroll position |
-| Escape | Cancel selection, then exit on the next press |
-| `q`, `i` or Return | Exit scroll mode |
+| Key                      | Action                                                                     |
+| ------------------------ | -------------------------------------------------------------------------- |
+| `h/j/k/l` or arrow keys  | Move the cursor                                                            |
+| `0` / `$`                | Beginning / end of the displayed line                                      |
+| `^`                      | First nonblank cell of the displayed line                                  |
+| `w` / `b` / `e`          | Next word start / previous word start / word end (punctuation is separate) |
+| `W` / `B` / `E`          | Same motions for whitespace-delimited words                                |
+| `Ctrl-U/D`               | Move half a page                                                           |
+| `Ctrl-B/F`, Page Up/Down | Move a page                                                                |
+| `gg` / `G`, Home/End     | Beginning / end of the retained buffer                                     |
+| `v` / `V`                | Toggle character / whole displayed row selection                           |
+| `y` or Command-C         | Copy, preserving mode, selection, cursor and scroll position               |
+| Escape                   | Cancel selection, then exit on the next press                              |
+| `q`, `i` or Return       | Exit scroll mode                                                           |
 
 Mouse selection and scrolling are supported. Switching panes or tabs exits the
 mode; an empty selection leaves the clipboard unchanged. Mouse reporting and

@@ -18,10 +18,15 @@ final class AppMenuTests: XCTestCase {
             workspaceTarget: target,
             commandPaletteAction: #selector(NSObject.description),
             checkForUpdatesAction: #selector(NSObject.description),
-            settingsAction: #selector(NSObject.description)
+            settingsAction: #selector(NSObject.description),
+            notesAction: #selector(NSObject.description)
         )
 
         let mainMenu = try XCTUnwrap(NSApp.mainMenu)
+        let applicationMenu = try XCTUnwrap(mainMenu.items.first?.submenu)
+        let notesItem = try XCTUnwrap(applicationMenu.item(withTitle: "Notes"))
+        XCTAssertTrue(notesItem.target === target)
+        XCTAssertEqual(notesItem.keyEquivalent, "")
         let paneMenu = try XCTUnwrap(mainMenu.items.first { $0.submenu?.title == "Pane" }?.submenu)
         XCTAssertEqual(paneMenu.item(withTitle: "Rename Pane...")?.action,
             #selector(WorkspaceViewController.renamePane(_:)))

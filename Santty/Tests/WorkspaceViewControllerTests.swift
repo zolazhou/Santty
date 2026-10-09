@@ -5,6 +5,29 @@ import XCTest
 
 final class WorkspaceViewControllerTests: XCTestCase {
     @MainActor
+    func testNotesPanesSplitRepeatedlyAndReportTheirKindToCLI() async throws {
+        let controller = Self.makeController()
+        controller.debugPerformCommand(withID: "pane.notes.new")
+        let first = try XCTUnwrap(controller.debugFocusedNotesPane)
+        await first.content.waitForPendingOperations()
+        controller.debugPerformCommand(withID: "pane.notes.new")
+        let second = try XCTUnwrap(controller.debugFocusedNotesPane)
+        await second.content.waitForPendingOperations()
+        XCTAssertNotEqual(first.id, second.id)
+        XCTAssertEqual(controller.debugPaneIDsInTraversalOrder.count, 3)
+        let response = try controller.handleCLIRequest(CLIRequest(command: "list"))
+        let notes = try XCTUnwrap(response.tabs).flatMap(\.panes).filter { $0.kind == "notes" }
+        XCTAssertEqual(Set(notes.map(\.id)), Set([first.id, second.id]))
+        XCTAssertTrue(notes.allSatisfy { !$0.isLive })
+        controller.debugPerformCommand(withID: "pane.close")
+        for _ in 0..<60 {
+            if controller.debugPaneIDsInTraversalOrder.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(controller.debugPaneIDsInTraversalOrder.count, 2)
+    }
+
+    @MainActor
     func testPaneNamesRevealAfterCommandHoldAndCancelForShortcutsAndFocusLoss() async throws {
         let controller = Self.makeController()
         let firstID = try XCTUnwrap(controller.debugFocusedPaneID)
@@ -960,7 +983,8 @@ final class WorkspaceViewControllerTests: XCTestCase {
                     workspaceTarget: controller,
                     commandPaletteAction: #selector(AppMenuTestTarget.handleCommandPalette(_:)),
                     checkForUpdatesAction: #selector(AppMenuTestTarget.handleCheckForUpdates(_:)),
-                    settingsAction: #selector(AppMenuTestTarget.handleSettings(_:))
+                    settingsAction: #selector(AppMenuTestTarget.handleSettings(_:)),
+                    notesAction: #selector(AppMenuTestTarget.handleSettings(_:))
                 )
 
                 let event = try XCTUnwrap(NSEvent.keyEvent(
@@ -1643,8 +1667,10 @@ final class WorkspaceViewControllerTests: XCTestCase {
                 XCTAssertEqual(
                     controller.debugCommandSnapshots.map(\.id),
                     [
+                        "pane.rename",
                         "pane.split.horizontal",
                         "pane.split.vertical",
+                        "pane.notes.new",
                         "pane.browser.new",
                         "pane.browser.location",
                         "pane.browser.convert",
