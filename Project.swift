@@ -16,8 +16,8 @@ let sparklePublicKey = environment["TUIST_SANTTY_SPARKLE_PUBLIC_KEY"] ?? ""
 var infoPlistEntries: [String: Plist.Value] = [
     "NSPrincipalClass": "NSApplication",
     "LSApplicationCategoryType": "public.app-category.productivity",
-    "CFBundleShortVersionString": "1.2.1",
-    "CFBundleVersion": "4",
+    "CFBundleShortVersionString": "1.2.2",
+    "CFBundleVersion": "5",
     "NSAppTransportSecurity": [
         "NSAllowsArbitraryLoadsInWebContent": true
     ],
