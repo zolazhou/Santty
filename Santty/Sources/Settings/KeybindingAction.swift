@@ -3,6 +3,7 @@ import KeyboardShortcuts
 
 enum KeybindingAction: String, CaseIterable, Identifiable {
     case toggleNotes
+    case toggleMaximizeWindow
     case splitPaneHorizontally
     case splitPaneVertically
     case equalizePaneSplits
@@ -44,6 +45,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
         switch self {
         case .toggleNotes:
             "app.notes"
+        case .toggleMaximizeWindow:
+            "window.zoom"
         case .splitPaneHorizontally:
             "pane.split.horizontal"
         case .splitPaneVertically:
@@ -117,6 +120,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
         switch self {
         case .toggleNotes:
             "Toggle Notes"
+        case .toggleMaximizeWindow:
+            "Toggle Maximize Window"
         case .splitPaneHorizontally:
             "Split Horizontally"
         case .splitPaneVertically:
@@ -188,7 +193,7 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
 
     var groupTitle: String {
         switch self {
-        case .toggleNotes:
+        case .toggleNotes, .toggleMaximizeWindow:
             "Application"
         case .splitPaneHorizontally, .splitPaneVertically, .equalizePaneSplits,
             .movePaneDividerUp, .movePaneDividerDown, .movePaneDividerLeft,
@@ -208,6 +213,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
         switch self {
         case .toggleNotes:
             .init(.n, modifiers: [.control, .option])
+        case .toggleMaximizeWindow:
+            .init(.m, modifiers: [.command, .option])
         case .splitPaneHorizontally:
             .init(.backslash, modifiers: [.command, .shift])
         case .splitPaneVertically:

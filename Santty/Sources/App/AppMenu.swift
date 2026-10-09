@@ -105,7 +105,7 @@ enum AppMenu {
         mainMenu.addItem(makeEditMenuItem())
         mainMenu.addItem(makePaneMenuItem(target: workspaceTarget))
         mainMenu.addItem(makeTabMenuItem(target: workspaceTarget))
-        mainMenu.addItem(makeWindowMenuItem())
+        mainMenu.addItem(makeWindowMenuItem(target: applicationTarget))
     }
 
     private static func makeApplicationMenuItem(
@@ -437,7 +437,7 @@ enum AppMenu {
         return item
     }
 
-    private static func makeWindowMenuItem() -> NSMenuItem {
+    private static func makeWindowMenuItem(target: AnyObject) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Window")
         item.submenu = menu
@@ -448,10 +448,11 @@ enum AppMenu {
             keyEquivalent: "m"
         )
 
-        menu.addItem(
-            withTitle: "Zoom",
-            action: #selector(NSWindow.performZoom(_:)),
-            keyEquivalent: ""
+        addKeybindingMenuItem(
+            to: menu,
+            action: .toggleMaximizeWindow,
+            selector: #selector(AppDelegate.toggleMaximizeWindow(_:)),
+            target: target
         )
 
         menu.addItem(

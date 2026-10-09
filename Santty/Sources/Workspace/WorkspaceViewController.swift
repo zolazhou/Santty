@@ -437,6 +437,11 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         }
     }
 
+    func windowWillUseStandardFrame(_ window: NSWindow, defaultFrame: NSRect) -> NSRect {
+        guard window is MainWindow else { return defaultFrame }
+        return window.screen?.visibleFrame ?? defaultFrame
+    }
+
     func windowShouldClose(_: NSWindow) -> Bool {
         if bypassNextWindowCloseConfirmation {
             bypassNextWindowCloseConfirmation = false

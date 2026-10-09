@@ -299,11 +299,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 perform: { [weak self] in self?.window?.performMiniaturize(nil) }
             ),
             AppCommand(
-                id: "window.zoom",
-                title: "Zoom Window",
-                shortcut: nil,
+                id: KeybindingAction.toggleMaximizeWindow.commandID,
+                title: KeybindingAction.toggleMaximizeWindow.title,
+                shortcut: KeybindingSettings.displayShortcut(for: .toggleMaximizeWindow),
                 isEnabled: window != nil,
-                perform: { [weak self] in self?.window?.performZoom(nil) }
+                perform: { [weak self] in self?.toggleMaximizeWindow(nil) }
             ),
             AppCommand(
                 id: "window.close",
@@ -313,6 +313,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 perform: { [weak self] in self?.window?.performClose(nil) }
             ),
         ]
+    }
+
+    @objc func toggleMaximizeWindow(_ sender: Any?) {
+        // Call zoom directly because the standard zoom button is hidden.
+        window?.zoom(sender)
     }
 
 }

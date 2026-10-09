@@ -1,9 +1,39 @@
 import AppKit
+import KeyboardShortcuts
 import XCTest
 @testable import Santty
 
 @MainActor
 final class AppMenuTests: XCTestCase {
+    func testMaximizeMenuUsesConfigurableLocalShortcut() throws {
+        let action = KeybindingAction.toggleMaximizeWindow
+        let shortcutName = action.shortcutName
+        let previousShortcut = KeyboardShortcuts.getShortcut(for: shortcutName)
+        let previousMainMenu = NSApp.mainMenu
+        let previousWindowsMenu = NSApp.windowsMenu
+        defer {
+            KeyboardShortcuts.setShortcut(previousShortcut, for: shortcutName)
+            NSApp.mainMenu = previousMainMenu
+            NSApp.windowsMenu = previousWindowsMenu
+        }
+        XCTAssertFalse(action.isGlobal)
+        XCTAssertEqual(action.defaultShortcut, .init(.m, modifiers: [.command, .option]))
+        KeyboardShortcuts.setShortcut(.init(.m, modifiers: [.command, .shift]), for: shortcutName)
+        let target = AppDelegate()
+        AppMenu.install(
+            applicationTarget: target, workspaceTarget: NSObject(),
+            commandPaletteAction: #selector(NSObject.description),
+            checkForUpdatesAction: #selector(NSObject.description),
+            settingsAction: #selector(NSObject.description),
+            notesAction: #selector(NSObject.description)
+        )
+        let item = try XCTUnwrap(NSApp.windowsMenu?.item(withTitle: action.title))
+        XCTAssertTrue(item.target === target)
+        XCTAssertEqual(item.action, #selector(AppDelegate.toggleMaximizeWindow(_:)))
+        XCTAssertEqual(item.keyEquivalent, "m")
+        XCTAssertEqual(item.keyEquivalentModifierMask, [.command, .shift])
+    }
+
     func testMainMenuIncludesEditMenuWithStandardEditingShortcuts() throws {
         let previousMainMenu = NSApp.mainMenu
         let previousWindowsMenu = NSApp.windowsMenu

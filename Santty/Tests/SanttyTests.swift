@@ -507,6 +507,40 @@ final class SanttyTests: XCTestCase {
     }
 
     @MainActor
+    func testMainWindowZoomFillsVisibleScreenAndRestoresFrameWithHiddenButtons() async throws {
+        XCTAssertFalse(NSScreen.screens.isEmpty)
+        for screen in NSScreen.screens {
+            for isWindowHidden in [false, true] {
+                let window = MainWindow(
+                    contentRect: NSRect(x: screen.visibleFrame.minX + 40,
+                        y: screen.visibleFrame.minY + 40, width: 720, height: 480),
+                    styleMask: [.titled, .resizable, .fullSizeContentView],
+                    backing: .buffered,
+                    defer: false
+                )
+                window.isReleasedWhenClosed = false
+                let controller = WorkspaceViewController()
+                window.delegate = controller
+                AppAppearanceDefaults.applyWindowPresentation(to: window, isWindowHidden: isWindowHidden)
+                // Keep test windows offscreen so external window managers cannot retile them.
+                defer { window.close() }
+                let originalFrame = window.frame
+                let visibleFrame = try XCTUnwrap(window.screen).visibleFrame
+                XCTAssertTrue(try XCTUnwrap(window.standardWindowButton(.zoomButton)).isHidden)
+
+                window.zoom(nil)
+                try await Task.sleep(for: .milliseconds(100))
+                XCTAssertEqual(window.frame, visibleFrame, "hidden=\(isWindowHidden)")
+                XCTAssertFalse(window.styleMask.contains(.fullScreen))
+
+                window.zoom(nil)
+                try await Task.sleep(for: .milliseconds(100))
+                XCTAssertEqual(window.frame, originalFrame, "hidden=\(isWindowHidden)")
+            }
+        }
+    }
+
+    @MainActor
     func testMainWindowAutosaveInstallsFrameName() {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 480),
