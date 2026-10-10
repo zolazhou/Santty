@@ -48,6 +48,7 @@ final class NotesContentController: NSViewController {
       onHeading: { [weak self] in self?.applyHeading($0) }
     )
     let hosting = NSHostingView(rootView: root)
+    hosting.appearance = NSAppearance(named: .darkAqua)
     hosting.sizingOptions = []
     view = hosting
   }

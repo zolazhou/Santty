@@ -9,6 +9,7 @@ struct NotesNativeEditor: NSViewRepresentable {
 
   func makeNSView(context: Context) -> NotesTextView {
     let editor = NotesTextView(usingTextLayoutManager: true)
+    editor.appearance = NSAppearance(named: .darkAqua)
     editor.configure()
     editor.documentID = documentID
     editor.modelText = text

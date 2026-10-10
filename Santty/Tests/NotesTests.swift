@@ -256,6 +256,8 @@ final class NotesIntegrationTests: XCTestCase {
     first.hostView.frame = NSRect(x: 0, y: 0, width: 640, height: 420)
     first.hostView.layoutSubtreeIfNeeded()
     let editor = try XCTUnwrap(first.focusTargetView as? NotesTextView)
+    XCTAssertEqual(first.content.view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua)
+    XCTAssertEqual(editor.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua)
     XCTAssertEqual(editor.string, "original")
     editor.insertText("edited in pane", replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
     XCTAssertEqual(first.content.store.text, "edited in pane")

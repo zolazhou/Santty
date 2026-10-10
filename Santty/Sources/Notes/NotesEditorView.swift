@@ -28,8 +28,14 @@ struct NotesEditorView: View {
 
     var body: some View {
         editorWithBars
-            .background(Color.black.opacity(0.40))
-            .background { NotesGlassBackground() }
+            .background(Color.black.opacity(isPane ? 0 : 0.40))
+            .background {
+                if isPane {
+                    NotesPaneBackground()
+                } else {
+                    NotesGlassBackground()
+                }
+            }
             .clipShape(RoundedRectangle(cornerRadius: isPane ? AppAppearanceSettings.paneCornerRadius : 26, style: .continuous))
             .ignoresSafeArea()
             .preferredColorScheme(.dark)
@@ -318,6 +324,14 @@ extension View {
             background(.regularMaterial, in: shape)
         }
     }
+}
+
+private struct NotesPaneBackground: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        AppAppearanceDefaults.makeVibrancyView(tintViewAlpha: AppAppearanceDefaults.vibrancyTintAlpha)
+    }
+
+    func updateNSView(_: NSVisualEffectView, context: Context) {}
 }
 
 private struct NotesGlassBackground: View {
