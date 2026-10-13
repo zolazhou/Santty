@@ -653,6 +653,28 @@ final class WorkspaceViewControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testWorkspaceSwitcherHasItsOwnBackgroundInHiddenWindowMode() throws {
+        let previousValue = AppAppearanceSettings.isWindowHidden
+        defer { AppAppearanceSettings.isWindowHidden = previousValue }
+        AppAppearanceSettings.isWindowHidden = true
+        let toolbar = WorkspaceToolbarView(frame: NSRect(x: 0, y: 0, width: 640, height: 32))
+        toolbar.layoutSubtreeIfNeeded()
+        let background = try XCTUnwrap(toolbar.subviews.compactMap { $0 as? NSVisualEffectView }.first)
+        XCTAssertFalse(background.isHidden)
+        XCTAssertEqual(background.frame, toolbar.workspaceSwitcher.frame)
+        XCTAssertEqual(background.blendingMode, .behindWindow)
+        XCTAssertEqual(background.layer?.cornerRadius, WorkspaceTabButtonView.cornerRadius)
+        XCTAssertTrue(background.subviews.contains { $0.identifier == AppAppearanceDefaults.vibrancyTintIdentifier })
+
+        AppAppearanceSettings.isWindowHidden = false
+        toolbar.updateAppearance()
+        XCTAssertTrue(background.isHidden)
+        AppAppearanceSettings.isWindowHidden = true
+        toolbar.updateAppearance()
+        XCTAssertFalse(background.isHidden)
+    }
+
+    @MainActor
     func testWorkspaceSwitcherKeepsMenuAndSelectionStableAcrossTabUpdates() async {
         let toolbar = WorkspaceToolbarView(frame: NSRect(x: 0, y: 0, width: 640, height: 32))
         let other = HerdrSnapshot.Workspace(workspace_id: "w2", label: "Other", active_tab_id: "t2")

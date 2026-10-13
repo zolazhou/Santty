@@ -47,6 +47,9 @@ final class WorkspaceToolbarView: NSView {
     let tabStripView = WorkspaceTabStripView()
     let agentStatusButton = WorkspaceStatusButtonView()
     let workspaceSwitcher = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let workspaceSwitcherBackground = AppAppearanceDefaults.makeVibrancyView(
+        tintViewAlpha: AppAppearanceDefaults.vibrancyTintAlpha
+    )
     var onSelectWorkspace: ((String) -> Void)?
     private var selectedWorkspaceID: String?
 
@@ -145,6 +148,7 @@ final class WorkspaceToolbarView: NSView {
             width: switcherWidth,
             height: toolbarHeight
         )
+        workspaceSwitcherBackground.frame = workspaceSwitcher.frame
         let tabX = bounds.minX + switcherWidth + (switcherWidth > 0 ? spacing : 0)
         let tabWidth = max(0, statusX - tabX - (statusWidth > 0 ? spacing : 0))
         tabStripView.frame = NSRect(
@@ -208,6 +212,7 @@ final class WorkspaceToolbarView: NSView {
     }
 
     func updateAppearance() {
+        workspaceSwitcherBackground.isHidden = !AppAppearanceSettings.isWindowHidden
         tabStripView.updateAppearance()
         for button in detachedPaneButtons.values {
             button.updateAppearance()
@@ -240,6 +245,11 @@ final class WorkspaceToolbarView: NSView {
 
         workspaceSwitcher.cell = WorkspacePickerCell(textCell: "", pullsDown: false)
         addSubview(workspaceSwitcher)
+        workspaceSwitcherBackground.wantsLayer = true
+        workspaceSwitcherBackground.layer?.cornerRadius = WorkspaceTabButtonView.cornerRadius
+        workspaceSwitcherBackground.layer?.masksToBounds = true
+        addSubview(workspaceSwitcherBackground, positioned: .below, relativeTo: workspaceSwitcher)
+        workspaceSwitcherBackground.isHidden = !AppAppearanceSettings.isWindowHidden
         updateWorkspaces([], selectedID: nil)
         // Santty chrome stays dark even when macOS uses the light appearance.
         workspaceSwitcher.appearance = NSAppearance(named: AppAppearanceDefaults.vibrancyAppearanceName)

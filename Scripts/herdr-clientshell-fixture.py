@@ -67,7 +67,7 @@ def control(s, kind, value):
 
 root = Path(__file__).resolve().parent.parent
 api_path, scenario = sys.argv[1:3]
-window_scenario = scenario in ('window-agents', 'window', 'window-popup', 'window-drop', 'window-no-runtime', 'window-split', 'window-floating-cursor', 'window-workspace-create') or scenario.startswith('window-tabs')
+window_scenario = scenario in ('window-agents', 'window', 'window-popup', 'window-drop', 'window-no-runtime', 'window-floating-cursor', 'window-workspace-create') or scenario.startswith(('window-tabs', 'window-split'))
 popup_live = scenario == 'window-popup'
 client_path = str(Path(api_path).with_name(Path(api_path).stem + '-client.sock'))
 golden = json.loads((root / 'Santty/Tests/Fixtures/herdr-clientshell-wire-v1.json').read_text())['payloads']
@@ -97,6 +97,7 @@ window_cells = (8, 16)
 window_serial = 65535
 window_active = False
 window_assets_sent = False
+window_split_ratio = 0.5
 api_listener = None
 api_subscribers = []
 
@@ -142,7 +143,7 @@ def window_frame():
              + b'\x01' + integer(cursor_x) + integer(cursor_y) + b'\x01\x02\x00\x00')
     visible = [p for p in snapshot['panes'] if p['tab_id'] == snapshot['focused_tab_id']]
     metadata = integer(len(visible))
-    left = (cols - 1) // 2
+    left = max(1, min(cols - 2, int((cols - 1) * window_split_ratio)))
     for index, item in enumerate(visible):
         x = 0 if index == 0 else left + 1
         width = cols if len(visible) == 1 else left if index == 0 else cols - left - 1
@@ -295,7 +296,7 @@ def serve_client(connection, hello=None):
         welcome['methods'].extend(['workspace.create', 'tab.create', 'pane.split'])
     if scenario.startswith('window-tabs-reorder'):
         welcome['methods'].append('tab.move')
-    if scenario == 'window-split':
+    if scenario.startswith('window-split'):
         welcome['methods'].append('layout.set_split_ratio')
     if scenario == 'window-workspace-create':
         welcome['methods'].extend(['workspace.create', 'workspace.close'])
@@ -371,6 +372,13 @@ def serve_client(connection, hello=None):
                 if scenario in ('slow-focus', 'window-tabs-slow') and request['method'] == 'pane.focus':
                     time.sleep(0.25)
                 response_value = dict(id=request['id'], result=result)
+                if scenario in ('window-split-slow', 'window-split-rejected') and request['method'] == 'layout.set_split_ratio':
+                    snapshot['revision'] += 1
+                    control(connection, 'shell.snapshot.v1', snapshot)
+                    send(connection, window_frame())
+                    time.sleep(0.25)
+                    if scenario == 'window-split-rejected':
+                        response_value = dict(id=request['id'], error=dict(code='resize_denied', message='Fixture rejected resizing'))
                 if scenario in ('window-tabs-reorder-slow', 'window-tabs-reorder-rejected') and request['method'] == 'tab.move':
                     snapshot['tabs'][0]['label'] = 'Updated while waiting'
                     snapshot['revision'] += 1
@@ -431,8 +439,10 @@ def serve_client(connection, hello=None):
                         window_assets_sent = False
                     if request['method'] == 'pane.rename':
                         snapshot['panes'][0]['label'] = request['params']['label']
-                        if scenario == 'window-split' and len(snapshot['panes']) == 1:
+                        if scenario.startswith('window-split') and len(snapshot['panes']) == 1:
                             snapshot['panes'].append(dict(snapshot['panes'][0], pane_id='w5:pC', focused=False))
+                    if request['method'] == 'layout.set_split_ratio' and 'error' not in response_value:
+                        window_split_ratio = request['params']['ratio']
                     if scenario.startswith('window-tabs-reorder') and scenario != 'window-tabs-reorder-rejected' and request['method'] == 'tab.move':
                         source = next(i for i, tab in enumerate(snapshot['tabs']) if tab['tab_id'] == request['params']['tab_id'])
                         insertion = request['params']['insert_index']

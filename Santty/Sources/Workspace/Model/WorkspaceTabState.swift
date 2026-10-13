@@ -21,6 +21,13 @@ final class WorkspaceTabState {
     var herdrLocalLayout: LayoutNode?
     var herdrLocalFraction: CGFloat = 0.7
     var herdrFocusedPaneID: PaneID?
+    struct SplitEdit {
+        let id = UUID()
+        let fractions: [CGFloat]
+        let paneIDs: [PaneID]
+        var acknowledged = false
+    }
+    var herdrSplitEdits: [[LayoutPathComponent]: SplitEdit] = [:]
     private var recentlyFocusedPaneIDs: [PaneID]
     var activeAutoZoomState: ActiveAutoZoomState?
     var activeFloatingPaneState: ActiveFloatingPaneState?
@@ -71,6 +78,7 @@ final class WorkspaceTabState {
         herdrLocalLayout = candidate.herdrLocalLayout
         herdrLocalFraction = candidate.herdrLocalFraction
         herdrFocusedPaneID = candidate.herdrFocusedPaneID
+        herdrSplitEdits = candidate.herdrSplitEdits
         recentlyFocusedPaneIDs = candidate.recentlyFocusedPaneIDs
         activeAutoZoomState = candidate.activeAutoZoomState
         activeFloatingPaneState = candidate.activeFloatingPaneState
@@ -145,7 +153,15 @@ final class WorkspaceTabState {
 
     func composeHerdrLayout() {
         guard let backend = herdrBackendLayout else { return }
-        layoutNode = combinedHerdrLayout(backend: backend)
+        layoutNode = combinedHerdrLayout(backend: previewHerdrLayout(backend))
+    }
+
+    func previewHerdrLayout(_ backend: LayoutNode) -> LayoutNode {
+        var preview = backend
+        for (path, edit) in herdrSplitEdits where backend.node(at: path)?.paneIDsInTraversalOrder == edit.paneIDs {
+            preview = preview.replacingFractions(at: path, with: edit.fractions) ?? preview
+        }
+        return preview
     }
 
     func combinedHerdrLayout(backend: LayoutNode) -> LayoutNode {
@@ -155,7 +171,7 @@ final class WorkspaceTabState {
 
     var renderedLayout: LayoutNode? {
         guard herdrZoomed, let backend = herdrBackendLayout, let focused = herdrFocusedPaneID else { return layoutNode }
-        return combinedHerdrLayout(backend: backend.path(to: focused) == nil ? backend : .panel(focused))
+        return combinedHerdrLayout(backend: backend.path(to: focused) == nil ? previewHerdrLayout(backend) : .panel(focused))
     }
 
     var lastFocusedTiledPaneID: PaneID? {

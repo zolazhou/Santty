@@ -114,7 +114,7 @@ JSON 管理通道保留在协议未提供的历史、进程信息、Santty CLI �
 1. boot ID 改变时丢弃旧请求、画面、图片、命中区域和输入路由，重新建立一致状态；不能仅凭 pane ID 重用旧运行时绑定。
 2. 可交互画面必须有同 boot、同 projection revision 的 snapshot/surface，尺寸与当前激活请求相符。未来 surface 有界暂存，过时消息拒绝；缺失匹配状态超过超时则重连。
 3. Patch 必须匹配基线且所有更新合法；先校验后修改，不能应用半张 patch。
-4. 切换意图只合并尚未发送的导航请求；输入不能跨切换排队到未知 pane。旧画面等待期间显示 pending 状态并关闭其输入路由，不能用乐观选择掩盖同步迟缓。
+4. 本地布局、焦点和 tab 选择立即按 Local 模式响应，再合并尚未发送的同步请求；旧回传不能覆盖最新本地意图。远端输入仍等待匹配的 snapshot/surface 和图文提交，不能跨切换排队到未知 pane。新建、关闭及后端重排等生命周期操作仍等待后端完成。
 5. 命令响应只表示操作结果，不能代替新画面的 revision 证据。带副作用命令超时或 ACK 丢失时不自动重试。
 6. 先顺序吸收所有图片资产及 patch，再考虑合并呈现。不能直接丢弃含新资产的旧 surface，因为下一帧可能只引用该资产。
 7. 多个 Ghostty surface 没有已确认的跨 surface 原子刷新 API：可保证同一逻辑 revision、同一主线程提交批次及单 surface 图文同步，不声称已经保证跨 GPU surface 同一刷新帧。拓扑改变时暂时冻结输入，保持旧一致画面到新 surface 可提交。
@@ -147,7 +147,7 @@ JSON 管理通道保留在协议未提供的历史、进程信息、Santty CLI �
 | --- | --- |
 | 主窗口改变尺寸 | 计算 Herdr backend 区域的统一 cols/rows 和 cell pixels，只发一次 ClientShellResize |
 | Notes/Browser 辅助树 | 继续由 Santty 管理；改变辅助区宽度会改变 backend 区域，再发送整体 resize |
-| 后端 pane divider | 用 surface 的 split path 发 `layout.set_split_ratio`，等待服务端返回新 geometry |
+| 后端 pane divider | 先更新本地比例，快捷键沿用 Local 动画；拖动结束或快捷键操作后用 split path 同步 `layout.set_split_ratio`。同一 divider 合并待发送值，不同 divider 分别保留；回传按整格几何校正，失败撤销对应预览 |
 | 隐藏后端 pane | 保留 backend 占位和逻辑 grid；停止本地呈现，不发零尺寸、不销毁 backend |
 | 后端 pane 浮动 | 把该 pane 的同一逻辑 viewport 移到浮窗；保留原占位，不发独立 PTY resize |
 | 浮窗或本地自动放大 | 第一版保持原逻辑行列，使用容器留白/裁剪展示；不把本地放大偷偷变成后端 zoom。按内容重排需要显式 Herdr zoom/resize 操作 |
@@ -281,7 +281,7 @@ CS3 接线前先明确这一区分，检查 CLI、Agent、历史与恢复的全�
 
 1. `client/mod.rs` 在没有单 pane attach request 时选择 client-rendered shell；`client/handshake.rs` 构造 endpoint hello。同一个 client socket 上使用二进制消息承载命名 JSON control、surface 与语义输入。
 2. inactive 连接先接收 metadata。`client/endpoint/activation/protocol.rs::send_surface_activation` 严格按 resize、surface activation、host focus 的顺序写同一连接；inactive endpoint 会拒绝 focus。
-3. 激活完成不仅检查 ACK，还核对 `projection_revision` 不早于 ACK、surface 的 rows/cols 与激活 geometry 一致，并确认 snapshot/surface 同 boot、同 generation、同 projection revision。Santty 的原生选择和输入开放必须沿用这个证据链。
+3. 激活完成不仅检查 ACK，还核对 `projection_revision` 不早于 ACK、surface 的 rows/cols 与激活 geometry 一致，并确认 snapshot/surface 同 boot、同 generation、同 projection revision。远端图文提交和输入开放必须沿用这个证据链；本地布局和选择可以先预览，但不能因此提前开放远端输入。
 4. 服务端 `client_shell::render_at` 构建整个 tab surface，`client_shell_graphics::collect` 调用 `kitty_graphics::surface::collect_scene`，根据 pane 内容矩形、popup、cell pixels、client delivery cache 收集图片。
 5. 常规客户端的 `kitty_graphics::surface::ClientState::set_scene` 保存新像素，结合 placements/retained assets 管理 desired scene，再编码为宿主终端图片命令。资产只发送一次后仍可继续被引用，所以后续完整帧也不是独立、无状态的图片快照。
 6. Santty 应替换链条末端的 TUI 呈现和宿主输出：先把一致 scene 投影为原生布局，再将每个 pane 的 cells/graphics 提交到相应 Ghostty surface。endpoint 的通信和输入语义保持一致。

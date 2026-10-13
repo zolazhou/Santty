@@ -92,14 +92,14 @@ final class HerdrWorkspaceClient: @unchecked Sendable {
                 throw CLIError("Herdr service changed; command was not sent through another transport")
             }
             // A resize can invalidate presentation between the caller's check and this actor hop.
-            if ["workspace.focus", "workspace.close", "workspace.rename", "tab.rename", "tab.focus", "pane.focus"].contains(method) {
+            if ["workspace.focus", "workspace.close", "workspace.rename", "tab.rename", "tab.focus", "pane.focus", "layout.set_split_ratio"].contains(method) {
                 let deadline = ProcessInfo.processInfo.systemUptime + 12
                 while !session.isPresentationReady {
                     try Task.checkCancellation()
                     guard session.serviceIdentity == identity, session.projection.snapshot?.boot_id == boot,
                           session.state != .disconnected else { throw CLIError("Herdr connection changed before navigation") }
                     if let failure = session.failure { throw failure }
-                    guard ProcessInfo.processInfo.systemUptime < deadline else { throw CLIError("Herdr navigation timed out waiting for presentation") }
+                    guard ProcessInfo.processInfo.systemUptime < deadline else { throw CLIError("Herdr operation timed out waiting for presentation") }
                     try await Task.sleep(for: .milliseconds(20))
                 }
             }

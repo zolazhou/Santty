@@ -6,6 +6,124 @@ import XCTest
 
 @MainActor
 final class HerdrClientShellSessionTests: XCTestCase {
+    func testDividerKeyboardPreviewAnimatesAndSurvivesDelayedOldProjection() async throws {
+        let (process, endpoint, path) = try await fixture("window-split-slow")
+        defer { cleanup(process, path); try? FileManager.default.removeItem(atPath: path) }
+        let workspace = WorkspaceViewController(); workspace.debugLoadForTesting()
+        workspace.herdrErrorHandler = { _ in }
+        try workspace.configureHerdrWorkspace(endpoint)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 650), styleMask: [], backing: .buffered, defer: false)
+        window.contentView = workspace.view; window.orderBack(nil)
+        defer { workspace.releaseHerdrConnections(); window.orderOut(nil); window.contentView = nil }
+        try await workspace.enterHerdrWorkspace("w5")
+        workspace.debugSetFocusedPaneName("trigger external split")
+        for _ in 0..<300 where workspace.debugPaneIDsInTraversalOrder.count != 2 || workspace.debugHerdrOperationPending || workspace.debugFocusedHerdrPane?.canAcceptInput != true {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let initial = try XCTUnwrap(workspace.debugRenderedSplitFractions(at: [])?.first)
+        workspace.debugPerformCommand(withID: "pane.resize.right")
+        XCTAssertEqual(try XCTUnwrap(workspace.debugRenderedSplitFractions(at: [])?.first), initial + 0.05, accuracy: 0.0001)
+        let root = try XCTUnwrap(workspace.view as? WorkspaceRootView)
+        let tiling = try XCTUnwrap(root.contentContainerView.subviews.compactMap { $0 as? WorkspaceTilingView }.first)
+        XCTAssertTrue(tiling.paneViews.values.contains { $0.layer?.animation(forKey: "santty.paneResize.flip") != nil })
+        // Let the first request start, then merge repeated keys into its final successor.
+        try await Task.sleep(for: .milliseconds(60))
+        workspace.debugPerformCommand(withID: "pane.resize.right")
+        workspace.debugPerformCommand(withID: "pane.resize.right")
+        let final = initial + 0.15
+        for _ in 0..<100 {
+            XCTAssertEqual(try XCTUnwrap(workspace.debugRenderedSplitFractions(at: [])?.first), final, accuracy: 0.02)
+            if !workspace.debugHerdrOperationPending, workspace.debugFocusedHerdrPane?.canAcceptInput == true { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        for _ in 0..<300 where workspace.debugHerdrOperationPending || workspace.debugFocusedHerdrPane?.canAcceptInput != true {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNil(workspace.herdrLastError)
+        XCTAssertTrue(workspace.debugFocusedHerdrPane?.canAcceptInput == true)
+        let trace = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path + ".trace"))) as? [[String: Any]])
+        let requests = trace.filter { $0["method"] as? String == "layout.set_split_ratio" }
+        XCTAssertEqual(requests.count, 2)
+        let params = try XCTUnwrap(requests.last?["params"] as? [String: Any])
+        XCTAssertEqual(try XCTUnwrap(params["ratio"] as? Double), Double(final), accuracy: 0.0001)
+        workspace.debugPerformCommand(withID: "pane.resize.equalize")
+        XCTAssertEqual(try XCTUnwrap(workspace.debugRenderedSplitFractions(at: [])?.first), 0.5, accuracy: 0.0001)
+        for _ in 0..<300 where workspace.debugHerdrOperationPending || workspace.debugFocusedHerdrPane?.canAcceptInput != true {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNil(workspace.herdrLastError)
+        let reversed = try XCTUnwrap(workspace.debugRenderedSplitFractions(at: [])?.first)
+        workspace.debugPerformCommand(withID: "pane.resize.right")
+        try await Task.sleep(for: .milliseconds(60))
+        workspace.debugPerformCommand(withID: "pane.resize.left")
+        for _ in 0..<300 {
+            XCTAssertEqual(try XCTUnwrap(workspace.debugRenderedSplitFractions(at: [])?.first), reversed, accuracy: 0.02,
+                           "Returning to the old ratio must not let an intermediate reply undo the latest edit")
+            if !workspace.debugHerdrOperationPending, workspace.debugFocusedHerdrPane?.canAcceptInput == true { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNil(workspace.herdrLastError)
+        try workspace.savedWorkspace().validate()
+    }
+
+    func testTabSelectionRespondsImmediatelyAndKeepsLatestChoiceDuringSync() async throws {
+        let (process, endpoint, path) = try await fixture("window-tabs-slow")
+        defer { cleanup(process, path); try? FileManager.default.removeItem(atPath: path) }
+        let workspace = WorkspaceViewController(); workspace.debugLoadForTesting()
+        workspace.herdrErrorHandler = { _ in }
+        try workspace.configureHerdrWorkspace(endpoint)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 650), styleMask: [], backing: .buffered, defer: false)
+        window.contentView = workspace.view; window.orderBack(nil)
+        defer { workspace.releaseHerdrConnections(); window.orderOut(nil); window.contentView = nil }
+        try await workspace.enterHerdrWorkspace("w5")
+        let first = try XCTUnwrap(workspace.debugSelectedTabID)
+        let second = try XCTUnwrap(workspace.debugTabIDs.first { $0 != first })
+        workspace.debugSelectTab(withID: second)
+        XCTAssertEqual(workspace.debugSelectedTabID, second)
+        try await Task.sleep(for: .milliseconds(60))
+        workspace.debugSelectTab(withID: first)
+        XCTAssertEqual(workspace.debugSelectedTabID, first)
+        workspace.debugSelectTab(withID: second)
+        XCTAssertEqual(workspace.debugSelectedTabID, second)
+        for _ in 0..<300 {
+            XCTAssertEqual(workspace.debugSelectedTabID, second, "Older projections must not undo a newer local selection")
+            if !workspace.debugHerdrOperationPending, workspace.debugFocusedHerdrPane?.canAcceptInput == true { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNil(workspace.herdrLastError)
+        XCTAssertTrue(workspace.debugFocusedHerdrPane?.canAcceptInput == true)
+        XCTAssertEqual(workspace.debugFocusedHerdrPane?.herdrBinding?.paneID, "w5:pB")
+        try XCTUnwrap(workspace.paletteNavigationItems.first { $0.kind == .tab && $0.isInCurrentWorkspace && !$0.isCurrent }).perform()
+        XCTAssertEqual(workspace.debugSelectedTabID, first, "Cached palette targets must select locally before waiting for Herdr")
+        await workspace.waitForPaletteNavigationForTesting()
+        XCTAssertEqual(workspace.debugSelectedTabID, first)
+        XCTAssertTrue(workspace.debugFocusedHerdrPane?.canAcceptInput == true)
+    }
+
+    func testRejectedDividerEditRestoresConfirmedLayout() async throws {
+        let (process, endpoint, path) = try await fixture("window-split-rejected")
+        defer { cleanup(process, path); try? FileManager.default.removeItem(atPath: path) }
+        let workspace = WorkspaceViewController(); workspace.debugLoadForTesting()
+        workspace.herdrErrorHandler = { _ in }
+        try workspace.configureHerdrWorkspace(endpoint)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 650), styleMask: [], backing: .buffered, defer: false)
+        window.contentView = workspace.view; window.orderBack(nil)
+        defer { workspace.releaseHerdrConnections(); window.orderOut(nil); window.contentView = nil }
+        try await workspace.enterHerdrWorkspace("w5")
+        workspace.debugSetFocusedPaneName("trigger external split")
+        for _ in 0..<300 where workspace.debugPaneIDsInTraversalOrder.count != 2 || workspace.debugHerdrOperationPending || workspace.debugFocusedHerdrPane?.canAcceptInput != true {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let initial = try XCTUnwrap(workspace.debugRenderedSplitFractions(at: [])?.first)
+        workspace.debugPerformCommand(withID: "pane.resize.right")
+        XCTAssertGreaterThan(try XCTUnwrap(workspace.debugRenderedSplitFractions(at: [])?.first), initial)
+        for _ in 0..<300 where workspace.herdrLastError == nil || workspace.debugHerdrOperationPending {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(workspace.herdrLastError?.contains("rejected resizing") == true)
+        XCTAssertEqual(try XCTUnwrap(workspace.debugRenderedSplitFractions(at: [])?.first), initial, accuracy: 0.02)
+    }
+
     func testPaletteNavigatesUnopenedHerdrTabsOtherWorkspacesAndCachedLocalPanes() async throws {
         let (process, endpoint, path) = try await fixture("window-tabs-palette")
         defer { cleanup(process, path); try? FileManager.default.removeItem(atPath: path) }
@@ -53,8 +171,11 @@ final class HerdrClientShellSessionTests: XCTestCase {
         XCTAssertNil(workspace.herdrLastError)
         let trace = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path + ".trace"))) as? [[String: Any]])
         XCTAssertEqual(trace.filter { $0["method"] as? String == "workspace.focus" && ($0["params"] as? [String: Any])?["workspace_id"] as? String == "w6" }.count, 1)
-        XCTAssertEqual(trace.filter { $0["method"] as? String == "tab.focus" && ($0["params"] as? [String: Any])?["tab_id"] as? String == "w5:t4" }.count, 1)
-        XCTAssertEqual(trace.filter { $0["method"] as? String == "pane.focus" }.count, 1)
+        XCTAssertEqual(trace.filter {
+            let params = $0["params"] as? [String: Any]
+            return ($0["method"] as? String == "tab.focus" && params?["tab_id"] as? String == "w5:t4")
+                || ($0["method"] as? String == "pane.focus" && params?["pane_id"] as? String == "w5:pA")
+        }.count, 1, "Cached tab navigation shares the normal local focus route and synchronizes once")
         XCTAssertTrue(process.isRunning)
         try workspace.savedWorkspace().validate()
         try workspace.configureHerdrWorkspace(.init(binary: endpoint.binary, session: endpoint.session, socketPath: path + ".missing"))

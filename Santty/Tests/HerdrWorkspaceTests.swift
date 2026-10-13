@@ -4,6 +4,33 @@ import XCTest
 
 @MainActor
 final class HerdrWorkspaceTests: XCTestCase {
+    @MainActor
+    func testLocalSplitPreviewKeepsIndependentEditsAcrossProjectionCandidates() throws {
+        let first = UUID(), second = UUID(), third = UUID()
+        let backend = LayoutNode.split(axis: .horizontal, children: [
+            .panel(first), .split(axis: .vertical, children: [.panel(second), .panel(third)], fractions: [0.5, 0.5])
+        ], fractions: [0.5, 0.5])
+        let tab = WorkspaceTabState(layoutNode: backend, paneControllers: [:], paneAutoResizeConfigurations: [:], focusedPaneID: first)
+        tab.herdrBackendLayout = backend
+        tab.herdrSplitEdits[[]] = .init(fractions: [0.6, 0.4], paneIDs: [first, second, third])
+        tab.herdrSplitEdits[[.child(1)]] = .init(fractions: [0.4, 0.6], paneIDs: [second, third])
+        tab.composeHerdrLayout()
+        let expected = try XCTUnwrap(backend.replacingFractions(at: [], with: [0.6, 0.4])?
+            .replacingFractions(at: [.child(1)], with: [0.4, 0.6]))
+        XCTAssertEqual(tab.layoutNode, expected)
+        XCTAssertEqual(tab.herdrBackendLayout, backend, "A preview must not overwrite confirmed backend geometry")
+        let candidate = tab.makeProjectionCandidate()
+        candidate.herdrBackendLayout = backend.replacingFractions(at: [], with: [0.55, 0.45])
+        candidate.composeHerdrLayout()
+        XCTAssertEqual(candidate.layoutNode, expected, "An older confirmed ratio must not replace either local edit")
+        candidate.herdrSplitEdits.removeValue(forKey: [])
+        XCTAssertEqual(tab.herdrSplitEdits.count, 2, "Staging must not modify installed intent")
+        tab.applyProjectionCandidate(candidate)
+        XCTAssertEqual(tab.herdrSplitEdits.count, 1)
+        let replacement = LayoutNode.split(axis: .horizontal, children: [.panel(first), .panel(UUID())], fractions: [0.5, 0.5])
+        XCTAssertEqual(tab.previewHerdrLayout(replacement), replacement, "Edits must not transfer to a different split topology")
+    }
+
     func testClientShellPublicPaneBindingDoesNotRequireOrInventRuntimeIdentity() throws {
         let endpoint = HerdrEndpoint(binary: URL(fileURLWithPath: "/usr/bin/true"), session: "default", socketPath: "/tmp/identity.sock")
         var metadata = try JSONDecoder().decode(HerdrSnapshot.Pane.self, from:

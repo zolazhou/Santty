@@ -194,7 +194,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     private var herdrShellRetainedPresentation: [any PaneControlling] = []
     private var herdrShellNativeLayoutPending = false
     private var pendingHerdrFocus: HerdrPaneBinding?
-    private var pendingHerdrSplit: (HerdrPaneBinding, HerdrConnection.Request.Params)?
+    private var optimisticHerdrFocus: HerdrPaneBinding?
+    private var pendingHerdrSplits: [(binding: HerdrPaneBinding, path: [LayoutPathComponent], edit: WorkspaceTabState.SplitEdit)] = []
     private var herdrWindowRestoreFailed = false
     private var herdrWindowIdentity: HerdrServiceIdentity?
     private(set) var herdrLastError: String?
@@ -1286,7 +1287,20 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
         clearActiveAutoZoomState(in: tabState, restoreLayout: false, animated: false)
         if tabState.herdrBackendLayout != nil {
+            if let backend = tabState.herdrBackendLayout {
+                func equalize(_ node: LayoutNode, path: [LayoutPathComponent]) {
+                    guard case let .split(_, children, _) = node else { return }
+                    let composedPath = tabState.herdrLocalLayout == nil ? path : [.child(0)] + path
+                    updateSplitFractions(at: composedPath, to: Array(repeating: 1 / CGFloat(children.count), count: children.count), changeSource: .userDrag)
+                    for (index, child) in children.enumerated() { equalize(child, path: path + [.child(index)]) }
+                }
+                equalize(backend, path: [])
+            }
             tabState.herdrLocalLayout = tabState.herdrLocalLayout?.equalizingSplitFractions()
+            if tabState.herdrLocalLayout != nil {
+                tabState.herdrLocalFraction = 0.5
+                scheduleHerdrShellResize()
+            }
             tabState.composeHerdrLayout()
         } else { tabState.layoutNode = layoutNode.equalizingSplitFractions() }
         for paneID in tabState.paneControllers.keys {
@@ -1297,9 +1311,6 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     }
 
     private func canEqualizePaneSplits() -> Bool {
-        if let tab = selectedTabState, tab.herdrBackendLayout != nil {
-            return (tab.herdrLocalLayout?.paneIDsInTraversalOrder.count ?? 0) > 1
-        }
         return (selectedTabState?.tiledPaneIDsInTraversalOrder.count ?? 0) > 1
     }
 
@@ -1334,7 +1345,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 
         if selectedTabState?.herdrBackendLayout != nil {
             updateSplitFractions(at: target.context.splitPath, to: clampedFractions, changeSource: .userDrag)
-            rebuildWorkspaceLayout()
+            if let tab = selectedTabState, let node = tab.renderedLayout {
+                target.tilingView.setLayoutNode(node, paneViews: buildPaneViewsDictionary(for: tab), animated: true)
+            }
             return
         }
         // Update the model
@@ -1651,12 +1664,6 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
         guard let tabState = tabState(containing: paneID) else {
             return
         }
-        if herdrWindowWorkspaceID != nil, !applyingHerdrLayout,
-           let binding = tabState.terminalPaneController(for: paneID)?.herdrBinding {
-            if paneID != tabState.herdrFocusedPaneID || tabState.id != selectedTabID { queueHerdrFocus(binding) }
-            return
-        }
-
         if tabState.id != selectedTabID {
             selectTab(withID: tabState.id)
         }
@@ -1684,7 +1691,6 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 
         if herdrWindowWorkspaceID != nil, !applyingHerdrLayout, let binding = tabState.terminalPaneController(for: paneID)?.herdrBinding {
             if paneID != tabState.focusedPaneID { queueHerdrFocus(binding) }
-            if herdrWindowWorkspaceID != nil { return }
         }
         guard paneID != tabState.focusedPaneID else {
             return
@@ -1888,7 +1894,6 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
            let tab = tabs.first(where: { $0.id == tabID }),
            let binding = (tab.herdrFocusedPaneID ?? tab.focusedPaneID).flatMap({ tab.terminalPaneController(for: $0)?.herdrBinding }) ?? tab.herdrTabBinding {
             if tabID != selectedTabID { queueHerdrFocus(binding) }
-            if herdrWindowWorkspaceID != nil, tabID != selectedTabID { return }
         }
         cancelPaneNameReveal()
 
@@ -2703,6 +2708,10 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
 
         if tabState.herdrBackendLayout != nil {
             guard changeSource == .userDrag, fractions.allSatisfy({ $0.isFinite && $0 > 0 && $0 < 1 }) else { return }
+            if tabState.activeAutoZoomState?.splitStates.contains(where: { $0.splitPath == path }) == true {
+                tabState.activeAutoZoomState = nil
+            }
+            disableAutoResizeForPanesAffectedBySplit(at: path, in: tabState)
             if tabState.herdrLocalLayout != nil, path.isEmpty {
                 guard fractions.count == 2 else { return }
                 tabState.herdrLocalFraction = fractions[0]
@@ -2719,8 +2728,12 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
             }
             guard changeSource == .userDrag, !tabState.herdrZoomed, fractions.count == 2, let binding = tabState.herdrTabBinding else { return }
             let corePath = tabState.herdrLocalLayout == nil ? path : Array(path.dropFirst())
-            let backendPath = corePath.map { component in if case .child(let index) = component { return index == 1 }; return false }
-            pendingHerdrSplit = (binding, .init(tab_id: binding.tabID, path: backendPath, ratio: Double(fractions[0])))
+            guard let split = tabState.herdrBackendLayout?.node(at: corePath) else { return }
+            let edit = WorkspaceTabState.SplitEdit(fractions: fractions, paneIDs: split.paneIDsInTraversalOrder)
+            tabState.herdrSplitEdits[corePath] = edit
+            tabState.composeHerdrLayout()
+            pendingHerdrSplits.removeAll { $0.binding.tabID == binding.tabID && $0.path == corePath }
+            pendingHerdrSplits.append((binding, corePath, edit))
             flushHerdrSplit()
             return
         }
@@ -4712,10 +4725,9 @@ extension WorkspaceViewController {
             tab.paneControllers = controllers
             let retainedFocus = tab.focusedPaneID.flatMap { controllers[$0] == nil ? nil : $0 }
             let localFocus = retainedFocus.map { native.path(to: $0) == nil || tab.isPaneDetached($0) || tab.activeFloatingPaneState?.paneID == $0 } == true
-            tab.focusedPaneID = localFocus
+            tab.focusedPaneID = localFocus || optimisticHerdrFocus != nil
                 ? retainedFocus : focusedNativeID
-            tab.herdrFocusedPaneID = focusedNativeID
-            tab.activeAutoZoomState = nil
+            if optimisticHerdrFocus == nil { tab.herdrFocusedPaneID = focusedNativeID }
             tab.detachedPaneIDs.removeAll { controllers[$0] == nil }
             if let floating = tab.activeFloatingPaneState, controllers[floating.paneID] == nil { tab.activeFloatingPaneState = nil }
             if let detached = tab.activeDetachedPaneID, controllers[detached] == nil { tab.activeDetachedPaneID = nil }
@@ -4757,11 +4769,11 @@ extension WorkspaceViewController {
         tabs = projection
         herdrWindowWorkspaceID = targetID
         herdrWindowIdentity = herdrWindowIdentity ?? panes.first?.serviceIdentity
-        let editingAuxiliary = projection.contains { tab in
+        let editingAuxiliary = optimisticHerdrFocus != nil || projection.contains { tab in
             tab.id == previousSelection && tab.focusedPaneID.map { tab.herdrBackendLayout?.path(to: $0) == nil } == true
         }
         let authoritativeTabID = shell?.tabs.first(where: { $0.workspace_id == targetID && $0.focused })?.tab_id ?? workspace.active_tab_id
-        let auxiliaryInActiveTab = editingAuxiliary && (herdrWindowWorkspaceID == nil
+        let auxiliaryInActiveTab = optimisticHerdrFocus != nil || editingAuxiliary && (herdrWindowWorkspaceID == nil
             || projection.first(where: { $0.id == previousSelection })?.herdrTabBinding?.tabID == authoritativeTabID)
         selectedTabID = auxiliaryInActiveTab && projection.contains(where: { $0.id == previousSelection })
             ? previousSelection : projection.first(where: { $0.herdrTabBinding?.tabID == authoritativeTabID })?.id ?? projection.first?.id
@@ -4809,6 +4821,7 @@ extension WorkspaceViewController {
     }
 
     private func queueHerdrFocus(_ binding: HerdrPaneBinding) {
+        optimisticHerdrFocus = binding
         pendingHerdrFocus = binding
         flushHerdrFocus()
     }
@@ -4828,6 +4841,7 @@ extension WorkspaceViewController {
                 _ = try await client.request("pane.focus", params: .init(pane_id: binding.paneID))
             } catch {
                 guard self.pendingHerdrFocus == nil else { return }
+                if self.optimisticHerdrFocus == binding { self.optimisticHerdrFocus = nil }
                 self.requestHerdrLayoutRefresh()
                 throw error
             }
@@ -4836,9 +4850,31 @@ extension WorkspaceViewController {
 
     private func flushHerdrSplit() {
         if herdrWindowWorkspaceID != nil, herdrShellSession?.isPresentationReady != true { return }
-        guard !herdrOperationPending, herdrWindowWorkspaceID != nil, let (binding, params) = pendingHerdrSplit else { return }
-        pendingHerdrSplit = nil
-        mutateHerdrLayout("layout.set_split_ratio", binding: binding, params: params)
+        guard !herdrOperationPending, herdrWindowWorkspaceID != nil, !pendingHerdrSplits.isEmpty else { return }
+        let pending = pendingHerdrSplits.removeFirst()
+        let backendPath = pending.path.map { $0 == .child(1) }
+        runHerdrOperation { client in
+            do {
+                try await client.verify(pending.binding)
+                guard let tab = self.tabs.first(where: { $0.herdrTabBinding?.tabID == pending.binding.tabID }),
+                      tab.herdrBackendLayout?.node(at: pending.path)?.paneIDsInTraversalOrder == pending.edit.paneIDs else {
+                    throw CLIError("Herdr split changed before resizing")
+                }
+                _ = try await client.request("layout.set_split_ratio", params: .init(tab_id: pending.binding.tabID,
+                    path: backendPath, ratio: Double(pending.edit.fractions[0])))
+                if tab.herdrSplitEdits[pending.path]?.id == pending.edit.id {
+                    tab.herdrSplitEdits[pending.path]?.acknowledged = true
+                }
+            } catch {
+                if let tab = self.tabs.first(where: { $0.herdrTabBinding?.tabID == pending.binding.tabID }),
+                   tab.herdrSplitEdits[pending.path]?.id == pending.edit.id {
+                    tab.herdrSplitEdits.removeValue(forKey: pending.path)
+                    tab.composeHerdrLayout()
+                    if tab.id == self.selectedTabID { self.rebuildWorkspaceLayout() }
+                }
+                throw error
+            }
+        }
     }
 
     private func mutateHerdrLayout(_ method: String, binding: HerdrPaneBinding, params: HerdrConnection.Request.Params) {
@@ -4862,7 +4898,7 @@ extension WorkspaceViewController {
         parkedLocalTabs = nil
         parkedSelectedTabID = nil
         herdrWindowWorkspaceID = nil
-        pendingHerdrSplit = nil
+        pendingHerdrSplits.removeAll()
         pendingHerdrFocus = nil
         herdrWindowIdentity = nil
         herdrWindowRestoreFailed = false
@@ -4910,7 +4946,11 @@ extension WorkspaceViewController {
         rootView.cancelStagedContentView()
         rootView.cancelStagedFloatingPaneView(); herdrShellRetainedPresentation.removeAll()
         herdrShellNativeLayoutPending = false
-        pendingHerdrFocus = nil; pendingHerdrSplit = nil
+        pendingHerdrFocus = nil; optimisticHerdrFocus = nil; pendingHerdrSplits.removeAll()
+        for tab in tabs + herdrAuxiliaryTabs {
+            tab.herdrSplitEdits.removeAll()
+            tab.composeHerdrLayout()
+        }
         herdrShellSession?.disconnect(); herdrShellSession = nil
         herdrShellPopup?.setPresented(false)
         rootView.removeHerdrPopupView(); herdrShellPopup = nil
@@ -5220,10 +5260,29 @@ extension WorkspaceViewController {
         let cell = CGSize(width: CGFloat(metrics.cellWidthPixels) / scale.width, height: CGFloat(metrics.cellHeightPixels) / scale.height)
         let projected = try tree.nativeShellLayout(panes: paneIDs, surface: surface, cellSize: cell,
             padding: TerminalSettings.padding, divider: WorkspaceLayoutMetrics.dividerThickness)
+        let confirmed = try tree.nativeLayout(panes: paneIDs)
+        let previousEditCount = tab.herdrSplitEdits.count
+        for (path, edit) in tab.herdrSplitEdits {
+            guard let node = confirmed.node(at: path), node.paneIDsInTraversalOrder == edit.paneIDs,
+                  case let .split(axis, _, fractions) = node else {
+                tab.herdrSplitEdits.removeValue(forKey: path)
+                continue
+            }
+            let ids = Set(edit.paneIDs.compactMap { tab.terminalPaneController(for: $0)?.herdrBinding?.paneID })
+            let rectangles = surface.panes.filter { ids.contains($0.pane_id) }.map(\.rect)
+            let start = rectangles.map { axis == .horizontal ? Int($0.x) : Int($0.y) }.min() ?? 0
+            let end = rectangles.map { axis == .horizontal ? Int($0.x) + Int($0.width) : Int($0.y) + Int($0.height) }.max() ?? 0
+            // Herdr rounds divider positions to whole terminal cells.
+            if edit.acknowledged, end > start, abs(fractions[0] - edit.fractions[0]) <= 1 / CGFloat(end - start) {
+                tab.herdrSplitEdits.removeValue(forKey: path)
+            }
+        }
         let keepLocalFocus = selectedTabID == tab.id
-            && tab.focusedPaneController.map { ($0 as? TerminalPaneController)?.herdrBinding == nil } == true
+            && (optimisticHerdrFocus.map { $0.tabID != snapshot.focused_tab_id || $0.paneID != snapshot.focused_pane_id } == true
+                || tab.focusedPaneController.map { ($0 as? TerminalPaneController)?.herdrBinding == nil } == true)
         let focused = snapshot.focused_pane_id.flatMap { paneIDs[$0] }
-        let changed = herdrShellNativeLayoutPending || topologyChanged || tab.herdrBackendLayout != projected || selectedTabID != tab.id
+        let changed = herdrShellNativeLayoutPending || topologyChanged || previousEditCount != tab.herdrSplitEdits.count
+            || tab.herdrBackendLayout != projected || selectedTabID != tab.id
         if changed { herdrShellNativeLayoutPending = true }
         tab.herdrBackendLayout = projected; tab.composeHerdrLayout()
         tab.herdrZoomed = snapshot.tabs.first(where: { $0.tab_id == tabID })?.zoomed == true
@@ -5347,9 +5406,19 @@ extension WorkspaceViewController {
         if let candidate = stagedTiling, !rootView.isStagedContentView(candidate) { return false }
         if let popup = stagedPopup, !rootView.isStagedHerdrPopupView(popup.terminalView) { return false }
         if let floating = stagedFloating, !rootView.isStagedFloatingPaneView(floating) { return false }
+        if optimisticHerdrFocus != nil, selectedTabID != tab.id {
+            // Parse and acknowledge old frames without replacing the locally selected tab.
+            return session.acknowledgePresentation(surface)
+        }
         // Existing hosts can retain their old focus until the matching output has parsed.
         applyingHerdrLayout = true
         if let candidate = stagedTiling {
+            var animatedFrames: [PaneID: NSRect] = [:]
+            if previousTab?.id == tab.id, let previousTiling = tilingView {
+                for (id, host) in previousTiling.paneViews where host.layer?.animation(forKey: "santty.paneResize.flip") != nil {
+                    animatedFrames[id] = host.layer?.presentation()?.frame ?? host.frame
+                }
+            }
             let previous = previousTab
             if let previous {
                 for case let pane as TerminalPaneController in previous.paneControllers.values {
@@ -5361,6 +5430,13 @@ extension WorkspaceViewController {
                 candidate.setLayoutNode(node, paneViews: buildPaneViewsDictionary(for: tab))
             }
             guard rootView.commitStagedContentView(candidate) else { applyingHerdrLayout = false; return false }
+            for (id, oldFrame) in animatedFrames {
+                if let host = candidate.paneViews[id] {
+                    candidate.animateFlip(view: host, oldFrame: oldFrame, newFrame: host.frame,
+                        duration: WorkspaceFocusZoomConfiguration.animationDuration,
+                        timingFunction: CAMediaTimingFunction(name: .easeInEaseOut))
+                }
+            }
             if let floating = stagedFloating {
                 guard rootView.commitStagedFloatingPaneView(floating) else { applyingHerdrLayout = false; return false }
             } else if let previous { suspendActiveFloatingPresentation(in: previous) }
@@ -5379,8 +5455,9 @@ extension WorkspaceViewController {
             herdrShellPopup = popup
         }
         let keepCurrentLocalFocus = selectedTabID == tab.id
-            && tab.focusedPaneController.map { ($0 as? TerminalPaneController)?.herdrBinding == nil } == true
-        tab.herdrFocusedPaneID = focused
+            && (optimisticHerdrFocus.map { $0.tabID != snapshot.focused_tab_id || $0.paneID != snapshot.focused_pane_id } == true
+                || tab.focusedPaneController.map { ($0 as? TerminalPaneController)?.herdrBinding == nil } == true)
+        if optimisticHerdrFocus == nil { tab.herdrFocusedPaneID = focused }
         if !keepCurrentLocalFocus { tab.focusedPaneID = focused; selectedTabID = tab.id }
         if stagedTiling != nil && stagedFloating == nil { restoreActiveFloatingPresentation(in: tab) }
         herdrShellRetainedPresentation.removeAll()
@@ -5411,6 +5488,10 @@ extension WorkspaceViewController {
         } else if !keepCurrentLocalFocus { applyFocusedPaneResponder() }
         applyingHerdrLayout = false
         guard preparedOutputs.allSatisfy({ $0.isCurrent() }), session.acknowledgePresentation(surface) else { return false }
+        if let pending = optimisticHerdrFocus, pending.tabID == snapshot.focused_tab_id,
+           pending.paneID == snapshot.focused_pane_id {
+            optimisticHerdrFocus = nil
+        }
         herdrShellNativeLayoutPending = false
         if view.window?.isKeyWindow == true {
             AgentSessionStore.shared.markViewed(tab.paneControllers.values.compactMap {
@@ -5544,6 +5625,16 @@ extension WorkspaceViewController {
         paletteNavigationTask?.cancel()
         paletteNavigationGeneration += 1
         let generation = paletteNavigationGeneration
+        if case let .herdr(binding, tabID, paneID, localPane) = target,
+           herdrWindowWorkspaceID == binding.workspaceID, herdrClient?.endpoint == binding.endpoint,
+           herdrShellSession?.serviceIdentity == binding.serviceIdentity,
+           let tab = tabs.first(where: { $0.herdrTabBinding?.tabID == tabID }),
+           let focus = localPane ?? paneID.flatMap({ id in
+               tab.paneControllers.values.first { ($0 as? TerminalPaneController)?.herdrBinding?.paneID == id }?.id
+           }) ?? (paneID == nil ? tab.focusedPaneID : nil), tab.containsPane(withID: focus) {
+            selectTab(withID: tab.id)
+            handlePaneFocusRequest(withID: focus)
+        }
         paletteNavigationTask = Task { [weak self] in
             guard let self else { return }
             do {
