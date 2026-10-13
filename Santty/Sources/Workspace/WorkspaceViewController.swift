@@ -1931,15 +1931,28 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSW
     private func moveTab(withID tabID: UUID, to destinationIndex: Int, backendCommitted: Bool = false) {
         if !backendCommitted, let tab = tabs.first(where: { $0.id == tabID }),
            let binding = tab.herdrTabBinding {
+            guard herdrClient != nil, !herdrOperationPending, !herdrWorkspaceClosed,
+                  herdrWindowWorkspaceID == nil || herdrShellSession?.isPresentationReady == true else {
+                rootView.tabStripView.cancelPendingTabReorder()
+                NSSound.beep()
+                return
+            }
             runHerdrOperation { [weak self] client in
                 guard let self, !self.tabs.isEmpty, self.tabs.contains(where: { $0.id == tabID }) else { return }
-                let backendTabIDs = try await client.orderedTabIDs(for: binding)
-                guard !backendTabIDs.isEmpty else { throw CLIError("Herdr workspace has no tabs to reorder") }
-                let localTarget = self.tabs[min(max(destinationIndex, 0), self.tabs.count - 1)]
-                let targetID = localTarget.herdrTabBinding?.tabID
-                let index = backendTabIDs.firstIndex { $0 == targetID } ?? max(0, backendTabIDs.count - 1)
-                _ = try await client.request("tab.move", params: .init(tab_id: binding.tabID, insert_index: index))
-                if self.herdrWindowWorkspaceID == nil { self.moveTab(withID: tabID, to: destinationIndex, backendCommitted: true) }
+                do {
+                    let backendTabIDs = try await client.orderedTabIDs(for: binding)
+                    guard let sourceIndex = backendTabIDs.firstIndex(of: binding.tabID) else { throw CLIError("Herdr tab disappeared before reordering") }
+                    let localTarget = self.tabs[min(max(destinationIndex, 0), self.tabs.count - 1)]
+                    let targetID = localTarget.herdrTabBinding?.tabID
+                    let index = backendTabIDs.firstIndex { $0 == targetID } ?? max(0, backendTabIDs.count - 1)
+                    // Herdr counts insertion positions before removal; dragging supplies the final index.
+                    let insertIndex = sourceIndex < index ? index + 1 : index
+                    _ = try await client.request("tab.move", params: .init(tab_id: binding.tabID, insert_index: insertIndex))
+                    if self.herdrWindowWorkspaceID == nil { self.moveTab(withID: tabID, to: destinationIndex, backendCommitted: true) }
+                } catch {
+                    self.rootView.tabStripView.cancelPendingTabReorder()
+                    throw error
+                }
             }
             return
         }

@@ -79,6 +79,9 @@ if scenario == 'navigation' or scenario.startswith('window-tabs'):
     pane = dict(snapshot['panes'][0], pane_id='w5:pB', tab_id='w5:t5', focused=False)
     snapshot['tabs'].append(tab)
     snapshot['panes'].append(pane)
+if scenario.startswith('window-tabs-reorder'):
+    snapshot['tabs'].append(dict(snapshot['tabs'][0], tab_id='w5:t6', number=6, focused=False))
+    snapshot['panes'].append(dict(snapshot['panes'][0], pane_id='w5:pC', tab_id='w5:t6', focused=False))
 if scenario == 'window-tabs-palette':
     snapshot['panes'][1]['label'] = 'Secondary shell'
     snapshot['workspaces'].append(dict(snapshot['workspaces'][0], workspace_id='w6', active_tab_id='w6:t1', number=6, label='Other', focused=False))
@@ -290,6 +293,8 @@ def serve_client(connection, hello=None):
                    capabilities=['surface_interest', 'health_check', 'presentation_effects_fence'])
     if scenario == 'creation':
         welcome['methods'].extend(['workspace.create', 'tab.create', 'pane.split'])
+    if scenario.startswith('window-tabs-reorder'):
+        welcome['methods'].append('tab.move')
     if scenario == 'window-split':
         welcome['methods'].append('layout.set_split_ratio')
     if scenario == 'window-workspace-create':
@@ -365,7 +370,16 @@ def serve_client(connection, hello=None):
                                                    tab_id=workspace + ':tNew', cwd='/tmp')
                 if scenario in ('slow-focus', 'window-tabs-slow') and request['method'] == 'pane.focus':
                     time.sleep(0.25)
-                response = json.dumps(dict(id=request['id'], result=result)).encode()
+                response_value = dict(id=request['id'], result=result)
+                if scenario in ('window-tabs-reorder-slow', 'window-tabs-reorder-rejected') and request['method'] == 'tab.move':
+                    snapshot['tabs'][0]['label'] = 'Updated while waiting'
+                    snapshot['revision'] += 1
+                    control(connection, 'shell.snapshot.v1', snapshot)
+                    send(connection, window_frame())
+                    time.sleep(0.6)
+                    if scenario == 'window-tabs-reorder-rejected':
+                        response_value = dict(id=request['id'], error=dict(code='reorder_denied', message='Fixture rejected reordering'))
+                response = json.dumps(response_value).encode()
                 half = len(response) // 2
                 for final, data in [(False, response[:half]), (True, response[half:])]:
                     send(connection, b'\x12' + string('boot') + string(request['id']) + bytes([final]) + integer(len(data)) + data)
@@ -419,6 +433,13 @@ def serve_client(connection, hello=None):
                         snapshot['panes'][0]['label'] = request['params']['label']
                         if scenario == 'window-split' and len(snapshot['panes']) == 1:
                             snapshot['panes'].append(dict(snapshot['panes'][0], pane_id='w5:pC', focused=False))
+                    if scenario.startswith('window-tabs-reorder') and scenario != 'window-tabs-reorder-rejected' and request['method'] == 'tab.move':
+                        source = next(i for i, tab in enumerate(snapshot['tabs']) if tab['tab_id'] == request['params']['tab_id'])
+                        insertion = request['params']['insert_index']
+                        assert 0 <= insertion <= len(snapshot['tabs'])
+                        destination = insertion - 1 if source < insertion else insertion
+                        tab = snapshot['tabs'].pop(source)
+                        snapshot['tabs'].insert(min(destination, len(snapshot['tabs'])), tab)
                     if request['method'] == 'workspace.rename':
                         target = next(w for w in snapshot['workspaces'] if w['workspace_id'] == request['params']['workspace_id'])
                         target['label'] = request['params']['label']

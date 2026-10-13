@@ -228,6 +228,95 @@ final class HerdrClientShellSessionTests: XCTestCase {
         XCTAssertTrue(workspace.savedWorkspace().otherLocalWorkspaces?.contains { $0.id == localID } == true)
     }
 
+    func testHerdrTabDragReordersBothDirectionsAndKeepsSelection() async throws {
+        let (process, endpoint, path) = try await fixture("window-tabs-reorder")
+        defer { cleanup(process, path); try? FileManager.default.removeItem(atPath: path) }
+        let workspace = WorkspaceViewController(); workspace.debugLoadForTesting()
+        workspace.herdrErrorHandler = { _ in }
+        try workspace.configureHerdrWorkspace(endpoint)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 650), styleMask: [], backing: .buffered, defer: false)
+        window.contentView = workspace.view; window.orderBack(nil)
+        defer { workspace.releaseHerdrConnections(); window.orderOut(nil); window.contentView = nil }
+        try await workspace.enterHerdrWorkspace("w5")
+        for _ in 0..<500 {
+            if workspace.debugTabIDs.count == 3, workspace.debugFocusedHerdrPane?.canAcceptInput == true { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let original = workspace.debugTabIDs
+        XCTAssertEqual(original.count, 3)
+        guard original.count == 3 else { return }
+        let selected = workspace.debugSelectedTabID
+        let strip = try XCTUnwrap((workspace.view as? WorkspaceRootView)?.tabStripView)
+        let cases: [(tab: UUID, drop: Int, expected: [UUID], insertion: Int)] = [
+            (original[0], 2, [original[1], original[0], original[2]], 2),
+            (original[0], 3, [original[1], original[2], original[0]], 3),
+            (original[0], 0, original, 0),
+            (original[2], 0, [original[2], original[0], original[1]], 0)
+        ]
+        for test in cases {
+            let plan = try XCTUnwrap(WorkspaceTabReorderPreviewPlan.make(draggedTabID: test.tab, modelIDs: workspace.debugTabIDs,
+                currentPreviewIDs: nil, proposedDisplayIndex: test.drop))
+            strip.onMoveTab?(test.tab, plan.modelDestinationIndex)
+            for _ in 0..<200 {
+                if !workspace.debugHerdrOperationPending, workspace.debugTabIDs == test.expected,
+                   workspace.debugFocusedHerdrPane?.canAcceptInput == true { break }
+                if workspace.herdrLastError != nil { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertNil(workspace.herdrLastError)
+            let trace = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path + ".trace"))) as? [[String: Any]])
+            let params = try XCTUnwrap(trace.last { $0["method"] as? String == "tab.move" }?["params"] as? [String: Any])
+            XCTAssertEqual(params["insert_index"] as? Int, test.insertion)
+            XCTAssertEqual(workspace.debugTabIDs, test.expected)
+            XCTAssertEqual(workspace.debugSelectedTabID, selected)
+            guard workspace.debugTabIDs == test.expected else { return }
+        }
+        let backend = try await HerdrWorkspaceClient(endpoint: endpoint).snapshot()
+        XCTAssertEqual(backend.tabs?.map(\.tab_id), ["w5:t6", "w5:t4", "w5:t5"])
+    }
+
+    func testHerdrTabDropStaysSettledDuringSyncAndRollsBackOnRejection() async throws {
+        for rejected in [false, true] {
+            let (process, endpoint, path) = try await fixture(rejected ? "window-tabs-reorder-rejected" : "window-tabs-reorder-slow")
+            defer { cleanup(process, path); try? FileManager.default.removeItem(atPath: path) }
+            let workspace = WorkspaceViewController(); workspace.debugLoadForTesting()
+            workspace.herdrErrorHandler = { _ in }
+            try workspace.configureHerdrWorkspace(endpoint)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 650), styleMask: [], backing: .buffered, defer: false)
+            window.contentView = workspace.view; window.orderBack(nil)
+            defer { workspace.releaseHerdrConnections(); window.orderOut(nil); window.contentView = nil }
+            try await workspace.enterHerdrWorkspace("w5")
+            for _ in 0..<500 {
+                if workspace.debugTabIDs.count == 3, workspace.debugFocusedHerdrPane?.canAcceptInput == true { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let original = workspace.debugTabIDs
+            guard original.count == 3 else { XCTFail("Missing fixture tabs"); return }
+            let expected = [original[1], original[2], original[0]]
+            let strip = try XCTUnwrap((workspace.view as? WorkspaceRootView)?.tabStripView)
+            XCTAssertTrue(strip.commitTabDrop(original[0], proposedDisplayIndex: 3))
+            strip.finishTabDrag()
+            XCTAssertEqual(strip.debugDisplayedTabIDs, expected, "Mouse-up must keep the dropped order before backend acknowledgement")
+            for _ in 0..<200 {
+                if strip.items.contains(where: { $0.title == "Updated while waiting" }) { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertTrue(workspace.debugHerdrOperationPending)
+            XCTAssertTrue(strip.items.contains { $0.title == "Updated while waiting" })
+            XCTAssertEqual(strip.debugDisplayedTabIDs, expected, "Metadata updates must not restore the old order while the request is pending")
+            for _ in 0..<500 where workspace.debugHerdrOperationPending { try await Task.sleep(for: .milliseconds(10)) }
+            for _ in 0..<200 {
+                if workspace.debugTabIDs == (rejected ? original : expected), strip.debugDisplayedTabIDs == workspace.debugTabIDs { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertEqual(workspace.debugTabIDs, rejected ? original : expected)
+            XCTAssertEqual(strip.debugDisplayedTabIDs, rejected ? original : expected)
+            XCTAssertEqual(workspace.debugSelectedTabID, original[0])
+            if rejected { XCTAssertNotNil(workspace.herdrLastError) }
+            else { XCTAssertNil(workspace.herdrLastError) }
+        }
+    }
+
     func testRenameHerdrWorkspaceAndTabUsesBackendLabels() async throws {
         let (process, endpoint, path) = try await fixture("window-workspace-create")
         defer { cleanup(process, path); try? FileManager.default.removeItem(atPath: path) }

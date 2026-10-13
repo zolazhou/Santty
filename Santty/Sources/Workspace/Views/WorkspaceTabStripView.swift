@@ -97,6 +97,15 @@ final class WorkspaceTabStripView: NSView {
                 return
             }
 
+            if var preview = dragPreviewState, preview.didCommit,
+               items.map(\.id) == oldValue.map(\.id) {
+                let updated = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+                preview.items = preview.items.compactMap { updated[$0.id] }
+                dragPreviewState = preview
+                reloadTabsWithoutAnimation()
+                needsLayout = true
+                return
+            }
             let previousDisplayedItems = dragPreviewState?.items ?? oldValue
             if let dragPreviewState {
                 self.dragPreviewState = nil
@@ -568,7 +577,7 @@ extension WorkspaceTabStripView: NSCollectionViewDelegate {
         pasteboardWriterForItemAt indexPath: IndexPath
     ) -> NSPasteboardWriting? {
         let currentItems = displayedItems
-        guard indexPath.item < currentItems.count else {
+        guard dragPreviewState?.didCommit != true, indexPath.item < currentItems.count else {
             return nil
         }
 
@@ -623,7 +632,11 @@ extension WorkspaceTabStripView: NSCollectionViewDelegate {
             return false
         }
 
-        let proposedIndex = min(max(indexPath.item, 0), displayedItems.count)
+        return commitTabDrop(tabID, proposedDisplayIndex: indexPath.item)
+    }
+
+    func commitTabDrop(_ tabID: UUID, proposedDisplayIndex: Int) -> Bool {
+        let proposedIndex = min(max(proposedDisplayIndex, 0), displayedItems.count)
         guard
             let plan = updateDragPreview(for: tabID, proposedDisplayIndex: proposedIndex),
             let sourceIndex = items.firstIndex(where: { $0.id == tabID })
@@ -686,8 +699,19 @@ extension WorkspaceTabStripView: NSCollectionViewDelegate {
             }
         }
 
+        finishTabDrag()
+    }
+
+    func finishTabDrag() {
+        guard dragPreviewState?.didCommit != true else { return }
         cancelDragPreview(animated: true)
     }
+
+    func cancelPendingTabReorder() {
+        cancelDragPreview(animated: true)
+    }
+
+    var debugDisplayedTabIDs: [UUID] { displayedItems.map(\.id) }
 }
 
 private final class WorkspaceTabCollectionViewItem: NSCollectionViewItem {
