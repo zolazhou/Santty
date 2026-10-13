@@ -34,18 +34,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let commandPaletteWindowController = CommandPaletteWindowController()
     private let settingsWindowController = SettingsWindowController()
     private var notesWindowController: NotesWindowController?
+    private var pendingAgentTarget: HerdrPaneBinding?
     private var menuKeyEquivalentMonitor: Any?
     private var terminalSettingsObserver: NSObjectProtocol?
     private var keybindingSettingsObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_: Notification) {
         TerminalLoggingConfiguration.apply()
-        AgentEventMonitor.shared.start()
-        installEnabledAgentIntegrations()
-        installMenuKeyEquivalentMonitor()
-        installKeybindingSettingsObserver()
-        KeyboardShortcuts.onKeyUp(for: KeybindingAction.toggleNotes.shortcutName) { [weak self] in
-            self?.toggleNotes(nil)
+        #if DEBUG
+        let restorationTest = ProcessInfo.processInfo.environment["SANTTY_WORKSPACE_TEST_MODE"] == "1"
+        #else
+        let restorationTest = false
+        #endif
+        if !restorationTest {
+            Task.detached {
+                do { try LegacyAgentHookCleanup().run() }
+                catch { NSLog("Legacy Santty hook cleanup failed: \(error.localizedDescription)") }
+            }
+            AgentNotifier.shared.onActivate = { [weak self] target in
+                guard let self else { return }
+                if let workspace = self.workspaceViewController {
+                    self.window?.makeKeyAndOrderFront(nil)
+                    NSApp.activate(ignoringOtherApps: true)
+                    workspace.navigateToHerdrAgent(target)
+                } else { self.pendingAgentTarget = target }
+            }
+            installMenuKeyEquivalentMonitor()
+            installKeybindingSettingsObserver()
+            KeyboardShortcuts.onKeyUp(for: KeybindingAction.toggleNotes.shortcutName) { [weak self] in self?.toggleNotes(nil) }
         }
 
         let _ = TerminalController.shared.setTheme(TerminalDefaults.theme)
@@ -53,6 +69,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installTerminalSettingsObserver()
         configureCommandPalette()
 
+        Task { await openWorkspaceWindow(restorationTest: restorationTest) }
+    }
+
+    private func openWorkspaceWindow(restorationTest: Bool) async {
         let window = MainWindow(
             contentRect: NSRect(origin: .zero, size: defaultContentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -60,6 +80,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         let workspaceViewController = WorkspaceViewController()
+        #if DEBUG
+        let testPath = ProcessInfo.processInfo.environment["SANTTY_WORKSPACE_TEST_PATH"]
+        #else
+        let testPath: String? = nil
+        #endif
+        await workspaceViewController.prepareWorkspacePersistence(url: testPath.map { URL(fileURLWithPath: $0) } ?? WorkspaceStore.defaultURL)
         window.title = "Santty"
         window.isMovableByWindowBackground = true
 
@@ -77,14 +103,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !MainWindowAutosave.install(on: window) {
             window.center()
         }
-        window.makeKeyAndOrderFront(nil)
+        if restorationTest { window.orderBack(nil) } else { window.makeKeyAndOrderFront(nil) }
         repairRestoredWindowSizeIfNeeded(window)
-        NSApp.activate(ignoringOtherApps: true)
+        if !restorationTest { NSApp.activate(ignoringOtherApps: true) }
         self.window = window
         self.workspaceViewController = workspaceViewController
-        CLIControlServer.shared.workspace = workspaceViewController
-        CLIControlServer.shared.start()
+        if let target = pendingAgentTarget {
+            pendingAgentTarget = nil
+            workspaceViewController.navigateToHerdrAgent(target)
+        }
+        if !restorationTest {
+            CLIControlServer.shared.workspace = workspaceViewController
+            CLIControlServer.shared.start()
+        }
         installMainMenu()
+        if !restorationTest, let warning = workspaceViewController.workspacePersistenceError {
+            let alert = NSAlert()
+            alert.messageText = "Workspace Restore Notice"
+            alert.informativeText = warning
+            await alert.beginSheetModal(for: window)
+        }
     }
 
     func applicationSupportsSecureRestorableState(_: NSApplication) -> Bool {
@@ -96,13 +134,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
-        guard notesWindowController != nil || workspaceViewController?.hasNotesPanes == true else { return .terminateNow }
+        guard notesWindowController != nil || workspaceViewController?.hasNotesPanes == true
+            || workspaceViewController?.hasHerdrConnectionsToRelease == true
+            || workspaceViewController?.hasWorkspacePersistence == true else { return .terminateNow }
         Task { @MainActor in
             guard await workspaceViewController?.prepareNotesToClose() != false else {
                 NSApp.reply(toApplicationShouldTerminate: false)
                 return
             }
             let saved = await notesWindowController?.prepareToTerminate() ?? true
+            if saved {
+                guard await workspaceViewController?.confirmWorkspaceSaveForClose() != false else {
+                    NSApp.reply(toApplicationShouldTerminate: false)
+                    return
+                }
+                await workspaceViewController?.finishHerdrShutdown()
+            }
             NSApp.reply(toApplicationShouldTerminate: saved)
         }
         return .terminateLater
@@ -119,22 +166,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let keybindingSettingsObserver {
             NotificationCenter.default.removeObserver(keybindingSettingsObserver)
         }
-        AgentEventMonitor.shared.stop()
+        workspaceViewController?.releaseHerdrConnections()
         CLIControlServer.shared.stop()
-    }
-
-    private func installEnabledAgentIntegrations() {
-        let installer = AgentIntegrationInstaller()
-        do {
-            if AgentNotificationSettings.isClaudeCodeEnabled {
-                try installer.installClaudeCodeIntegration()
-            }
-            if AgentNotificationSettings.isCodexEnabled {
-                try installer.installCodexIntegration()
-            }
-        } catch {
-            NSLog("Failed to install agent notification integration: \(error.localizedDescription)")
-        }
     }
 
     private func repairRestoredWindowSizeIfNeeded(_ window: NSWindow) {
@@ -265,9 +298,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureCommandPalette() {
+        commandPaletteWindowController.commandsProvider = { [weak self] in self?.makeCommandPaletteCommands() ?? [] }
         commandPaletteWindowController.onCommand = { [weak self] command in
             command.perform()
-            if command.id != KeybindingAction.toggleNotes.commandID {
+            if command.kind == .command, command.id != KeybindingAction.toggleNotes.commandID {
                 self?.workspaceViewController?.restoreFocusAfterCommandPalette()
             }
         }
@@ -277,7 +311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func makeCommandPaletteCommands() -> [AppCommand] {
-        var commands = workspaceViewController?.commandPaletteCommands ?? []
+        var commands = (workspaceViewController?.paletteNavigationItems ?? []) + (workspaceViewController?.commandPaletteCommands ?? [])
         commands.append(AppCommand(
             id: KeybindingAction.toggleNotes.commandID,
             title: "Notes",

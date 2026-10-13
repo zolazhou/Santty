@@ -2,7 +2,7 @@ import AppKit
 
 typealias PaneID = UUID
 
-enum SplitAxis: Equatable {
+enum SplitAxis: String, Codable, Sendable, Equatable {
     case horizontal
     case vertical
 }
@@ -90,7 +90,7 @@ struct ClosePaneResult {
     let promotedPaneID: PaneID?
 }
 
-indirect enum LayoutNode: Equatable {
+indirect enum LayoutNode: Codable, Sendable, Equatable {
     case panel(PaneID)
     case split(axis: SplitAxis, children: [LayoutNode], fractions: [CGFloat])
 

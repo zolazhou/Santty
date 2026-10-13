@@ -5,11 +5,14 @@ final class AgentManagerView: NSView {
     var onFocusPane: ((PaneID) -> Void)?
     var onClearEnded: (() -> Void)?
     var onCancel: (() -> Void)?
+    var onContentSizeChange: (() -> Void)?
 
     private var sessions: [AgentSessionSnapshot]
+    private var agentSessions: [AgentSessionSnapshot]
+    private let category = NSSegmentedControl(labels: ["Agents", "Messages"], trackingMode: .selectOne, target: nil, action: nil)
     private var selectedIndex = 0
     private let titleLabel = NSTextField(labelWithString: "Agents")
-    private let clearButton = NSButton(title: "Clear Ended", target: nil, action: nil)
+    private let clearButton = NSButton(title: "Clear Read", target: nil, action: nil)
     private let scrollView = NSScrollView()
     private let stackView = NSStackView()
     private let emptyLabel = NSTextField(labelWithString: "No tracked agents")
@@ -20,6 +23,7 @@ final class AgentManagerView: NSView {
 
     init(sessions: [AgentSessionSnapshot]) {
         self.sessions = sessions
+        self.agentSessions = sessions
         super.init(frame: NSRect(x: 0, y: 0, width: 480, height: 180))
         wantsLayer = true
         layer?.backgroundColor = AgentManagerTheme.backgroundColor.cgColor
@@ -46,7 +50,8 @@ final class AgentManagerView: NSView {
             x: bounds.maxX - padding - clearButton.frame.width,
             y: 10
         )
-        let contentY = titleLabel.frame.maxY + 10
+        category.frame = NSRect(x: padding, y: titleLabel.frame.maxY + 8, width: 230, height: 24)
+        let contentY = category.frame.maxY + 10
         let contentHeight = max(0, bounds.height - contentY - padding)
         scrollView.frame = NSRect(
             x: padding,
@@ -74,21 +79,32 @@ final class AgentManagerView: NSView {
     }
 
     func updateSessions(_ sessions: [AgentSessionSnapshot]) {
-        self.sessions = sessions
-        if selectedIndex >= sessions.count {
-            selectedIndex = max(0, sessions.count - 1)
-        }
+        agentSessions = sessions
+        refreshCategory()
+    }
+
+    @objc private func refreshCategory() {
+        let selectedID = self.sessions.indices.contains(selectedIndex) ? self.sessions[selectedIndex].id : nil
+        sessions = category.selectedSegment == 1 ? AgentSessionStore.shared.messageSnapshots : agentSessions
+        selectedIndex = selectedID.flatMap { id in sessions.firstIndex { $0.id == id } } ?? 0
+        emptyLabel.stringValue = category.selectedSegment == 1 ? "No agent messages" : "No tracked agents"
         reloadRows()
         invalidateIntrinsicContentSize()
         needsLayout = true
+        onContentSizeChange?()
     }
 
     var preferredHeight: CGFloat {
         let rowHeight = CGFloat(max(sessions.count, 1)) * AgentManagerRowView.rowHeight
-        return min(520, max(180, 58 + rowHeight + 18))
+        return min(520, max(180, 92 + rowHeight + 18))
     }
 
     private func configureSubviews() {
+        addSubview(category)
+        category.selectedSegment = 0
+        category.target = self
+        category.action = #selector(refreshCategory)
+        category.setAccessibilityLabel("Agent list category")
         addSubview(titleLabel)
         addSubview(clearButton)
         addSubview(scrollView)
@@ -130,7 +146,7 @@ final class AgentManagerView: NSView {
 
         emptyLabel.isHidden = !sessions.isEmpty
         scrollView.isHidden = sessions.isEmpty
-        clearButton.isEnabled = sessions.contains { !$0.isUnread && $0.isClearableWhenRead }
+        clearButton.isEnabled = sessions.contains { !$0.isUnread }
 
         for (index, session) in sessions.enumerated() {
             let rowView = AgentManagerRowView(session: session)
@@ -368,6 +384,8 @@ private final class AgentManagerRowView: NSControl {
         agentLabel.stringValue = session.agent.displayName
         statusLabel.stringValue = session.statusText
         detailLabel.stringValue = session.detailText
+        setAccessibilityLabel("\(session.agent.displayName), \(session.statusText), \(session.detailText)")
+        messageLabel.toolTip = session.message
         messageLabel.stringValue = session.message ?? ""
         messageLabel.isHidden = session.message == nil
     }
@@ -391,6 +409,7 @@ extension AgentSessionSnapshot {
     }
 
     fileprivate var statusText: String {
+        guard backendStatusAvailable else { return "Status Unavailable" }
         let baseText =
             switch displayState {
             case .running:
@@ -399,6 +418,10 @@ extension AgentSessionSnapshot {
                 "Turn Completed"
             case .waitingForUser:
                 "Waiting for You"
+            case .idle:
+                "Idle"
+            case .unknown:
+                "Unknown"
             case .sessionEnded:
                 "Session Ended"
             }
@@ -410,21 +433,21 @@ extension AgentSessionSnapshot {
         [
             paneTitle,
             workingDirectory.map(lastPathComponent),
-            processID.map { "pid \($0)" },
             relativeTimeString(from: lastEventAt),
         ].compactMap { $0 }.joined(separator: " · ")
     }
 
     fileprivate var statusColor: NSColor {
-        switch displayState {
+        guard backendStatusAvailable else { return AgentManagerTheme.secondaryTextColor }
+        return switch displayState {
         case .waitingForUser:
-            return .systemOrange
+            .systemOrange
         case .turnCompleted where isUnread:
-            return .systemGreen
+            .systemGreen
         case .sessionEnded:
-            return AgentManagerTheme.secondaryTextColor
+            AgentManagerTheme.secondaryTextColor
         default:
-            return AgentManagerTheme.tertiaryTextColor
+            AgentManagerTheme.tertiaryTextColor
         }
     }
 

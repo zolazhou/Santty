@@ -2,113 +2,62 @@ import Foundation
 import UserNotifications
 
 @MainActor
-final class AgentNotifier {
+final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = AgentNotifier()
+    var onActivate: ((HerdrPaneBinding) -> Void)?
+    private var recentTerminalNotices: [Int: TimeInterval] = [:]
 
-    private init() {}
+    private override init() {
+        super.init()
+        UNUserNotificationCenter.current().delegate = self
+    }
+
+    func notifyAgent(_ message: AgentMessage) {
+        guard AgentNotificationSettings.allows(message.agent),
+              let target = try? JSONEncoder().encode(message.binding).base64EncodedString() else { return }
+        let content = UNMutableNotificationContent()
+        content.title = shortened(message.title)
+        content.body = shortened([message.context, message.body].compactMap { $0 }.joined(separator: ": "))
+        if message.sound { content.sound = .default }
+        content.userInfo = ["herdrTarget": target]
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "herdr.agent.\(message.id)", content: content, trigger: nil))
+    }
+
+    func notifyTerminal(title: String, body: String?, sound: Bool, identity: String) {
+        let title = shortened(title), body = shortened(body ?? "")
+        var hasher = Hasher(); hasher.combine(identity); hasher.combine(title); hasher.combine(body)
+        let key = hasher.finalize(), now = ProcessInfo.processInfo.systemUptime
+        if let previous = recentTerminalNotices[key], now - previous < 2 { return }
+        if recentTerminalNotices.count >= 64, let oldest = recentTerminalNotices.min(by: { $0.value < $1.value })?.key { recentTerminalNotices.removeValue(forKey: oldest) }
+        recentTerminalNotices[key] = now
+        let content = UNMutableNotificationContent()
+        content.title = title; content.body = body
+        if sound { content.sound = .default }
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "herdr-\(key)", content: content, trigger: nil))
+    }
 
     func requestAuthorization() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) {
-            _, _ in
-        }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    func notifyStop(_ event: AgentStopEvent) {
-        let content = UNMutableNotificationContent()
-        content.title = "\(event.agent.displayName) finished"
-        content.body = notificationBody(for: event)
-        content.sound = .default
-
-        let request = UNNotificationRequest(
-            identifier: "agent-stop-\(UUID().uuidString)",
-            content: content,
-            trigger: nil
-        )
-        UNUserNotificationCenter.current().add(request)
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                            withCompletionHandler completionHandler: @escaping () -> Void) {
+        let target = response.notification.request.content.userInfo["herdrTarget"] as? String
+        if response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+           let target, target.utf8.count <= 16384, let data = Data(base64Encoded: target),
+           let binding = try? JSONDecoder().decode(HerdrPaneBinding.self, from: data) {
+            Task { @MainActor [weak self] in self?.onActivate?(binding) }
+        }
+        completionHandler()
     }
 
-    func notify(_ event: AgentNotificationEvent) {
-        let content = UNMutableNotificationContent()
-        content.title = notificationTitle(for: event)
-        content.body = notificationBody(for: event)
-        content.sound = .default
-
-        let request = UNNotificationRequest(
-            identifier: "agent-notification-\(UUID().uuidString)",
-            content: content,
-            trigger: nil
-        )
-        UNUserNotificationCenter.current().add(request)
-    }
-
-    private func notificationBody(for event: AgentStopEvent) -> String {
-        let paneTitle = event.paneID
-            .flatMap { AgentPaneRegistry.shared.snapshot(for: $0)?.title }
-
-        if let message = event.message {
-            return [paneTitle, shortened(message)]
-                .compactMap { $0 }
-                .joined(separator: ": ")
-        }
-
-        if let workingDirectory = event.workingDirectory {
-            let directoryName = URL(fileURLWithPath: workingDirectory).lastPathComponent
-            return [paneTitle, directoryName]
-                .compactMap { $0 }
-                .joined(separator: ": ")
-        }
-
-        return paneTitle.map { "\($0): Agent turn completed." } ?? "Agent turn completed."
-    }
-
-    private func notificationTitle(for event: AgentNotificationEvent) -> String {
-        switch event.kind {
-        case .permissionRequested:
-            return "\(event.agent.displayName) needs permission"
-        case .notification:
-            return "\(event.agent.displayName) notification"
-        case .permissionDenied:
-            return "\(event.agent.displayName) denied permission"
-        }
-    }
-
-    private func notificationBody(for event: AgentNotificationEvent) -> String {
-        let paneTitle = event.paneID
-            .flatMap { AgentPaneRegistry.shared.snapshot(for: $0)?.title }
-
-        if let message = event.message {
-            return [paneTitle, shortened(message)]
-                .compactMap { $0 }
-                .joined(separator: ": ")
-        }
-
-        if let workingDirectory = event.workingDirectory {
-            let directoryName = URL(fileURLWithPath: workingDirectory).lastPathComponent
-            return [paneTitle, directoryName]
-                .compactMap { $0 }
-                .joined(separator: ": ")
-        }
-
-        return switch event.kind {
-        case .permissionRequested:
-            paneTitle.map { "\($0): Permission request." } ?? "Permission request."
-        case .notification:
-            paneTitle.map { "\($0): Notification." } ?? "Notification."
-        case .permissionDenied:
-            paneTitle.map { "\($0): Permission denied." } ?? "Permission denied."
-        }
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                            withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
     }
 
     private func shortened(_ value: String) -> String {
-        let normalizedValue =
-            value
-            .split(whereSeparator: \.isNewline)
-            .joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard normalizedValue.count > 140 else {
-            return normalizedValue
-        }
-
-        return String(normalizedValue.prefix(137)) + "..."
+        let text = value.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.count > 180 ? String(text.prefix(177)) + "..." : text
     }
 }

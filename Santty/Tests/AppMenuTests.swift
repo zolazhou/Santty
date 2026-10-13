@@ -58,6 +58,27 @@ final class AppMenuTests: XCTestCase {
         XCTAssertTrue(notesItem.target === target)
         XCTAssertEqual(notesItem.keyEquivalent, "")
         let paneMenu = try XCTUnwrap(mainMenu.items.first { $0.submenu?.title == "Pane" }?.submenu)
+        XCTAssertNil(paneMenu.item(withTitle: "Herdr Connection Settings..."))
+        XCTAssertNil(paneMenu.item(withTitle: "Enter Herdr Mode…"))
+        XCTAssertNil(paneMenu.item(withTitle: "New Persistent Terminal"))
+        XCTAssertFalse(KeybindingAction.allCases.contains { $0.commandID == "terminal.herdr.new" })
+        XCTAssertEqual(paneMenu.item(withTitle: "New Herdr Workspace")?.action,
+            #selector(WorkspaceViewController.newHerdrWorkspace(_:)))
+        XCTAssertNil(KeybindingAction.newHerdrWorkspace.defaultShortcut)
+        XCTAssertEqual(paneMenu.item(withTitle: "New Workspace")?.action,
+            #selector(WorkspaceViewController.newWorkspace(_:)))
+        XCTAssertNil(KeybindingAction.newWorkspace.defaultShortcut)
+        XCTAssertNil(paneMenu.item(withTitle: "Close Herdr Workspace"))
+        XCTAssertEqual(paneMenu.item(withTitle: "Close Workspace")?.action,
+            #selector(WorkspaceViewController.closeWorkspace(_:)))
+        XCTAssertNil(KeybindingAction.closeWorkspace.defaultShortcut)
+        XCTAssertEqual(paneMenu.item(withTitle: "Rename Workspace")?.action,
+            #selector(WorkspaceViewController.renameWorkspace(_:)))
+        XCTAssertNil(KeybindingAction.renameWorkspace.defaultShortcut)
+        let tabMenu = try XCTUnwrap(mainMenu.items.first { $0.submenu?.title == "Tab" }?.submenu)
+        XCTAssertEqual(tabMenu.item(withTitle: "Rename Tab")?.action,
+            #selector(WorkspaceViewController.renameTab(_:)))
+        XCTAssertNil(KeybindingAction.renameTab.defaultShortcut)
         XCTAssertEqual(paneMenu.item(withTitle: "Rename Pane...")?.action,
             #selector(WorkspaceViewController.renamePane(_:)))
         let editMenu = try XCTUnwrap(

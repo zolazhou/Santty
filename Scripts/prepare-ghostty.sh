@@ -29,3 +29,21 @@ cp "$repo_dir/Patches/TerminalSurface+ScrollMode.swift" \
 if ! grep -q 'var scrollModeViewport:' "$package_dir/Sources/GhosttyTerminal/InMemory/TerminalCallbackBridge.swift"; then
     patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/TerminalCallbackBridge+ScrollMode.patch"
 fi
+if ! grep -q 'public func waitForPendingOutput()' "$package_dir/Sources/GhosttyTerminal/InMemory/InMemoryTerminalSession.swift"; then
+    patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/InMemoryTerminalSession+OutputBarrier.patch"
+fi
+if ! grep -q 'public func receiveIfAttached(' "$package_dir/Sources/GhosttyTerminal/InMemory/InMemoryTerminalSession.swift"; then
+    patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/InMemoryTerminalSession+OutputReceipt.patch"
+fi
+if ! grep -q 'public var semanticKeyHandler:' "$package_dir/Sources/GhosttyTerminal/Platform/AppKit/AppTerminalView.swift"; then
+    patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/AppTerminalView+SemanticInput.patch"
+fi
+if ! grep -q 'public func invalidateClipboardWrites()' "$package_dir/Sources/GhosttyTerminal/Platform/AppKit/AppTerminalView.swift"; then
+    patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/TerminalClipboardWrite+Policy.patch"
+fi
+if ! grep -q 'public func requestClipboardWrite(' "$package_dir/Sources/GhosttyTerminal/Platform/AppKit/AppTerminalView.swift"; then
+    patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/TerminalClipboardWrite+HostEvent.patch"
+fi
+if ! grep -q 'var pendingHostClipboardBytes = 0' "$package_dir/Sources/GhosttyTerminal/InMemory/TerminalCallbackBridge.swift"; then
+    patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/TerminalClipboardWrite+HostEventBudget.patch"
+fi

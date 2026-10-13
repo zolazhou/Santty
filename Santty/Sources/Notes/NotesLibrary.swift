@@ -45,13 +45,16 @@ final class NotesLibrary {
         }
     }
 
-    func load() async {
+    func load(preferredFileName: String? = nil) async {
         guard !isWorking else { return }
         isWorking = true
         defer { isWorking = false }
         do {
             notes = try await files.list()
-            let preferred = defaults.string(forKey: "Santty.NotesLastFile")
+            if let preferredFileName, !notes.contains(where: { $0.id == preferredFileName }) {
+                throw CLIError("Saved note is missing: \(preferredFileName). Select another note explicitly.")
+            }
+            let preferred = preferredFileName ?? defaults.string(forKey: "Santty.NotesLastFile")
             let selected = notes.first(where: { $0.id == preferred })?.id
                 ?? notes.first(where: { $0.id == activeID })?.id ?? notes.first?.id
             if let selected, selected != activeID {

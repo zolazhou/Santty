@@ -1,0 +1,7 @@
+--- a/Sources/GhosttyTerminal/InMemory/InMemoryTerminalSession.swift
++++ b/Sources/GhosttyTerminal/InMemory/InMemoryTerminalSession.swift
+@@ -260,1 +260,3 @@
+-    func waitForPendingOutput() {
++    /// Wait off the main thread before accepting another external output frame.
++    /// This bounds the host-managed parsing queue without changing the C core.
++    public func waitForPendingOutput() {

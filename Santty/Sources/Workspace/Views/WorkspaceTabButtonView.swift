@@ -2,6 +2,7 @@ import AppKit
 
 @MainActor
 final class WorkspaceTabButtonView: NSControl {
+    static let cornerRadius: CGFloat = 16
     var titleFont: NSFont {
         get {
             titleLabel.font ?? .systemFont(ofSize: 12, weight: .medium)
@@ -105,7 +106,7 @@ final class WorkspaceTabButtonView: NSControl {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.cornerRadius = 16
+        layer?.cornerRadius = Self.cornerRadius
         layer?.masksToBounds = true
 
         configureTitleLabel()

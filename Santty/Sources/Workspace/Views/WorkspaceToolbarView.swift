@@ -1,6 +1,32 @@
 import AppKit
 
 @MainActor
+private final class WorkspacePickerCell: NSPopUpButtonCell {
+    private let arrow = NSImage(systemSymbolName: "chevron.up.chevron.down", accessibilityDescription: nil)?
+        .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold)
+            .applying(.init(paletteColors: [.white])))
+
+    override func drawBezel(withFrame frameRect: NSRect, in controlView: NSView) {
+        let path = NSBezierPath(roundedRect: controlView.bounds.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: WorkspaceTabButtonView.cornerRadius,
+                                yRadius: WorkspaceTabButtonView.cornerRadius)
+        NSColor.white.withAlphaComponent(isHighlighted ? 0.12 : 0.06).setFill()
+        path.fill()
+        NSColor.white.withAlphaComponent(0.10).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+        // AppKit normally paints the popup arrow as part of its bezel.
+        guard let arrow else { return }
+        let size = arrow.size
+        arrow.draw(in: NSRect(x: controlView.bounds.maxX - 14 - size.width / 2,
+                             y: controlView.bounds.midY - size.height / 2,
+                             width: size.width, height: size.height),
+                    from: .zero, operation: .sourceOver, fraction: isEnabled ? 0.82 : 0.4,
+                    respectFlipped: true, hints: nil)
+    }
+}
+
+@MainActor
 private final class WorkspaceToolbarStackView: NSStackView {
     override var mouseDownCanMoveWindow: Bool { true }
 
@@ -20,8 +46,61 @@ struct DetachedPaneStatusItem: Equatable {
 final class WorkspaceToolbarView: NSView {
     let tabStripView = WorkspaceTabStripView()
     let agentStatusButton = WorkspaceStatusButtonView()
+    let workspaceSwitcher = NSPopUpButton(frame: .zero, pullsDown: false)
+    var onSelectWorkspace: ((String) -> Void)?
+    private var selectedWorkspaceID: String?
+
+    func updateWorkspaces(_ workspaces: [HerdrSnapshot.Workspace], selectedID: String?,
+                          localWorkspaces: [(id: String, name: String)] = [("", "Default")]) {
+        let entries = localWorkspaces.map { (id: $0.id, label: $0.name, symbol: "desktopcomputer", type: "Local workspace") }
+            + workspaces.map { (id: $0.workspace_id, label: $0.label, symbol: "server.rack", type: "Herdr workspace") }
+        let selectedID = selectedID ?? ""
+        let items = workspaceSwitcher.itemArray
+        let optionsChanged = items.count != entries.count || !zip(entries, items).allSatisfy {
+            $0.id == $1.representedObject as? String && $0.label == $1.title
+        }
+        let selectionChanged = selectedWorkspaceID != selectedID
+        guard optionsChanged || selectionChanged else { return }
+        if optionsChanged {
+            workspaceSwitcher.removeAllItems()
+            for entry in entries {
+                workspaceSwitcher.addItem(withTitle: entry.label)
+                workspaceSwitcher.lastItem?.representedObject = entry.id
+                workspaceSwitcher.lastItem?.image = NSImage(systemSymbolName: entry.symbol, accessibilityDescription: entry.type)
+                workspaceSwitcher.lastItem?.toolTip = entry.type
+            }
+        }
+        selectedWorkspaceID = selectedID
+        workspaceSwitcher.select(workspaceSwitcher.itemArray.first { $0.representedObject as? String == selectedID })
+        workspaceSwitcher.isHidden = false
+        workspaceSwitcher.toolTip = workspaceSwitcher.titleOfSelectedItem
+        needsLayout = true
+    }
+
+    @objc private func selectWorkspace(_ sender: NSPopUpButton) {
+        guard let id = sender.selectedItem?.representedObject as? String else { return }
+        // Keep the confirmed label while the request waits or is rejected by the operation gate.
+        sender.select(selectedWorkspaceID.flatMap { selected in sender.itemArray.first { $0.representedObject as? String == selected } })
+        onSelectWorkspace?(id)
+    }
 
     private let statusStackView = WorkspaceToolbarStackView()
+    private let navigationStatus = NSTextField(labelWithString: "")
+
+    func showNavigationStatus(_ text: String?) {
+        if navigationStatus.superview == nil {
+            navigationStatus.font = .systemFont(ofSize: 12)
+            navigationStatus.textColor = .secondaryLabelColor
+            navigationStatus.lineBreakMode = .byTruncatingTail
+            navigationStatus.widthAnchor.constraint(lessThanOrEqualToConstant: 240).isActive = true
+            navigationStatus.setAccessibilityLabel("Navigation status")
+            statusStackView.addArrangedSubview(navigationStatus)
+        }
+        navigationStatus.stringValue = text ?? ""
+        navigationStatus.toolTip = text
+        navigationStatus.isHidden = text == nil
+        needsLayout = true
+    }
     private var detachedPaneButtons: [PaneID: DetachedPaneStatusButtonView] = [:]
     private var detachedPaneOrder: [PaneID] = []
     private let spacing: CGFloat = 6
@@ -59,9 +138,17 @@ final class WorkspaceToolbarView: NSView {
             height: toolbarHeight
         )
 
-        let tabWidth = max(0, bounds.width - statusWidth - (statusWidth > 0 ? spacing : 0))
-        tabStripView.frame = NSRect(
+        let switcherWidth = workspaceSwitcher.isHidden ? 0 : min(200, workspaceSwitcher.fittingSize.width)
+        workspaceSwitcher.frame = NSRect(
             x: bounds.minX,
+            y: centeredY,
+            width: switcherWidth,
+            height: toolbarHeight
+        )
+        let tabX = bounds.minX + switcherWidth + (switcherWidth > 0 ? spacing : 0)
+        let tabWidth = max(0, statusX - tabX - (statusWidth > 0 ? spacing : 0))
+        tabStripView.frame = NSRect(
+            x: tabX,
             y: bounds.minY,
             width: tabWidth,
             height: bounds.height
@@ -150,6 +237,21 @@ final class WorkspaceToolbarView: NSView {
         statusStackView.distribution = .fill
         statusStackView.spacing = spacing
         statusStackView.addArrangedSubview(agentStatusButton)
+
+        workspaceSwitcher.cell = WorkspacePickerCell(textCell: "", pullsDown: false)
+        addSubview(workspaceSwitcher)
+        updateWorkspaces([], selectedID: nil)
+        // Santty chrome stays dark even when macOS uses the light appearance.
+        workspaceSwitcher.appearance = NSAppearance(named: AppAppearanceDefaults.vibrancyAppearanceName)
+        workspaceSwitcher.controlSize = .regular
+        workspaceSwitcher.bezelStyle = .roundRect
+        workspaceSwitcher.heightAnchor.constraint(equalToConstant: toolbarHeight).isActive = true
+        workspaceSwitcher.cell?.lineBreakMode = .byTruncatingTail
+        workspaceSwitcher.widthAnchor.constraint(lessThanOrEqualToConstant: 200).isActive = true
+        workspaceSwitcher.font = .systemFont(ofSize: 12, weight: .medium)
+        workspaceSwitcher.setAccessibilityLabel("Workspace")
+        workspaceSwitcher.target = self
+        workspaceSwitcher.action = #selector(selectWorkspace(_:))
 
         agentStatusButton.symbolName = "sparkles"
         agentStatusButton.title = "Agents"

@@ -15,15 +15,20 @@ enum TerminalDefaults {
 
     @MainActor
     static var theme: TerminalTheme {
+        themeDefinition?.toTerminalTheme() ?? TerminalTheme()
+    }
+
+    @MainActor
+    static var themeDefinition: GhosttyThemeDefinition? {
         guard
             let theme = GhosttyThemeCatalog.theme(named: TerminalSettings.themeName)
                 ?? GhosttyThemeCatalog.theme(named: defaultThemeName)
         else {
             assertionFailure("Missing bundled Ghostty theme: \(defaultThemeName)")
-            return TerminalTheme()
+            return nil
         }
 
-        return theme.toTerminalTheme()
+        return theme
     }
 
     @MainActor

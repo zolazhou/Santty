@@ -4,9 +4,12 @@ import AppKit
 final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate {
     var onCommand: ((AppCommand) -> Void)?
     var onDismiss: (() -> Void)?
+    var commandsProvider: (() -> [AppCommand])?
 
     private let commandPaletteView = CommandPaletteView()
     private var isOrderingOut = false
+    private var refreshTimer: Timer?
+    private var displayedItems: [AppCommandSnapshot] = []
 
     init() {
         let panel = CommandPalettePanel(contentView: commandPaletteView)
@@ -36,6 +39,19 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         }
 
         commandPaletteView.updateCommands(commands, resetSearch: true)
+        displayedItems = commands.map(\.paletteSnapshot)
+        refreshTimer?.invalidate()
+        if commandsProvider != nil {
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self, self.window?.isVisible == true, let items = self.commandsProvider?() else { return }
+                    let snapshot = items.map(\.paletteSnapshot)
+                    guard snapshot != self.displayedItems else { return }
+                    self.displayedItems = snapshot
+                    self.commandPaletteView.updateCommands(items, resetSearch: false)
+                }
+            }
+        }
         panel.contentMinSize = commandPaletteView.preferredContentSize
         panel.contentMaxSize = commandPaletteView.preferredContentSize
         panel.setContentSize(commandPaletteView.preferredContentSize)
@@ -61,6 +77,8 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
     }
 
     private func dismiss(notify: Bool) {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
         isOrderingOut = true
         window?.orderOut(nil)
         DispatchQueue.main.async { [weak self] in

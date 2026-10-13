@@ -17,8 +17,11 @@ final class CommandPaletteView: NSView {
     private let tableView = CommandPaletteTableView()
     private let tableColumn = NSTableColumn(identifier: .commandPaletteCommand)
     private let searchField = NSTextField()
+    private let kindPicker = NSSegmentedControl(
+        labels: ["All", "Workspace", "Tab", "Pane", "Command"], trackingMode: .selectOne,
+        target: nil, action: nil)
 
-    let preferredContentSize = NSSize(width: 620, height: 420)
+    let preferredContentSize = NSSize(width: 620, height: 560)
 
     private let searchHeight: CGFloat = 56
     private let rowHeight: CGFloat = 44
@@ -38,6 +41,12 @@ final class CommandPaletteView: NSView {
         configurePanel()
         configureSearchContainer()
         configureSearchField()
+        kindPicker.selectedSegment = 0
+        kindPicker.target = self
+        kindPicker.action = #selector(changeKind)
+        kindPicker.setAccessibilityLabel("Search category")
+        kindPicker.translatesAutoresizingMaskIntoConstraints = false
+        panelView.addSubview(kindPicker)
         configureTableView()
         configureConstraints()
         searchField.stringValue = searchQuery
@@ -67,20 +76,21 @@ final class CommandPaletteView: NSView {
         self.commands = commands
         if resetSearch {
             searchField.stringValue = ""
+            kindPicker.selectedSegment = 0
         }
-        applyFilter()
+        applyFilter(preserveSelection: !resetSearch)
     }
 
     private func configureSearchField() {
         searchField.cell = CommandPaletteSearchFieldCell(textCell: "")
         searchField.placeholderAttributedString = NSAttributedString(
-            string: "Search for commands...",
+            string: "Search workspaces, tabs, panes, commands...",
             attributes: [
                 .foregroundColor: CommandPaletteColors.placeholderText,
-                .font: NSFont.systemFont(ofSize: 26, weight: .regular),
+                .font: NSFont.systemFont(ofSize: 22, weight: .regular),
             ]
         )
-        searchField.font = .systemFont(ofSize: 26, weight: .regular)
+        searchField.font = .systemFont(ofSize: 22, weight: .regular)
         searchField.textColor = CommandPaletteColors.primaryText
         searchField.focusRingType = .none
         searchField.isBordered = false
@@ -116,7 +126,7 @@ final class CommandPaletteView: NSView {
         scrollView.borderType = .noBorder
         scrollView.automaticallyAdjustsContentInsets = false
         scrollView.contentInsets = NSEdgeInsets(
-            top: searchHeight,
+            top: 0,
             left: 0,
             bottom: 0,
             right: 0
@@ -158,8 +168,12 @@ final class CommandPaletteView: NSView {
 
             searchContainerView.leadingAnchor.constraint(equalTo: panelView.leadingAnchor),
             searchContainerView.trailingAnchor.constraint(equalTo: panelView.trailingAnchor),
-            searchContainerView.topAnchor.constraint(equalTo: panelView.topAnchor),
+            searchContainerView.topAnchor.constraint(equalTo: kindPicker.bottomAnchor, constant: 6),
             searchContainerView.heightAnchor.constraint(equalToConstant: searchHeight),
+
+            kindPicker.centerXAnchor.constraint(equalTo: panelView.centerXAnchor),
+            kindPicker.topAnchor.constraint(equalTo: panelView.topAnchor, constant: 14),
+            kindPicker.heightAnchor.constraint(equalToConstant: 24),
 
             searchField.leadingAnchor.constraint(
                 equalTo: searchContainerView.contentView.leadingAnchor,
@@ -183,8 +197,8 @@ final class CommandPaletteView: NSView {
                 constant: -contentInset
             ),
             scrollView.topAnchor.constraint(
-                equalTo: panelView.topAnchor,
-                constant: contentInset
+                equalTo: searchContainerView.bottomAnchor,
+                constant: 8
             ),
             scrollView.bottomAnchor.constraint(
                 equalTo: panelView.bottomAnchor,
@@ -213,12 +227,22 @@ final class CommandPaletteView: NSView {
         return true
     }
 
-    private func applyFilter() {
-        filteredCommands = commands.filter {
-            $0.isEnabled
-                && CommandPaletteFilter.matches(query: searchField.stringValue, title: $0.title)
-        }
-        selectedIndex = filteredCommands.firstIndex(where: \.isEnabled)
+    @objc private func changeKind() { applyFilter() }
+
+    private func applyFilter(preserveSelection: Bool = false) {
+        let previousID =
+            preserveSelection
+            ? selectedIndex.flatMap {
+                filteredCommands.indices.contains($0) ? filteredCommands[$0].id : nil
+            } : nil
+        let kind =
+            kindPicker.selectedSegment > 0
+            ? PaletteItemKind.allCases[kindPicker.selectedSegment - 1] : nil
+        filteredCommands = CommandPaletteFilter.results(
+            commands, query: searchField.stringValue, kind: kind)
+        selectedIndex =
+            previousID.flatMap { id in filteredCommands.firstIndex { $0.id == id } }
+            ?? filteredCommands.indices.first
         tableView.reloadData()
         updateTableSelection()
     }
@@ -283,6 +307,16 @@ final class CommandPaletteView: NSView {
 }
 
 extension CommandPaletteView: NSTextFieldDelegate {
+    func control(_ control: NSControl, textView _: NSTextView, doCommandBy commandSelector: Selector)
+        -> Bool
+    {
+        guard control === searchField, commandSelector == #selector(NSResponder.insertTab(_:))
+        else { return false }
+        kindPicker.selectedSegment = (kindPicker.selectedSegment + 1) % kindPicker.segmentCount
+        applyFilter()
+        return true
+    }
+
     func controlTextDidChange(_ notification: Notification) {
         guard notification.object as AnyObject? === searchField else {
             return
@@ -614,8 +648,10 @@ private final class CommandPaletteCellView: NSTableCellView {
 
     private func updateContent() {
         titleLabel.stringValue = command?.title ?? ""
-        categoryLabel.stringValue = command.map(Self.categoryTitle(for:)) ?? ""
-        shortcutLabel.stringValue = command?.shortcut ?? Self.kindTitle(for: command)
+        categoryLabel.stringValue = command?.subtitle ?? command.map(Self.categoryTitle(for:)) ?? ""
+        shortcutLabel.stringValue =
+            command?.shortcut
+            ?? ((command?.isCurrent == true ? "Current · " : "") + Self.kindTitle(for: command))
         iconView.image =
             command.map(Self.icon(for:))
             ?? NSImage(systemSymbolName: "command", accessibilityDescription: nil)
@@ -644,10 +680,13 @@ private final class CommandPaletteCellView: NSTableCellView {
             return ""
         }
 
-        return "Command"
+        return command?.kind.rawValue ?? ""
     }
 
     private static func icon(for command: AppCommand) -> NSImage? {
+        if let symbol = command.symbol {
+            return NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        }
         let symbolName: String
         switch command.id.split(separator: ".").first {
         case "pane":
@@ -704,7 +743,7 @@ private final class CommandPaletteCellView: NSTableCellView {
 
 #Preview("Command Palette") {
     CommandPaletteViewPreview()
-        .frame(width: 860, height: 540)
+        .frame(width: 860, height: 680)
 }
 
 @MainActor

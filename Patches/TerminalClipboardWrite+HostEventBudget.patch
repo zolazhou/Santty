@@ -1,0 +1,57 @@
+--- a/Sources/GhosttyTerminal/InMemory/TerminalCallbackBridge.swift
++++ b/Sources/GhosttyTerminal/InMemory/TerminalCallbackBridge.swift
+@@ -18,6 +18,8 @@
+     weak var delegate: (any TerminalSurfaceViewDelegate)? {
+         didSet { invalidateClipboardWrites() }
+     }
++    var pendingHostClipboardWrites = 0
++    var pendingHostClipboardBytes = 0
+     private nonisolated let clipboardWriteLock = NSLock()
+     private nonisolated(unsafe) var clipboardWriteEpoch: UInt64 = 0
+ 
+--- a/Sources/GhosttyTerminal/Controller/TerminalController+Callbacks.swift
++++ b/Sources/GhosttyTerminal/Controller/TerminalController+Callbacks.swift
+@@ -71,10 +71,17 @@
+     }
+ 
+     static func enqueueClipboardWrite(_ string: String, bridge: TerminalCallbackBridge,
+-                                      confirm: Bool, generation: UInt64) {
++                                      confirm: Bool, generation: UInt64, hostBytes: Int? = nil) {
+         // Always enqueue: a modal confirmation must not run inside the C parser callback.
+         Task { @MainActor [weak bridge] in
+-            guard let bridge, bridge.rawSurface != nil,
++            guard let bridge else { return }
++            defer {
++                if let hostBytes {
++                    bridge.pendingHostClipboardWrites -= 1
++                    bridge.pendingHostClipboardBytes -= hostBytes
++                }
++            }
++            guard bridge.rawSurface != nil,
+                   bridge.clipboardWriteGeneration == generation else { return }
+             let policy = bridge.delegate as? any TerminalSurfaceClipboardWriteDelegate
+             guard policy?.terminalShouldWriteClipboard(afterConfirmation: false) != false else { return }
+@@ -225,7 +232,8 @@
+ extension TerminalController {
+     /// Applies the resolved Ghostty policy without sending a host event through the VT parser.
+     func requestClipboardWrite(_ string: String, bridge: TerminalCallbackBridge) -> Bool {
+-        guard string.utf8.count <= 2 * 1024 * 1024, bridge.rawSurface != nil, let config else { return false }
++        let byteCount = string.utf8.count
++        guard byteCount <= 2 * 1024 * 1024, bridge.rawSurface != nil, let config else { return false }
+         var policy: UnsafePointer<CChar>?
+         let key = "clipboard-write"
+         let found = key.withCString { ghostty_config_get(config, &policy, $0, UInt(key.utf8.count)) }
+@@ -233,8 +241,12 @@
+         let value = String(cString: policy)
+         if value == "deny" { return true }
+         guard value == "allow" || value == "ask" else { return false }
++        guard bridge.pendingHostClipboardWrites < (value == "ask" ? 1 : 128),
++              byteCount <= 4 * 1024 * 1024 - bridge.pendingHostClipboardBytes else { return false }
++        bridge.pendingHostClipboardWrites += 1
++        bridge.pendingHostClipboardBytes += byteCount
+         TerminalCallbacks.enqueueClipboardWrite(string, bridge: bridge, confirm: value == "ask",
+-                                               generation: bridge.clipboardWriteGeneration)
++                                               generation: bridge.clipboardWriteGeneration, hostBytes: byteCount)
+         return true
+     }
+ }

@@ -41,6 +41,7 @@ run = '"$SPARKLE_BIN/generate_appcast" build'
 
 [tasks."release:archive"]
 description = "Build a Release archive into build/Santty.xcarchive"
+depends = ["tuist:generate"]
 run = "xcodebuild -workspace Santty.xcworkspace -scheme Santty -configuration Release -destination 'generic/platform=macOS' -archivePath build/Santty.xcarchive archive"
 
 [tasks."release:export"]

@@ -188,6 +188,17 @@ enum AppMenu {
         let menu = NSMenu(title: "Pane")
         item.submenu = menu
 
+        let diagnosticsItem = menu.addItem(withTitle: "Herdr Diagnostics...", action: #selector(WorkspaceViewController.showPersistentDiagnostics(_:)), keyEquivalent: "")
+        diagnosticsItem.target = target
+        addKeybindingMenuItem(to: menu, action: .newWorkspace, selector: #selector(WorkspaceViewController.newWorkspace(_:)), target: target)
+        addKeybindingMenuItem(to: menu, action: .newHerdrWorkspace, selector: #selector(WorkspaceViewController.newHerdrWorkspace(_:)), target: target)
+        addKeybindingMenuItem(to: menu, action: .renameWorkspace, selector: #selector(WorkspaceViewController.renameWorkspace(_:)), target: target)
+        addKeybindingMenuItem(to: menu, action: .closeWorkspace, selector: #selector(WorkspaceViewController.closeWorkspace(_:)), target: target)
+        addKeybindingMenuItem(to: menu, action: .disconnectPersistentTerminal, selector: #selector(WorkspaceViewController.disconnectPersistentTerminal(_:)), target: target)
+        addKeybindingMenuItem(to: menu, action: .reconnectPersistentTerminal, selector: #selector(WorkspaceViewController.reconnectPersistentTerminal(_:)), target: target)
+        addKeybindingMenuItem(to: menu, action: .takeOverPersistentTerminal, selector: #selector(WorkspaceViewController.takeOverPersistentTerminal(_:)), target: target)
+        addKeybindingMenuItem(to: menu, action: .endPersistentTerminal, selector: #selector(WorkspaceViewController.endPersistentTerminal(_:)), target: target)
+        menu.addItem(.separator())
         let renameItem = menu.addItem(
             withTitle: "Rename Pane...",
             action: #selector(WorkspaceViewController.renamePane(_:)),
@@ -483,6 +494,8 @@ enum AppMenu {
             selector: #selector(WorkspaceViewController.closeTab(_:)),
             target: target
         )
+
+        addKeybindingMenuItem(to: menu, action: .renameTab, selector: #selector(WorkspaceViewController.renameTab(_:)), target: target)
 
         menu.addItem(.separator())
 

@@ -9,6 +9,7 @@ private final class WorkspaceFloatingOverlayView: NSView {
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         for subview in subviews.reversed() {
+            guard !subview.isHidden, subview.alphaValue > 0 else { continue }
             guard subview.frame.contains(point) else {
                 continue
             }
@@ -79,14 +80,22 @@ final class WorkspaceRootView: NSView {
     }
 
     private let floatingOverlayView = WorkspaceFloatingOverlayView()
+    private let herdrPopupOverlayView = WorkspaceFloatingOverlayView()
     private var renderedContentView: NSView?
+    private var stagedContentView: NSView?
+    private var renderedHerdrPopupView: NSView?
+    private var stagedHerdrPopupView: NSView?
     private var floatingPaneView: WorkspaceFloatingPaneContainerView?
     private var floatingPaneContentView: NSView?
     private var lastFloatingPaneInitialFrame: NSRect?
     private var isFloatingPaneAnimating = false
     private var customFloatingPaneSize: NSSize?
+    private var stagedFloatingPaneView: WorkspaceFloatingPaneContainerView?
+    private var stagedFloatingPaneContentView: NSView?
+    private var stagedFloatingPaneSize: NSSize?
     private var contentFrame = NSRect.zero
     private var toolbarFrame = NSRect.zero
+    var onEffectiveAppearanceChange: (() -> Void)?
 
     override var acceptsFirstResponder: Bool {
         true
@@ -99,6 +108,7 @@ final class WorkspaceRootView: NSView {
         addSubview(contentContainerView)
         addSubview(toolbarView)
         addSubview(floatingOverlayView)
+        addSubview(herdrPopupOverlayView)
 
         floatingOverlayView.wantsLayer = true
         floatingOverlayView.layer?.backgroundColor = NSColor.clear.cgColor
@@ -116,6 +126,7 @@ final class WorkspaceRootView: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyWindowBackgroundColor()
+        onEffectiveAppearanceChange?()
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -135,7 +146,7 @@ final class WorkspaceRootView: NSView {
             width: max(0, bounds.width - edgePadding * 2),
             height: max(0, bounds.height - edgePadding * 2)
         )
-        let showToolbar = !tabItems.isEmpty
+        let showToolbar = !tabItems.isEmpty || !toolbarView.workspaceSwitcher.isHidden
         if showToolbar {
             toolbarView.isHidden = false
             toolbarFrame = NSRect(
@@ -164,13 +175,16 @@ final class WorkspaceRootView: NSView {
         )
         contentContainerView.frame = contentFrame
         floatingOverlayView.frame = bounds
+        herdrPopupOverlayView.frame = bounds
         renderedContentView?.frame = contentContainerView.bounds
+        stagedContentView?.frame = contentContainerView.bounds
         if let floatingPaneView, !isFloatingPaneAnimating {
             floatingPaneView.frame = floatingPaneTargetFrame()
         }
     }
 
     func installRenderedContentView(_ view: NSView) {
+        if let staged = stagedContentView, staged !== view { cancelStagedContentView(staged) }
         if renderedContentView?.superview === contentContainerView {
             renderedContentView?.removeFromSuperview()
         }
@@ -180,6 +194,85 @@ final class WorkspaceRootView: NSView {
         contentContainerView.addSubview(view)
         needsLayout = true
     }
+
+    func stageContentView(_ view: NSView) {
+        precondition(view !== renderedContentView)
+        if let previous = stagedContentView { cancelStagedContentView(previous) }
+        stagedContentView = view
+        view.frame = contentContainerView.bounds
+        view.alphaValue = 0
+        contentContainerView.addSubview(view, positioned: .below, relativeTo: renderedContentView)
+        view.layoutSubtreeIfNeeded()
+    }
+
+    @discardableResult
+    func commitStagedContentView(_ view: NSView) -> Bool {
+        guard stagedContentView === view else { return false }
+        stagedContentView = nil
+        view.alphaValue = 1
+        installRenderedContentView(view)
+        return true
+    }
+
+    func isStagedContentView(_ view: NSView) -> Bool { stagedContentView === view }
+
+    func cancelStagedContentView(_ view: NSView) {
+        guard stagedContentView === view else { return }
+        stagedContentView = nil
+        view.removeFromSuperview()
+    }
+
+    func cancelStagedContentView() {
+        if let view = stagedContentView { cancelStagedContentView(view) }
+    }
+
+    func installHerdrPopupView(_ view: NSView, size: NSSize, backendFrame: NSRect) {
+        if view.superview !== herdrPopupOverlayView {
+            herdrPopupOverlayView.subviews.forEach { $0.removeFromSuperview() }
+            herdrPopupOverlayView.addSubview(view)
+        }
+        renderedHerdrPopupView = view
+        positionHerdrPopupView(view, size: size, backendFrame: backendFrame)
+    }
+
+    private func positionHerdrPopupView(_ view: NSView, size: NSSize, backendFrame: NSRect) {
+        let region = contentContainerView.convert(backendFrame, to: herdrPopupOverlayView)
+        view.frame = NSRect(x: region.midX - size.width / 2, y: region.midY - size.height / 2,
+                            width: size.width, height: size.height)
+    }
+
+    func stageHerdrPopupView(_ view: NSView, size: NSSize, backendFrame: NSRect) {
+        if let previous = stagedHerdrPopupView { cancelStagedHerdrPopupView(previous) }
+        precondition(view !== renderedHerdrPopupView)
+        stagedHerdrPopupView = view
+        view.alphaValue = 0
+        herdrPopupOverlayView.addSubview(view, positioned: .below, relativeTo: renderedHerdrPopupView)
+        positionHerdrPopupView(view, size: size, backendFrame: backendFrame)
+    }
+
+    func isStagedHerdrPopupView(_ view: NSView) -> Bool { stagedHerdrPopupView === view }
+
+    @discardableResult
+    func commitStagedHerdrPopupView(_ view: NSView) -> Bool {
+        guard stagedHerdrPopupView === view else { return false }
+        stagedHerdrPopupView = nil
+        renderedHerdrPopupView?.removeFromSuperview()
+        renderedHerdrPopupView = view
+        view.alphaValue = 1
+        return true
+    }
+
+    func cancelStagedHerdrPopupView(_ view: NSView) {
+        guard stagedHerdrPopupView === view else { return }
+        stagedHerdrPopupView = nil
+        view.removeFromSuperview()
+    }
+
+    func removeHerdrPopupView() {
+        stagedHerdrPopupView = nil; renderedHerdrPopupView = nil
+        herdrPopupOverlayView.subviews.forEach { $0.removeFromSuperview() }
+    }
+    var debugHerdrPopupView: NSView? { renderedHerdrPopupView }
 
     func installFloatingPaneView(_ contentView: NSView, initialFrame: NSRect, animated: Bool) {
         if floatingPaneContentView !== contentView {
@@ -226,6 +319,34 @@ final class WorkspaceRootView: NSView {
         customFloatingPaneSize = nil
     }
 
+    func stageFloatingPaneView(_ content: NSView, size: NSSize?) {
+        cancelStagedFloatingPaneView()
+        let container = WorkspaceFloatingPaneContainerView(contentView: content,
+            frame: floatingPaneTargetFrame(size: size))
+        container.alphaValue = 0
+        floatingOverlayView.addSubview(container, positioned: .below, relativeTo: floatingPaneView)
+        container.layoutSubtreeIfNeeded()
+        stagedFloatingPaneView = container; stagedFloatingPaneContentView = content; stagedFloatingPaneSize = size
+    }
+
+    func isStagedFloatingPaneView(_ content: NSView) -> Bool { stagedFloatingPaneContentView === content }
+
+    @discardableResult
+    func commitStagedFloatingPaneView(_ content: NSView) -> Bool {
+        guard stagedFloatingPaneContentView === content, let container = stagedFloatingPaneView else { return false }
+        removeFloatingPaneView()
+        floatingPaneView = container; floatingPaneContentView = content
+        customFloatingPaneSize = stagedFloatingPaneSize
+        container.alphaValue = 1
+        stagedFloatingPaneView = nil; stagedFloatingPaneContentView = nil; stagedFloatingPaneSize = nil
+        return true
+    }
+
+    func cancelStagedFloatingPaneView() {
+        stagedFloatingPaneView?.removeFromSuperview()
+        stagedFloatingPaneView = nil; stagedFloatingPaneContentView = nil; stagedFloatingPaneSize = nil
+    }
+
     func beginFloatingPaneAnimation() {
         isFloatingPaneAnimating = true
     }
@@ -256,11 +377,11 @@ final class WorkspaceRootView: NSView {
         }
     }
 
-    func floatingPaneTargetFrame() -> NSRect {
+    func floatingPaneTargetFrame(size: NSSize? = nil) -> NSRect {
         let bounds = contentFrame
         let targetSize: NSSize
 
-        if let custom = customFloatingPaneSize {
+        if let custom = size ?? customFloatingPaneSize {
             targetSize = NSSize(
                 width: min(
                     bounds.width,
@@ -311,6 +432,17 @@ final class WorkspaceRootView: NSView {
         layoutSubtreeIfNeeded()
         let windowFrame = placeholder.convert(placeholder.bounds, to: nil)
         return floatingOverlayView.convert(windowFrame, from: nil)
+    }
+
+    func backendPaneFrame(_ paneID: PaneID, host: NSView) -> NSRect? {
+        if let staged = stagedContentView, let placeholder = findPlaceholder(for: paneID, in: staged) {
+            return placeholder.convert(placeholder.bounds, to: contentContainerView)
+        }
+        if let placeholder = findPlaceholder(for: paneID, in: contentContainerView) {
+            return placeholder.convert(placeholder.bounds, to: contentContainerView)
+        }
+        guard host.isDescendant(of: contentContainerView) else { return nil }
+        return host.convert(host.bounds, to: contentContainerView)
     }
 
     func detachedPaneStatusCellFrame(for paneID: PaneID) -> NSRect? {

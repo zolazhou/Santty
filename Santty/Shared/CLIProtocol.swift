@@ -16,12 +16,14 @@ struct CLIRequest: Codable, Sendable {
     var query: String?
     var ignoreCase: Bool?
     var limit: Int?
+    var includeProcesses: Bool?
 
     func validate() throws {
         guard ["list", "read", "search"].contains(command) else {
             throw CLIError("Unknown command: \(command)")
         }
         if command != "list" {
+            guard includeProcesses == nil else { throw CLIError("Process options are only supported by list.") }
             guard paneID != nil else { throw CLIError("\(command) requires a pane UUID.") }
         }
         if command == "read" {
@@ -59,21 +61,55 @@ struct CLIRequest: Codable, Sendable {
     }
 }
 
+enum CLIInstanceDiscovery {
+    static func resolve(explicit: String?, inherited: String?, herdrPaneID: String?, herdrSocketPath: String?,
+                        candidates: [String], probe: (String) throws -> CLIResponse) throws -> String {
+        if let explicit { return explicit }
+        var paths = Array(Set(candidates + (inherited.map { [$0] } ?? []))).sorted()
+        guard paths.count <= 64 else { throw CLIError("Too many Santty sockets; choose --socket explicitly.") }
+        if let inherited { paths.removeAll { $0 == inherited }; paths.insert(inherited, at: 0) }
+        let deadline = Date().addingTimeInterval(3)
+        var live: [String] = []
+        for path in paths {
+            guard Date() < deadline else { throw CLIError("Santty instance discovery timed out; choose --socket explicitly.") }
+            guard let response = try? probe(path), response.version == 2, response.error == nil else { continue }
+            if let herdrPaneID {
+                guard let herdrSocketPath, response.tabs?.contains(where: { tab in
+                    tab.panes.contains { $0.isLive && $0.herdrPaneID == herdrPaneID && $0.herdrSocketPath == herdrSocketPath && $0.backendError == nil }
+                }) == true else { continue }
+            } else if path == inherited { return path }
+            live.append(path)
+        }
+        guard live.count == 1 else {
+            throw CLIError(live.isEmpty ? "No Santty instance is available for this terminal. Enable CLI access and connect its view."
+                : "Multiple Santty instances match. Choose --socket explicitly:\n" + live.joined(separator: "\n"))
+        }
+        return live[0]
+    }
+}
+
 struct CLIPane: Codable, Sendable {
     let id: UUID
     let title: String
     var name: String? = nil
     let kind: String
     let cwd: String?
-    let foregroundProcessGroupID: Int?
+    var foregroundProcessGroupID: Int?
     var processes: [CLIProcess] = []
     let isFocused: Bool
     let isLive: Bool
     let isDetached: Bool
+    var backend: String? = nil
+    var herdrPaneID: String? = nil
+    var herdrTerminalID: String? = nil
+    var herdrSocketPath: String? = nil
+    var backendError: String? = nil
 
     private enum CodingKeys: String, CodingKey {
         case id, title, name, kind, cwd, foregroundProcessGroupID, processes
         case isFocused, isLive, isDetached
+        case backend, herdrPaneID, herdrTerminalID, herdrSocketPath
+        case backendError
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -89,6 +125,11 @@ struct CLIPane: Codable, Sendable {
         try container.encode(isFocused, forKey: .isFocused)
         try container.encode(isLive, forKey: .isLive)
         try container.encode(isDetached, forKey: .isDetached)
+        try container.encodeIfPresent(backend, forKey: .backend)
+        try container.encodeIfPresent(herdrPaneID, forKey: .herdrPaneID)
+        try container.encodeIfPresent(herdrTerminalID, forKey: .herdrTerminalID)
+        try container.encodeIfPresent(herdrSocketPath, forKey: .herdrSocketPath)
+        try container.encodeIfPresent(backendError, forKey: .backendError)
     }
 }
 
@@ -115,12 +156,22 @@ struct CLIResponse: Codable, Sendable {
     var totalLines: Int?
     var matches: [CLIMatch]?
     var totalMatches: Int?
+    var textSource: String?
+    var historyTruncated: Bool?
+    var backendRevision: UInt64?
 }
 
 struct CLIMatch: Codable, Sendable {
     let line: Int
     let text: String
     let truncated: Bool
+}
+
+struct CLIConnectionError: LocalizedError, Sendable {
+    let code: CInt
+    let message: String
+    var errorDescription: String? { message }
+    var isRecoverable: Bool { [ENOENT, ECONNREFUSED, ECONNRESET, ETIMEDOUT, EPIPE, ENOTCONN].contains(code) }
 }
 
 enum CLITransport {
@@ -198,9 +249,8 @@ enum CLITransport {
         do {
             try withAddress(path) { address, length in
                 guard Darwin.connect(fd, address, length) == 0 else {
-                    throw CLIError(
-                        "Cannot connect to Santty at \(path). Start Santty and enable CLI access in General settings."
-                    )
+                    throw CLIConnectionError(code: errno,
+                        message: "Cannot connect to Santty at \(path). Start Santty and enable CLI access in General settings.")
                 }
             }
             try verifyPeer(fd)

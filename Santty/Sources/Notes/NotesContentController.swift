@@ -20,12 +20,14 @@ final class NotesContentController: NSViewController {
   private(set) weak var editor: NSTextView?
   private var editorFileURL: URL?
   private var writingToolsObservation: NSKeyValueObservation?
+  private let preferredFileName: String?
   private let isPane: Bool
   private let isPinned: Bool
   private let onTogglePin: () -> Bool
 
   init(store: NotesStore = NotesStore(), defaults: UserDefaults = .standard,
-       isPane: Bool = false, isPinned: Bool = false, onTogglePin: @escaping () -> Bool = { false }) {
+       preferredFileName: String? = nil, isPane: Bool = false, isPinned: Bool = false, onTogglePin: @escaping () -> Bool = { false }) {
+    self.preferredFileName = preferredFileName
     library = NotesLibrary(store: store, defaults: defaults)
     self.isPane = isPane
     self.isPinned = isPinned
@@ -57,7 +59,7 @@ final class NotesContentController: NSViewController {
     super.viewDidLoad()
     loadTask = Task { [weak self] in
       guard let self else { return }
-      await library.load()
+      await library.load(preferredFileName: preferredFileName)
       onTitleChange?()
       captureEditor()
     }

@@ -33,7 +33,17 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
     case enterScrollMode
     case autoResizePane
     case closePane
+    case newWorkspace
+    case renameWorkspace
+    case newHerdrWorkspace
+    // Preserve shortcuts assigned before the command became generic.
+    case closeWorkspace = "closeHerdrWorkspace"
+    case disconnectPersistentTerminal
+    case reconnectPersistentTerminal
+    case takeOverPersistentTerminal
+    case endPersistentTerminal
     case newTab
+    case renameTab
     case closeTab
     case focusPreviousTab
     case focusNextTab
@@ -43,6 +53,15 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
 
     var commandID: String {
         switch self {
+        case .newWorkspace: "workspace.new"
+        case .renameWorkspace: "workspace.rename"
+        case .newHerdrWorkspace: "workspace.herdr.new"
+        case .closeWorkspace: "workspace.close"
+        case .disconnectPersistentTerminal: "terminal.herdr.disconnect"
+        case .reconnectPersistentTerminal: "terminal.herdr.reconnect"
+        case .takeOverPersistentTerminal: "terminal.herdr.takeover"
+        case .endPersistentTerminal: "terminal.herdr.end"
+
         case .toggleNotes:
             "app.notes"
         case .toggleMaximizeWindow:
@@ -107,6 +126,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             "pane.close"
         case .newTab:
             "tab.new"
+        case .renameTab:
+            "tab.rename"
         case .closeTab:
             "tab.close"
         case .focusPreviousTab:
@@ -118,6 +139,15 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .newWorkspace: "New Workspace"
+        case .renameWorkspace: "Rename Workspace"
+        case .newHerdrWorkspace: "New Herdr Workspace"
+        case .closeWorkspace: "Close Workspace"
+        case .disconnectPersistentTerminal: "Disconnect Persistent Terminal"
+        case .reconnectPersistentTerminal: "Reconnect Persistent Terminal"
+        case .takeOverPersistentTerminal: "Take Control of Herdr Window"
+        case .endPersistentTerminal: "End Persistent Terminal"
+
         case .toggleNotes:
             "Toggle Notes"
         case .toggleMaximizeWindow:
@@ -182,6 +212,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             "Close Pane"
         case .newTab:
             "New Tab"
+        case .renameTab:
+            "Rename Tab"
         case .closeTab:
             "Close Tab"
         case .focusPreviousTab:
@@ -193,6 +225,7 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
 
     var groupTitle: String {
         switch self {
+        case .newWorkspace, .renameWorkspace, .newHerdrWorkspace, .closeWorkspace, .disconnectPersistentTerminal, .reconnectPersistentTerminal, .takeOverPersistentTerminal, .endPersistentTerminal: "Pane"
         case .toggleNotes, .toggleMaximizeWindow:
             "Application"
         case .splitPaneHorizontally, .splitPaneVertically, .equalizePaneSplits,
@@ -204,13 +237,15 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             .convertPaneToBrowser, .convertPaneToTerminal, .toggleFloatingPane, .detachPane,
             .attachDetachedPane, .openPromptEditor, .enterScrollMode, .autoResizePane, .closePane:
             "Pane"
-        case .newTab, .closeTab, .focusPreviousTab, .focusNextTab:
+        case .newTab, .renameTab, .closeTab, .focusPreviousTab, .focusNextTab:
             "Tab"
         }
     }
 
     var defaultShortcut: KeyboardShortcuts.Shortcut? {
         switch self {
+        case .renameTab: nil
+        case .newWorkspace, .renameWorkspace, .newHerdrWorkspace, .closeWorkspace, .disconnectPersistentTerminal, .reconnectPersistentTerminal, .takeOverPersistentTerminal, .endPersistentTerminal: nil
         case .toggleNotes:
             .init(.n, modifiers: [.control, .option])
         case .toggleMaximizeWindow:

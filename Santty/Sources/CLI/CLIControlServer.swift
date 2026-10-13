@@ -69,8 +69,8 @@ final class CLIControlServer {
                     let request = try JSONDecoder().decode(CLIRequest.self, from: data)
                     try request.validate()
                     let processes =
-                        request.command == "list"
-                        ? AgentForegroundProcessInspector.currentProcessTable() : []
+                        request.command == "list" && request.includeProcesses != false
+                        ? TerminalProcessInspector.currentProcessTable() : []
                     Task { @MainActor [weak server] in
                         var response: CLIResponse
                         do {
@@ -79,10 +79,11 @@ final class CLIControlServer {
                                 throw CLIError(
                                     "CLI access is disabled or the workspace is unavailable.")
                             }
-                            response = try workspace.handleCLIRequest(request)
+                            response = try await workspace.handleCLIRequestAsync(request)
                             if var tabs = response.tabs {
                                 for t in tabs.indices {
                                     for p in tabs[t].panes.indices {
+                                        guard tabs[t].panes[p].backend != "herdr" else { continue }
                                         let group = tabs[t].panes[p].foregroundProcessGroupID
                                         tabs[t].panes[p].processes =
                                             processes

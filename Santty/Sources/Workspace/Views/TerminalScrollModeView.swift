@@ -234,6 +234,12 @@ final class TerminalScrollModeView: NSView {
                 start.column = 0
                 end.column = cursor.columns - 1
             }
+            if linewise, start.row == 0, end.row == cursor.total - 1 {
+                terminalView.selectAll(nil)
+                terminalView.scrollToRow(UInt(cursor.viewport))
+                updateLabel(); needsDisplay = true
+                return
+            }
             let startViewport = min(start.row, max(0, cursor.total - cursor.rows))
             let endViewport = min(end.row, max(0, cursor.total - cursor.rows))
             terminalView.selectScrollModeText(

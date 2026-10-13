@@ -16,9 +16,9 @@ final class NotesPaneController: PaneControlling {
   var onFocusRequest: ((PaneID) -> Void)?
   var onTitleChange: ((PaneID) -> Void)?
 
-  init(id: PaneID = UUID(), store: NotesStore = NotesStore(), defaults: UserDefaults = .standard) {
+  init(id: PaneID = UUID(), store: NotesStore = NotesStore(), defaults: UserDefaults = .standard, preferredFileName: String? = nil) {
     self.id = id
-    content = NotesContentController(store: store, defaults: defaults, isPane: true)
+    content = NotesContentController(store: store, defaults: defaults, preferredFileName: preferredFileName, isPane: true)
     content.view.frame = notesHostView.bounds
     content.view.autoresizingMask = [.width, .height]
     notesHostView.addSubview(content.view, positioned: .below, relativeTo: notesHostView.nameBadge)

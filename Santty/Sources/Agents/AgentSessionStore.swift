@@ -1,94 +1,7 @@
 import Foundation
 
-enum AgentSessionEventKind: Equatable {
-    case sessionStarted
-    case turnStarted
-    case turnCompleted
-    case waitingForUser
-    case permissionRequested
-    case notification
-    case permissionDenied
-    case sessionEnded
-}
-
 enum AgentSessionDisplayState: Equatable {
-    case running
-    case turnCompleted
-    case waitingForUser
-    case sessionEnded
-}
-
-struct AgentSessionEvent: Equatable {
-    let kind: AgentSessionEventKind
-    let agent: AgentKind
-    let eventName: String
-    let paneID: PaneID?
-    let sessionID: String?
-    let workingDirectory: String?
-    let message: String?
-    let timestamp: Date
-
-    var isSessionStateEvent: Bool {
-        switch kind {
-        case .sessionStarted, .turnStarted, .turnCompleted, .waitingForUser, .sessionEnded:
-            return true
-        case .permissionRequested, .notification, .permissionDenied:
-            return false
-        }
-    }
-
-    var stopEvent: AgentStopEvent? {
-        guard kind == .turnCompleted || kind == .sessionEnded else {
-            return nil
-        }
-
-        return AgentStopEvent(
-            agent: agent,
-            eventName: eventName,
-            paneID: paneID,
-            sessionID: sessionID,
-            workingDirectory: workingDirectory,
-            message: message,
-            timestamp: timestamp
-        )
-    }
-
-    var notificationEvent: AgentNotificationEvent? {
-        let notificationKind: AgentNotificationEventKind
-        switch kind {
-        case .permissionRequested:
-            notificationKind = .permissionRequested
-        case .notification:
-            notificationKind = .notification
-        case .permissionDenied:
-            notificationKind = .permissionDenied
-        default:
-            return nil
-        }
-
-        return AgentNotificationEvent(
-            kind: notificationKind,
-            agent: agent,
-            eventName: eventName,
-            paneID: paneID,
-            sessionID: sessionID,
-            workingDirectory: workingDirectory,
-            message: message,
-            timestamp: timestamp
-        )
-    }
-
-    var deduplicationKey: String {
-        [
-            String(describing: kind),
-            agent.rawValue,
-            eventName,
-            paneID?.uuidString ?? "",
-            sessionID ?? "",
-            workingDirectory ?? "",
-            message ?? "",
-        ].joined(separator: "\u{1F}")
-    }
+    case running, turnCompleted, waitingForUser, idle, unknown, sessionEnded
 }
 
 struct AgentSessionSnapshot: Equatable, Identifiable {
@@ -102,7 +15,22 @@ struct AgentSessionSnapshot: Equatable, Identifiable {
     let message: String?
     let lastEventAt: Date
     let isUnread: Bool
-    let processID: Int?
+    var backendStatusAvailable = true
+    let binding: HerdrPaneBinding
+}
+
+struct AgentMessage: Equatable, Identifiable {
+    let id: String
+    let paneID: PaneID
+    let kind: UInt32
+    var title: String
+    var body: String?
+    let timestamp: Date
+    var isUnread: Bool
+    let binding: HerdrPaneBinding
+    let agent: AgentKind
+    let context: String
+    var sound = false
 }
 
 @MainActor
@@ -110,252 +38,247 @@ final class AgentSessionStore {
     static let shared = AgentSessionStore()
     static let didChangeNotification = Notification.Name("AgentSessionStore.didChangeNotification")
 
-    private struct SessionRecord {
-        var id: String
-        var agent: AgentKind
-        var paneID: PaneID
-        var sessionID: String?
-        var displayState: AgentSessionDisplayState
-        var workingDirectory: String?
-        var message: String?
-        var lastEventAt: Date
-        var isUnread: Bool
-        var agentProcessID: Int?
-        var missingLivenessScanCount: Int = 0
+    private struct Record {
+        var snapshot: AgentSessionSnapshot
+        var sequence: UInt64
+        var completion: UInt64?
+        var notifiedCompletion: UInt64?
+        var notifiedAttention: UInt64?
+        var observedWorking = false
+    }
+    private var records: [String: Record] = [:]
+    private(set) var messages: [AgentMessage] = []
+    private var published: [String: AgentSessionSnapshot] = [:]
+    private var publishedMessages: [AgentMessage] = []
+    private var endpoint: HerdrEndpoint?
+    private var identity: HerdrServiceIdentity?
+    private var bootID: String?
+    private var revision: UInt64 = 0
+    private var latest: HerdrShellSnapshot?
+    private var completions: [String: UInt64] = [:]
+    private var pending: [(HerdrShellNotification, Date)] = []
+    private var customNotices: [String: Date] = [:]
+    var onNotification: ((AgentMessage) -> Void)?
+    var isTargetVisible: ((HerdrPaneBinding) -> Bool)?
 
-        var isClearableWhenRead: Bool {
-            displayState == .sessionEnded
+    var snapshots: [AgentSessionSnapshot] {
+        records.values.map(\.snapshot).sorted {
+            if $0.isUnread != $1.isUnread { return $0.isUnread }
+            if $0.displayState == .waitingForUser, $1.displayState != .waitingForUser { return true }
+            if $1.displayState == .waitingForUser, $0.displayState != .waitingForUser { return false }
+            return $0.lastEventAt > $1.lastEventAt
         }
     }
-
-    private var sessions: [String: SessionRecord] = [:]
-
-    private init() {}
-
-    func handle(_ event: AgentSessionEvent) {
-        guard event.isSessionStateEvent else {
-            return
+    var messageSnapshots: [AgentSessionSnapshot] {
+        messages.reversed().map { message in
+            let record = records.values.first { $0.snapshot.paneID == message.paneID }?.snapshot
+            return .init(id: message.id, agent: message.agent, paneID: message.paneID, sessionID: nil,
+                displayState: message.kind == 0 ? .waitingForUser : message.kind == 1 ? .turnCompleted : .idle,
+                paneTitle: message.context, workingDirectory: nil,
+                message: [message.title, message.body].compactMap { $0 }.joined(separator: ": "),
+                lastEventAt: message.timestamp, isUnread: message.isUnread,
+                backendStatusAvailable: record?.backendStatusAvailable == true, binding: message.binding)
         }
-        guard let paneID = event.paneID else {
-            return
+    }
+    var unreadCount: Int { messages.filter(\.isUnread).count }
+
+    func binding(for paneID: PaneID) -> HerdrPaneBinding? {
+        records.values.first { $0.snapshot.paneID == paneID }?.snapshot.binding
+            ?? messages.last { $0.paneID == paneID }?.binding
+    }
+
+    func configure(_ endpoint: HerdrEndpoint) {
+        guard self.endpoint != endpoint else { return }
+        reset()
+        self.endpoint = endpoint
+    }
+
+    func apply(_ snapshot: HerdrShellSnapshot, completions evidence: HerdrShellAgentCompletions?,
+               endpoint: HerdrEndpoint, identity: HerdrServiceIdentity, now: Date = Date()) throws {
+        try snapshot.validate()
+        configure(endpoint)
+        let sameBoot = self.identity == identity && bootID == snapshot.boot_id
+        if sameBoot && snapshot.revision < revision { return }
+        if !sameBoot {
+            if self.identity != nil { markUnavailable(); pending.removeAll() }
+            customNotices.removeAll()
+            self.identity = identity; bootID = snapshot.boot_id
         }
-
-        let id = sessionID(for: event.agent, paneID: paneID, sessionID: event.sessionID)
-        var record =
-            sessions[id]
-            ?? SessionRecord(
-                id: id,
-                agent: event.agent,
-                paneID: paneID,
-                sessionID: event.sessionID,
-                displayState: .running,
-                workingDirectory: nil,
-                message: nil,
-                lastEventAt: event.timestamp,
-                isUnread: false,
-                agentProcessID: nil
-            )
-
-        record.sessionID = event.sessionID ?? record.sessionID
-        record.workingDirectory = event.workingDirectory ?? record.workingDirectory
-        record.message = event.message ?? record.message
-        record.lastEventAt = event.timestamp
-        record.missingLivenessScanCount = 0
-
-        switch event.kind {
-        case .sessionStarted:
-            record.displayState = .running
-        case .turnStarted:
-            record.displayState = .running
-        case .turnCompleted:
-            record.displayState = .turnCompleted
-            record.isUnread = true
-        case .waitingForUser:
-            record.displayState = .waitingForUser
-            record.isUnread = true
-        case .permissionRequested, .notification, .permissionDenied:
-            break
-        case .sessionEnded:
-            record.displayState = .sessionEnded
+        revision = snapshot.revision; latest = snapshot
+        completions = evidence.flatMap { $0.boot_id == snapshot.boot_id && $0.revision == snapshot.revision ? $0.completions : nil } ?? [:]
+        guard let agents = snapshot.agents else { markUnavailable(); return }
+        let active = Set(agents.map { key(identity, snapshot.boot_id, $0.pane_id) })
+        for id in records.keys where !active.contains(id) {
+            guard let old = records[id] else { continue }
+            records[id]?.snapshot = replacing(old.snapshot, state: .sessionEnded, available: false)
         }
-
-        sessions[id] = record
+        for agent in agents {
+            let id = key(identity, snapshot.boot_id, agent.pane_id)
+            let old = records[id]
+            if let old, sameBoot, old.sequence > agent.state_change_seq { continue }
+            guard let pane = snapshot.panes.first(where: { $0.pane_id == agent.pane_id }),
+                  let binding = try? HerdrPaneBinding(endpoint: endpoint,
+                    pane: .init(pane_id: pane.pane_id, terminal_id: nil, workspace_id: pane.workspace_id,
+                                tab_id: pane.tab_id, serviceIdentity: identity)) else { continue }
+            let kind = AgentKind(rawValue: agent.agent ?? agent.display_agent ?? "Agent")
+            let explicitCompletion = completions[agent.pane_id] == agent.state_change_seq
+            let completed = explicitCompletion || (old?.observedWorking == true && ["idle", "done"].contains(agent.agent_status))
+            let completion = completed ? agent.state_change_seq : old?.completion
+            let state: AgentSessionDisplayState
+            switch agent.agent_status {
+            case "working": state = .running
+            case "blocked": state = .waitingForUser
+            case "idle", "done": state = completed && old?.snapshot.isUnread == true ? .turnCompleted : .idle
+            default: state = .unknown
+            }
+            let space = snapshot.workspaces.first { $0.workspace_id == pane.workspace_id }?.label ?? pane.workspace_id
+            let tab = snapshot.tabs.first { $0.tab_id == pane.tab_id }?.label ?? pane.tab_id
+            let context = "\(space) › \(tab) › \(pane.label ?? agent.title ?? pane.pane_id)"
+            let changed = old?.sequence != agent.state_change_seq
+            var record = Record(snapshot: .init(id: id, agent: kind, paneID: old?.snapshot.paneID ?? UUID(), sessionID: nil,
+                displayState: state, paneTitle: context, workingDirectory: pane.foreground_cwd ?? pane.cwd,
+                message: old?.snapshot.message, lastEventAt: changed ? now : old?.snapshot.lastEventAt ?? now,
+                isUnread: old?.snapshot.isUnread ?? false, binding: binding), sequence: agent.state_change_seq,
+                completion: completion, notifiedCompletion: old?.notifiedCompletion ?? (old == nil ? completion : nil),
+                notifiedAttention: old?.notifiedAttention ?? (old == nil && state == .waitingForUser ? agent.state_change_seq : nil),
+                observedWorking: state == .running)
+            records[id] = record
+            if old != nil, (changed && state == .waitingForUser) || (completed && old?.completion != completion) {
+                let messageKind: UInt32 = state == .waitingForUser ? 0 : 1
+                appendMessage(for: record, kind: messageKind, title: "\(kind.displayName) \(messageKind == 0 ? "needs attention" : "finished")", body: nil, now: now)
+                record.snapshot = replacing(record.snapshot, state: messageKind == 1 ? .turnCompleted : state, unread: true)
+                records[id] = record
+            }
+        }
+        // Keep ended history bounded independently of the server's live-agent limit.
+        if records.count > 1024 {
+            let ended = records.values.filter { !active.contains($0.snapshot.id) }.sorted { $0.snapshot.lastEventAt < $1.snapshot.lastEventAt }
+            for old in ended.prefix(records.count - 1024) { records.removeValue(forKey: old.snapshot.id) }
+        }
+        drainPending(now: now)
         postDidChange()
     }
 
-    var hasSessions: Bool {
-        !sessions.isEmpty
+    func receive(_ event: HerdrShellNotification, now: Date = Date()) {
+        guard event.title.utf8.count <= 4096, (event.body?.utf8.count ?? 0) <= 16384 else { return }
+        // The server can send a notification before its matching metadata update.
+        if !consume(event, now: now), pending.count < 64 { pending.append((event, now.addingTimeInterval(5))) }
     }
 
-    var hasLivenessTrackableSessions: Bool {
-        sessions.values.contains { $0.displayState != .sessionEnded }
+    func drainPending(now: Date = Date()) {
+        let work = pending; pending.removeAll()
+        for (event, deadline) in work where now < deadline {
+            if !consume(event, now: now) { pending.append((event, deadline)) }
+        }
     }
 
-    func snapshots(forPaneIDs paneIDs: Set<PaneID>) -> [AgentSessionSnapshot] {
-        sortedSnapshots(
-            sessions.values
-                .filter { paneIDs.contains($0.paneID) }
-                .map(snapshot(for:))
-        )
+    private func consume(_ event: HerdrShellNotification, now: Date) -> Bool {
+        guard let latest, let paneID = event.pane_id,
+              let pane = latest.panes.first(where: { $0.pane_id == paneID
+                  && (event.workspace_id == nil || $0.workspace_id == event.workspace_id)
+                  && (event.tab_id == nil || $0.tab_id == event.tab_id) }),
+              let identity, let bootID else { return false }
+        let id = key(identity, bootID, pane.pane_id)
+        guard var record = records[id] else { return false }
+        let status = latest.agents?.first { $0.pane_id == paneID }?.agent_status
+        if event.kind == 0 {
+            guard status == "blocked" else { return false }
+            guard record.notifiedAttention != record.sequence else { return true }
+            record.notifiedAttention = record.sequence
+        } else if event.kind == 1 {
+            guard ["idle", "done"].contains(status ?? ""), record.completion == record.sequence else { return false }
+            guard record.notifiedCompletion != record.completion else { return true }
+            record.notifiedCompletion = record.completion
+        } else {
+            let digest = [id, String(event.kind), event.title, event.body ?? ""].joined(separator: "\u{1F}")
+            if let previous = customNotices[digest], now.timeIntervalSince(previous) < 2 { return true }
+            if customNotices.count >= 64, let oldest = customNotices.min(by: { $0.value < $1.value })?.key { customNotices.removeValue(forKey: oldest) }
+            customNotices[digest] = now
+            customNotices = customNotices.filter { now.timeIntervalSince($0.value) < 2 }
+        }
+        var message = appendMessage(for: record, kind: event.kind, title: event.title, body: event.body, now: now)
+        message.sound = event.sound != nil
+        if let index = messages.firstIndex(where: { $0.id == message.id }) { messages[index].sound = message.sound }
+        record.snapshot = replacing(record.snapshot, state: event.kind == 0 ? .waitingForUser : event.kind == 1 ? .turnCompleted : record.snapshot.displayState,
+            unread: true, message: [event.title, event.body].compactMap { $0 }.joined(separator: ": "))
+        records[id] = record
+        if !((event.kind == 0 || event.kind == 1) && isTargetVisible?(record.snapshot.binding) == true) {
+            onNotification?(message)
+        }
+        postDidChange()
+        return true
     }
 
-    func unreadSessionCount(forPaneIDs paneIDs: Set<PaneID>) -> Int {
-        sessions.values.filter { paneIDs.contains($0.paneID) && $0.isUnread }.count
+    @discardableResult
+    private func appendMessage(for record: Record, kind: UInt32, title: String, body: String?, now: Date) -> AgentMessage {
+        let id = "\(record.snapshot.id):\(kind):\(kind < 2 ? String(record.sequence) : UUID().uuidString)"
+        if let index = messages.firstIndex(where: { $0.id == id }) {
+            messages[index].title = title; messages[index].body = body
+            return messages[index]
+        }
+        let message = AgentMessage(id: id, paneID: record.snapshot.paneID, kind: kind, title: title, body: body,
+            timestamp: now, isUnread: true, binding: record.snapshot.binding, agent: record.snapshot.agent, context: record.snapshot.paneTitle)
+        messages.append(message)
+        if messages.count > 256 { messages.removeFirst(messages.count - 256) }
+        return message
     }
 
     func markRead(forPaneIDs paneIDs: Set<PaneID>) {
-        var didChange = false
-        for (id, record) in sessions where paneIDs.contains(record.paneID) && record.isUnread {
-            var updatedRecord = record
-            updatedRecord.isUnread = false
-            sessions[id] = updatedRecord
-            didChange = true
+        guard records.values.contains(where: { paneIDs.contains($0.snapshot.paneID) && $0.snapshot.isUnread })
+            || messages.contains(where: { paneIDs.contains($0.paneID) && $0.isUnread }) else { return }
+        for id in records.keys where records[id].map({ paneIDs.contains($0.snapshot.paneID) }) == true {
+            if let old = records[id] { records[id]?.snapshot = replacing(old.snapshot, state: old.snapshot.displayState == .turnCompleted ? .idle : nil, unread: false) }
         }
-
-        if didChange {
-            postDidChange()
-        }
-    }
-
-    func clearEnded(forPaneIDs paneIDs: Set<PaneID>) {
-        let removableIDs = sessions.values
-            .filter { paneIDs.contains($0.paneID) && !$0.isUnread && $0.isClearableWhenRead }
-            .map(\.id)
-        guard !removableIDs.isEmpty else {
-            return
-        }
-
-        for id in removableIDs {
-            sessions.removeValue(forKey: id)
-        }
+        for index in messages.indices where paneIDs.contains(messages[index].paneID) { messages[index].isUnread = false }
         postDidChange()
     }
 
-    func reconcileForegroundLiveness(
-        observations: [AgentForegroundProcessObservation],
-        missingScanThreshold: Int = 3,
-        now: Date = Date()
-    ) {
-        guard !sessions.isEmpty else {
-            return
-        }
-
-        var didChange = false
-        for (id, record) in sessions {
-            guard record.displayState != .sessionEnded else {
-                continue
-            }
-
-            var updatedRecord = record
-            guard let observation = observations.first(where: { $0.paneID == record.paneID }) else {
-                continue
-            }
-
-            if observation.agent == record.agent {
-                updatedRecord.agentProcessID = observation.processID
-                didChange = didChange || record.agentProcessID != observation.processID
-                updatedRecord.missingLivenessScanCount = 0
-            } else {
-                guard let agentProcessID = record.agentProcessID else {
-                    continue
-                }
-                guard AgentForegroundProcessInspector.agentKind(forProcessID: agentProcessID) != record.agent else {
-                    updatedRecord.missingLivenessScanCount = 0
-                    sessions[id] = updatedRecord
-                    continue
-                }
-
-                updatedRecord.missingLivenessScanCount += 1
-                if updatedRecord.missingLivenessScanCount >= missingScanThreshold {
-                    updatedRecord.displayState = .sessionEnded
-                    updatedRecord.lastEventAt = now
-                    didChange = true
-                }
-            }
-
-            sessions[id] = updatedRecord
-        }
-
-        if didChange {
-            postDidChange()
-        }
+    func markViewed(_ bindings: [HerdrPaneBinding], snapshot: HerdrShellSnapshot) {
+        guard snapshot.boot_id == bootID else { return }
+        let ids = records.values.filter { record in
+            bindings.contains { $0.endpoint == record.snapshot.binding.endpoint && $0.serviceIdentity == record.snapshot.binding.serviceIdentity && $0.paneID == record.snapshot.binding.paneID }
+                && snapshot.agents?.contains(where: { $0.pane_id == record.snapshot.binding.paneID && $0.state_change_seq == record.sequence }) == true
+        }.map { $0.snapshot.paneID }
+        if !ids.isEmpty { markRead(forPaneIDs: Set(ids)) }
     }
 
-    func removeSessions(forPaneID paneID: PaneID) {
-        let countBefore = sessions.count
-        sessions = sessions.filter { _, record in record.paneID != paneID }
-        if sessions.count != countBefore {
-            postDidChange()
+    func clearEnded() {
+        records = records.filter { $0.value.snapshot.isUnread || $0.value.snapshot.displayState != .sessionEnded }
+        messages.removeAll { !$0.isUnread }
+        postDidChange()
+    }
+
+    func markUnavailable() {
+        for id in records.keys {
+            if let old = records[id] { records[id]?.snapshot = replacing(old.snapshot, available: false) }
         }
+        latest = nil
+        pending.removeAll()
+        postDidChange()
     }
 
     func reset() {
-        guard !sessions.isEmpty else {
-            return
-        }
-
-        sessions.removeAll()
+        endpoint = nil
+        records.removeAll(); messages.removeAll(); pending.removeAll(); customNotices.removeAll()
+        identity = nil; bootID = nil; latest = nil; completions.removeAll(); revision = 0
         postDidChange()
     }
 
-    private func snapshot(for record: SessionRecord) -> AgentSessionSnapshot {
-        let paneSnapshot = AgentPaneRegistry.shared.snapshot(for: record.paneID)
-        return AgentSessionSnapshot(
-            id: record.id,
-            agent: record.agent,
-            paneID: record.paneID,
-            sessionID: record.sessionID,
-            displayState: record.displayState,
-            paneTitle: paneSnapshot?.title ?? "Pane",
-            workingDirectory: record.workingDirectory ?? paneSnapshot?.workingDirectory,
-            message: record.message,
-            lastEventAt: record.lastEventAt,
-            isUnread: record.isUnread,
-            processID: record.agentProcessID
-        )
+    private func key(_ identity: HerdrServiceIdentity, _ boot: String, _ pane: String) -> String {
+        (try? JSONEncoder().encode([String(identity.pid), String(identity.startedSeconds), String(identity.startedMicroseconds), boot, pane]).base64EncodedString()) ?? pane
     }
 
-    private func sortedSnapshots(_ snapshots: [AgentSessionSnapshot]) -> [AgentSessionSnapshot] {
-        snapshots.sorted { lhs, rhs in
-            let lhsRank = sortRank(for: lhs)
-            let rhsRank = sortRank(for: rhs)
-            if lhsRank != rhsRank {
-                return lhsRank < rhsRank
-            }
-
-            return lhs.lastEventAt > rhs.lastEventAt
-        }
+    private func replacing(_ old: AgentSessionSnapshot, state: AgentSessionDisplayState? = nil,
+                           available: Bool? = nil, unread: Bool? = nil, message: String? = nil) -> AgentSessionSnapshot {
+        .init(id: old.id, agent: old.agent, paneID: old.paneID, sessionID: old.sessionID,
+              displayState: state ?? old.displayState, paneTitle: old.paneTitle, workingDirectory: old.workingDirectory,
+              message: message ?? old.message, lastEventAt: old.lastEventAt, isUnread: unread ?? old.isUnread,
+              backendStatusAvailable: available ?? old.backendStatusAvailable, binding: old.binding)
     }
-
-    private func sortRank(for snapshot: AgentSessionSnapshot) -> Int {
-        if snapshot.displayState == .waitingForUser {
-            return 0
-        }
-        if snapshot.isUnread {
-            return 1
-        }
-
-        switch snapshot.displayState {
-        case .running:
-            return 2
-        case .turnCompleted:
-            return 3
-        case .sessionEnded:
-            return 4
-        case .waitingForUser:
-            return 0
-        }
-    }
-
-    private func sessionID(for agent: AgentKind, paneID: PaneID, sessionID: String?) -> String {
-        if agent == .codex {
-            return [paneID.uuidString, agent.rawValue].joined(separator: ":")
-        }
-
-        return [paneID.uuidString, agent.rawValue, sessionID ?? ""].joined(separator: ":")
-    }
-
     private func postDidChange() {
+        let snapshots = records.mapValues(\.snapshot)
+        guard snapshots != published || messages != publishedMessages else { return }
+        published = snapshots; publishedMessages = messages
         NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
     }
 }

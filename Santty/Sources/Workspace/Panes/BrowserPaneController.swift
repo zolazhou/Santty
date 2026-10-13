@@ -301,6 +301,8 @@ final class BrowserPaneController: NSObject, PaneControlling, WKNavigationDelega
         didSet { browserHostView.nameBadge.name = name }
     }
 
+    private var lastRequestedURL: URL?
+    var restorationURL: String? { browserHostView.webView.url?.absoluteString ?? lastRequestedURL?.absoluteString }
     private var loadState: LoadState = .empty
     private var progressObservation: NSKeyValueObservation?
 
@@ -400,12 +402,13 @@ final class BrowserPaneController: NSObject, PaneControlling, WKNavigationDelega
         }
     }
 
-    private func loadURLString(_ rawURL: String) {
+    func loadURLString(_ rawURL: String) {
         guard let url = Self.normalizedURL(from: rawURL) else {
             NSSound.beep()
             return
         }
 
+        lastRequestedURL = url
         loadState = .loading
         browserHostView.showWebView()
         browserHostView.showError(nil)

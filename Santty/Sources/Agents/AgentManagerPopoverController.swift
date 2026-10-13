@@ -26,6 +26,7 @@ final class AgentManagerPopoverController: NSObject, NSPopoverDelegate {
             self?.popover.performClose(nil)
             onFocusPane(paneID)
         }
+        managerView.onContentSizeChange = { [weak self] in self?.updateContentSize() }
         managerView.onClearEnded = onClearEnded
         managerView.onCancel = { [weak self] in
             self?.popover.performClose(nil)

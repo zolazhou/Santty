@@ -5,6 +5,62 @@ import XCTest
 
 final class WorkspaceViewControllerTests: XCTestCase {
     @MainActor
+    func testPaletteSearchRanksNamesAndFiltersKindsAndOwnership() {
+        let items = [
+            AppCommand(id: "command", title: "New Tab", shortcut: nil, isEnabled: true) {},
+            AppCommand(id: "space", title: "Default", shortcut: nil, isEnabled: true, kind: .workspace) {},
+            AppCommand(id: "remote", title: "Logs", shortcut: nil, isEnabled: true, kind: .pane, subtitle: "Santty › API") {},
+            AppCommand(id: "local", title: "Logs", shortcut: nil, isEnabled: true, kind: .pane, subtitle: "Default › API", isInCurrentWorkspace: true) {},
+            AppCommand(id: "tab", title: "API", shortcut: nil, isEnabled: true, kind: .tab, isInCurrentWorkspace: true) {},
+        ]
+        XCTAssertEqual(CommandPaletteFilter.results(items, query: "", kind: nil).map(\.id), ["command", "space", "tab"])
+        XCTAssertEqual(CommandPaletteFilter.results(items, query: "logs", kind: nil).map(\.id), ["local", "remote"])
+        XCTAssertEqual(CommandPaletteFilter.results(items, query: "Santty logs", kind: nil).map(\.id), ["remote"])
+        XCTAssertEqual(CommandPaletteFilter.results(items, query: "", kind: .pane).map(\.id), ["remote", "local"])
+        XCTAssertEqual(CommandPaletteFilter.results(items, query: "tab", kind: .command).map(\.id), ["command"])
+    }
+
+    @MainActor
+    func testPaletteLocalNavigationPreservesFloatingAndRevealsHiddenPanes() async throws {
+        let controller = Self.makeController()
+        let first = try XCTUnwrap(controller.debugFocusedPaneID)
+        controller.debugSplitFocusedPane(along: .horizontal)
+        let floating = try XCTUnwrap(controller.debugFocusedPaneID)
+        controller.debugSetFocusedPaneName("Floating target")
+        controller.debugToggleFloatingPane()
+        controller.debugNewTab()
+        let target = try XCTUnwrap(controller.paletteNavigationItems.first { $0.kind == .pane && $0.title == "Floating target" })
+        target.perform()
+        await controller.waitForPaletteNavigationForTesting()
+        XCTAssertEqual(controller.debugFocusedPaneID, floating)
+        XCTAssertEqual(controller.debugActiveFloatingPaneState?.paneID, floating)
+        controller.debugHandlePaneFocusRequest(withID: first)
+        controller.debugSetFocusedPaneName("Hidden target")
+        controller.debugDetachFocusedPane()
+        controller.debugNewTab()
+        try XCTUnwrap(controller.paletteNavigationItems.first { $0.kind == .pane && $0.title == "Hidden target" }).perform()
+        await controller.waitForPaletteNavigationForTesting()
+        XCTAssertEqual(controller.debugActiveDetachedPaneID, first)
+        XCTAssertEqual(controller.debugFocusedPaneID, first)
+        XCTAssertTrue(controller.debugCommandSnapshots.allSatisfy { !$0.id.hasPrefix("navigate.") }, "CLI command exports must remain commands only")
+        XCTAssertNil(controller.herdrLastError)
+    }
+
+    @MainActor
+    func testPaletteRejectsRemovedTabWithoutChangingSelection() async throws {
+        let controller = Self.makeController()
+        let first = try XCTUnwrap(controller.debugSelectedTabID)
+        let stale = try XCTUnwrap(controller.paletteNavigationItems.first { $0.kind == .tab })
+        controller.debugNewTab()
+        let selected = controller.debugSelectedTabID
+        controller.debugCloseTab(withID: first)
+        stale.perform()
+        await controller.waitForPaletteNavigationForTesting()
+        XCTAssertEqual(controller.debugSelectedTabID, selected)
+        XCTAssertTrue(controller.herdrLastError?.contains("no longer exists") == true)
+    }
+
+    @MainActor
     func testNotesPanesSplitRepeatedlyAndReportTheirKindToCLI() async throws {
         let controller = Self.makeController()
         controller.debugPerformCommand(withID: "pane.notes.new")
@@ -562,6 +618,62 @@ final class WorkspaceViewControllerTests: XCTestCase {
             XCTAssertGreaterThan(controller.debugRenderedContentFrame.width, 0)
             XCTAssertGreaterThan(controller.debugRenderedContentFrame.height, 0)
         }
+    }
+
+    @MainActor
+    func testWorkspaceSwitcherRemainsLegibleOnDarkChromeWithLightSystemAppearance() throws {
+        let toolbar = WorkspaceToolbarView(frame: NSRect(x: 0, y: 0, width: 640, height: 32))
+        toolbar.appearance = NSAppearance(named: .aqua)
+        toolbar.updateWorkspaces([
+            .init(workspace_id: "w1", label: "Santty", active_tab_id: "t1"),
+            .init(workspace_id: "w2", label: "Other", active_tab_id: "t2"),
+        ], selectedID: "w1")
+        toolbar.layoutSubtreeIfNeeded()
+        let button = toolbar.workspaceSwitcher
+        XCTAssertFalse(button.isHidden)
+        XCTAssertEqual(button.titleOfSelectedItem, "Santty")
+        XCTAssertEqual(button.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua,
+            "Light system appearance must not draw black workspace text on Santty's dark chrome")
+        XCTAssertGreaterThanOrEqual(button.frame.height, 30)
+        XCTAssertGreaterThan(button.frame.width, 0)
+        XCTAssertTrue(toolbar.bounds.contains(button.convert(button.bounds, to: toolbar)))
+        XCTAssertEqual(button.frame.minX, toolbar.bounds.minX, accuracy: 0.001)
+        XCTAssertGreaterThanOrEqual(toolbar.tabStripView.frame.minX, button.frame.maxX)
+        toolbar.updateAgentStatus(sessionCount: 1, unreadCount: 0)
+        toolbar.updateDetachedPanes([], target: nil, action: #selector(NSButton.performClick(_:)))
+        toolbar.layoutSubtreeIfNeeded()
+        XCTAssertEqual(button.frame.minX, toolbar.bounds.minX, accuracy: 0.001)
+        XCTAssertLessThanOrEqual(toolbar.tabStripView.frame.maxX,
+            toolbar.agentStatusButton.convert(toolbar.agentStatusButton.bounds, to: toolbar).minX)
+        var selected: String?
+        toolbar.onSelectWorkspace = { selected = $0 }
+        button.selectItem(at: 2)
+        XCTAssertTrue(button.sendAction(button.action, to: button.target))
+        XCTAssertEqual(selected, "w2")
+    }
+
+    @MainActor
+    func testWorkspaceSwitcherKeepsMenuAndSelectionStableAcrossTabUpdates() async {
+        let toolbar = WorkspaceToolbarView(frame: NSRect(x: 0, y: 0, width: 640, height: 32))
+        let other = HerdrSnapshot.Workspace(workspace_id: "w2", label: "Other", active_tab_id: "t2")
+        toolbar.updateWorkspaces([.init(workspace_id: "w1", label: "Santty", active_tab_id: "t1"), other], selectedID: "w1")
+        let items = toolbar.workspaceSwitcher.itemArray
+        toolbar.updateWorkspaces([.init(workspace_id: "w1", label: "Santty", active_tab_id: "t3"), other], selectedID: "w1")
+        XCTAssertEqual(items.count, toolbar.workspaceSwitcher.numberOfItems)
+        for (before, after) in zip(items, toolbar.workspaceSwitcher.itemArray) { XCTAssertTrue(before === after) }
+        var chosen: String?
+        toolbar.onSelectWorkspace = { chosen = $0 }
+        toolbar.workspaceSwitcher.selectItem(at: 2)
+        _ = toolbar.workspaceSwitcher.sendAction(toolbar.workspaceSwitcher.action, to: toolbar.workspaceSwitcher.target)
+        XCTAssertEqual(chosen, "w2")
+        XCTAssertEqual(toolbar.workspaceSwitcher.titleOfSelectedItem, "Santty", "Selection waits for backend confirmation")
+        toolbar.updateWorkspaces([.init(workspace_id: "w1", label: "Renamed", active_tab_id: "t3"), other], selectedID: "w2")
+        XCTAssertEqual(toolbar.workspaceSwitcher.titleOfSelectedItem, "Other")
+        XCTAssertEqual(toolbar.workspaceSwitcher.item(at: 1)?.title, "Renamed")
+        toolbar.updateWorkspaces([], selectedID: nil)
+        XCTAssertFalse(toolbar.workspaceSwitcher.isHidden)
+        XCTAssertEqual(toolbar.workspaceSwitcher.titleOfSelectedItem, "Default")
+        XCTAssertEqual(toolbar.workspaceSwitcher.numberOfItems, 1)
     }
 
     func testAgentStatusBadgeStaysInsideButtonTrailingEdge() async throws {
@@ -1667,7 +1779,9 @@ final class WorkspaceViewControllerTests: XCTestCase {
                 XCTAssertEqual(
                     controller.debugCommandSnapshots.map(\.id),
                     [
-                        "pane.rename",
+                        "terminal.herdr.diagnostics", "workspace.new", "workspace.herdr.new", "workspace.rename", "workspace.close", "terminal.herdr.disconnect", "terminal.herdr.reconnect",
+                "terminal.herdr.takeover", "terminal.herdr.end",
+                "pane.rename",
                         "pane.split.horizontal",
                         "pane.split.vertical",
                         "pane.notes.new",
@@ -1699,7 +1813,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
                         "pane.close",
                         "tab.new",
                         "tab.close",
-                        "tab.title.change",
+                        "tab.rename",
                         "tab.focus.previous",
                         "tab.focus.next",
                     ]
@@ -1745,7 +1859,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.promptEditor" })?.isEnabled, true)
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "pane.scrollMode.enter" })?.isEnabled, true)
             XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "tab.new" })?.isEnabled, true)
-            XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "tab.title.change" })?.isEnabled, true)
+            XCTAssertEqual(controller.debugCommandSnapshots.first(where: { $0.id == "tab.rename" })?.isEnabled, true)
 
             controller.debugSplitFocusedPane(along: .horizontal)
             controller.debugNewTab()
