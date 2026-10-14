@@ -27,7 +27,10 @@ final class HerdrBetaTests: XCTestCase {
         XCTAssertThrowsError(try HerdrEndpoint(binary: bin, session: "default", socketPath: "/tmp/valid.sock").validate())
         XCTAssertThrowsError(try HerdrEndpoint(binary: installed, session: "../wrong", socketPath: "/tmp/valid.sock").validate())
         XCTAssertThrowsError(try HerdrEndpoint(binary: installed, session: "default", socketPath: "relative.sock").validate())
-        for script in ["printf 'herdr 0.9.4\\n'", "exec /usr/bin/yes bad", "exec >&- 2>&-; exec /bin/sleep 5"] {
+        let newer = try executable("printf 'herdr 0.9.4\\n'", in: bin)
+        let newerVersion = try await Task.detached { try HerdrExecutable.version(at: newer) }.value
+        XCTAssertEqual(newerVersion, "0.9.4", "Compatibility is negotiated by the endpoint, not the release string")
+        for script in ["printf 'not-herdr\\n'", "exec /usr/bin/yes bad", "exec >&- 2>&-; exec /bin/sleep 5"] {
             let binary = try executable(script, in: bin)
             do { _ = try await Task.detached { try HerdrExecutable.version(at: binary) }.value; XCTFail("Invalid or hung client accepted") } catch {}
         }

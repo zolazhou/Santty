@@ -14,15 +14,38 @@ struct HerdrEndpoint: Codable, Sendable, Equatable {
     let binary: URL
     let session: String
     let socketPath: String
+    var machine: HerdrMachineProfile? = nil
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.binary == rhs.binary && lhs.session == rhs.session && lhs.socketPath == rhs.socketPath
+            && lhs.machine?.id == rhs.machine?.id && lhs.machine?.target == rhs.machine?.target
+    }
+
+    var id: String {
+        if let machine { return "ssh." + machine.id }
+        return "herdr." + Data((socketPath + "\u{1F}" + session).utf8).base64EncodedString()
+    }
+
+    var clientSocketPath: String {
+        let api = URL(fileURLWithPath: socketPath)
+        return api.deletingLastPathComponent().appendingPathComponent(api.deletingPathExtension().lastPathComponent + "-client.sock").path
+    }
 
     func validate() throws {
         guard binary.isFileURL, binary.path.hasPrefix("/"),
+              !binary.path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
               (try? binary.resolvingSymlinksInPath().resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
               FileManager.default.isExecutableFile(atPath: binary.path), socketPath.hasPrefix("/"),
               !session.isEmpty, session.utf8.count <= 64,
               session.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") })
         else { throw CLIError("Choose an executable Herdr binary and a valid existing session name") }
-        try CLITransport.withAddress(socketPath) { _, _ in }
+        if let machine {
+            try machine.validate()
+            guard machine.enabled else { throw CLIError("Herdr machine is disabled") }
+            guard machine.session == session else { throw CLIError("Herdr machine session changed") }
+        } else {
+            try CLITransport.withAddress(socketPath) { _, _ in }
+        }
     }
 }
 
@@ -65,10 +88,26 @@ final class HerdrWorkspaceClient: @unchecked Sendable {
     private let commandLock = NSLock()
     private weak var commandSession: HerdrClientShellSession?
     private var commandBootID: String?
+    private var remoteIdentity: HerdrServiceIdentity?
+    private var commandRetired = false
     private var endpointCommand: (@MainActor @Sendable (String, HerdrConnection.Request.Params) async throws -> HerdrAPIEnvelope.Result)?
-    init(endpoint: HerdrEndpoint) {
+    init(endpoint: HerdrEndpoint, identity: HerdrServiceIdentity? = nil) {
         self.endpoint = endpoint
+        if endpoint.machine != nil, identity?.endpointID == endpoint.id { remoteIdentity = identity }
     }
+
+    @MainActor
+    func establishQueryIdentity(_ session: HerdrClientShellSession) throws {
+        guard session.endpoint == endpoint, let identity = session.serviceIdentity,
+              let boot = session.projection.snapshot?.boot_id else { throw CLIError("Herdr query identity is not ready") }
+        if endpoint.machine != nil {
+            guard identity == .remote(endpoint: endpoint, bootID: boot) else { throw CLIError("Remote Herdr boot changed") }
+            commandLock.lock(); remoteIdentity = identity; commandLock.unlock()
+        }
+    }
+
+    func retireCommands() { commandLock.lock(); commandRetired = true; commandLock.unlock() }
+    private var commandsAreRetired: Bool { commandLock.lock(); defer { commandLock.unlock() }; return commandRetired }
 
     @MainActor
     func routeCommands(to session: HerdrClientShellSession) throws {
@@ -84,7 +123,8 @@ final class HerdrWorkspaceClient: @unchecked Sendable {
         }
         commandSession = session
         commandBootID = boot
-        endpointCommand = { [weak session] method, params in
+        endpointCommand = { [weak session, weak self] method, params in
+            guard let self, !self.commandsAreRetired else { throw CLIError("Herdr command route was retired; the operation was not replayed") }
             guard let session, session.serviceIdentity != nil else {
                 throw CLIError("Herdr ClientShell is disconnected; command was not sent through another transport")
             }
@@ -96,6 +136,7 @@ final class HerdrWorkspaceClient: @unchecked Sendable {
                 let deadline = ProcessInfo.processInfo.systemUptime + 12
                 while !session.isPresentationReady {
                     try Task.checkCancellation()
+                    guard !self.commandsAreRetired else { throw CLIError("Herdr command route was retired while waiting for presentation") }
                     guard session.serviceIdentity == identity, session.projection.snapshot?.boot_id == boot,
                           session.state != .disconnected else { throw CLIError("Herdr connection changed before navigation") }
                     if let failure = session.failure { throw failure }
@@ -103,7 +144,9 @@ final class HerdrWorkspaceClient: @unchecked Sendable {
                     try await Task.sleep(for: .milliseconds(20))
                 }
             }
+            guard !self.commandsAreRetired else { throw CLIError("Herdr command route was retired before sending input") }
             let bytes = try await session.request(method, params: params)
+            guard !self.commandsAreRetired else { throw CLIError("Herdr command result arrived after leaving its workspace") }
             guard session.serviceIdentity == identity, session.projection.snapshot?.boot_id == boot else {
                 throw CLIError("Herdr service changed before command result could be applied")
             }
@@ -145,24 +188,29 @@ final class HerdrWorkspaceClient: @unchecked Sendable {
            let command = commandHandler() {
             return try await command(method, params)
         }
+        if endpoint.machine != nil, !["ping", "session.snapshot", "layout.export", "pane.read", "pane.process_info", "agent.list"].contains(method) {
+            throw CLIError("Select a Remote Herdr Workspace before modifying it; no API fallback was used")
+        }
         return try await withCheckedThrowingContinuation { continuation in
             requests.async { [self] in
                 do {
                     try endpoint.validate()
-                    _ = try HerdrConnection.preflight(socketPath: endpoint.socketPath)
-                    let result: HerdrAPIEnvelope.Result
+                    _ = try HerdrConnection.preflight(socketPath: endpoint.socketPath, endpoint: endpoint)
+                    var result: HerdrAPIEnvelope.Result
                     do {
-                        result = try HerdrConnection.request(.init(id: UUID().uuidString, method: method, params: params), socketPath: endpoint.socketPath)
+                        result = try HerdrConnection.request(.init(id: UUID().uuidString, method: method, params: params), socketPath: endpoint.socketPath, endpoint: endpoint)
                     } catch {
                         if error is HerdrRemoteError { throw error }
                         if method != "session.snapshot" {
                             // A lost acknowledgement never authorizes repeating a mutation.
-                            let snapshot = try? HerdrConnection.request(.init(id: UUID().uuidString, method: "session.snapshot"), socketPath: endpoint.socketPath).snapshot
+                            let snapshot = try? HerdrConnection.request(.init(id: UUID().uuidString, method: "session.snapshot"), socketPath: endpoint.socketPath, endpoint: endpoint).snapshot
                             let count = snapshot.map { String($0.panes.count) } ?? "unknown"
                             throw CLIError("\(method) failed or its result is unknown: \(error.localizedDescription). Refreshed pane count: \(count). Refresh Connect Existing Terminal before retrying; no operation was repeated.")
                         }
                         throw error
                     }
+                    commandLock.lock(); let identity = remoteIdentity; commandLock.unlock()
+                    if let identity { result.assignServiceIdentity(identity) }
                     continuation.resume(returning: result)
                 } catch { continuation.resume(throwing: error) }
             }

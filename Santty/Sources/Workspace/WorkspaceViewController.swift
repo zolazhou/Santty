@@ -137,7 +137,11 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     private var herdrClient: HerdrWorkspaceClient?
     private var herdrManagementState: HerdrConnectionState = .disconnected
     private var herdrManagement: HerdrConnection?
-    private let herdrAgentMonitor = HerdrAgentMonitor()
+    private let herdrCatalog = HerdrWorkspaceCatalog()
+    private var workspaceEntries: [WorkspaceEntry] = []
+    private var workspaceSelectionTask: Task<Void, Never>?
+    private var workspaceSelectionGeneration = 0
+    private var restoredWorkspaceSelection: WorkspaceReference?
     private var herdrManagementGeneration = 0
     private var herdrOperationPending = false
     private var herdrWorkspaceClosed = false
@@ -145,6 +149,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     private let herdrWindowMode: HerdrTerminalMode = .control
     private let herdrWindowTransport: HerdrPaneTransport = .clientShell
     private var herdrShellSession: HerdrClientShellSession?
+    private var borrowedHerdrCallbacks: (state: ((HerdrConnectionState) -> Void)?, failure: ((any Error, Bool) -> Void)?)?
     private var herdrShellPopup: HerdrClientShellPopupController?
     private var herdrShellGeneration = 0
     private var herdrShellProjectionTask: Task<Void, Never>?
@@ -243,7 +248,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             guard tabs.contains(where: { $0.paneControllers[terminal.id] === terminal }) else {
                 throw CLIError("Herdr query target changed while resolving identity")
             }
-            let read = try await HerdrWorkspaceClient(endpoint: binding.endpoint).read(binding)
+            let read = try await HerdrWorkspaceClient(endpoint: binding.endpoint, identity: binding.serviceIdentity).read(binding)
             guard terminal.isLive, terminal.herdrQueryBinding == binding,
                   tabs.contains(where: { $0.paneControllers[terminal.id] === terminal }) else {
                 throw CLIError("Herdr query target changed while reading history")
@@ -420,14 +425,14 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
     deinit {
         MainActor.assumeIsolated {
-            herdrDiscoveryTask?.cancel()
+            herdrDiscoveryTask?.cancel(); workspaceSelectionTask?.cancel()
             if let herdrSettingsObserver { NotificationCenter.default.removeObserver(herdrSettingsObserver) }
             workspaceSaveTask?.cancel()
             herdrShellReconnectTask?.cancel()
             herdrShellRecoveryTask?.cancel()
             herdrShellHostColorTask?.cancel()
             herdrShellSession?.disconnect()
-            herdrAgentMonitor.stop()
+            herdrCatalog.stop()
             herdrManagement?.disconnect()
             for tab in allWorkspaceTabs {
                 for case let pane as TerminalPaneController in tab.paneControllers.values { pane.disconnectHerdr() }
@@ -584,8 +589,10 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             canCloseWorkspace
         case #selector(endPersistentTerminal(_:)):
             focusedHerdrBinding != nil && !herdrOperationPending
-        case #selector(showPersistentDiagnostics(_:)), #selector(newHerdrWorkspace(_:)):
+        case #selector(showPersistentDiagnostics(_:)), #selector(newHerdrWorkspace(_:)), #selector(addRemoteHerdrMachine(_:)):
             !herdrOperationPending
+        case #selector(authenticateRemoteHerdrMachine(_:)):
+            !herdrOperationPending && herdrCatalog.states.values.contains { $0.endpoint.machine != nil }
         case #selector(closePane(_:)), #selector(renamePane(_:)):
             focusedPaneController != nil
         case #selector(showAutoResizeSettings(_:)):
@@ -1069,9 +1076,10 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     private func makeTerminalPaneController(
         id: PaneID = UUID(),
         workingDirectory: String? = nil,
-        herdr: HerdrPaneBinding? = nil
+        herdr: HerdrPaneBinding? = nil,
+        launchCommand: String? = nil
     ) -> TerminalPaneController {
-        let paneController = TerminalPaneController(id: id, workingDirectory: workingDirectory, herdr: herdr)
+        let paneController = TerminalPaneController(id: id, workingDirectory: workingDirectory, herdr: herdr, launchCommand: launchCommand)
         paneController.updateAppearance()
 
         paneController.onFocusRequest = { [weak self] paneID in
@@ -3095,6 +3103,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             AppCommand(id: "terminal.herdr.diagnostics", title: "Herdr Diagnostics", shortcut: nil, isEnabled: !herdrOperationPending, perform: { [weak self] in self?.showPersistentDiagnostics(nil) }),
             AppCommand(id: "workspace.new", title: "New Workspace", shortcut: KeybindingSettings.displayShortcut(for: .newWorkspace), isEnabled: canCreateLocalWorkspace, perform: { [weak self] in self?.newWorkspace(nil) }),
             AppCommand(id: "workspace.herdr.new", title: "New Herdr Workspace", shortcut: KeybindingSettings.displayShortcut(for: .newHerdrWorkspace), isEnabled: !herdrOperationPending, perform: { [weak self] in self?.newHerdrWorkspace(nil) }),
+            AppCommand(id: "workspace.remote.add", title: "Add Remote Herdr Machine", shortcut: nil, isEnabled: !herdrOperationPending, perform: { [weak self] in self?.addRemoteHerdrMachine(nil) }),
+            AppCommand(id: "workspace.remote.authenticate", title: "Authenticate Remote Herdr Machine", shortcut: nil,
+                isEnabled: !herdrOperationPending && herdrCatalog.states.values.contains { $0.endpoint.machine != nil }, perform: { [weak self] in self?.authenticateRemoteHerdrMachine(nil) }),
             AppCommand(id: "workspace.rename", title: "Rename Workspace", shortcut: KeybindingSettings.displayShortcut(for: .renameWorkspace), isEnabled: canCloseWorkspace, perform: { [weak self] in self?.renameWorkspace(nil) }),
             AppCommand(id: "workspace.close", title: "Close Workspace", shortcut: KeybindingSettings.displayShortcut(for: .closeWorkspace), isEnabled: canCloseWorkspace, perform: { [weak self] in self?.closeWorkspace(nil) }),
             AppCommand(id: "terminal.herdr.disconnect", title: KeybindingAction.disconnectPersistentTerminal.title, shortcut: KeybindingSettings.displayShortcut(for: .disconnectPersistentTerminal), isEnabled: (herdrWindowWorkspaceID != nil && herdrWindowWorkspaceID != nil || focusedHerdrBinding != nil) && (!herdrOperationPending || herdrShellRecoveryTask != nil), perform: { [weak self] in self?.disconnectPersistentTerminal(nil) }),
@@ -3883,7 +3894,7 @@ extension WorkspaceViewController {
         herdrManagement?.disconnect()
         herdrManagementGeneration += 1
         let generation = herdrManagementGeneration
-        herdrManagement = HerdrConnection(socketPath: endpoint.socketPath, snapshot: { [weak self] snapshot in
+        herdrManagement = HerdrConnection(socketPath: endpoint.socketPath, endpoint: endpoint, snapshot: { [weak self] snapshot in
             Task { @MainActor in
                 guard let self, self.herdrManagementGeneration == generation, !self.herdrWorkspaceClosed else { return }
                 self.reconcileHerdrSnapshot(snapshot)
@@ -3908,33 +3919,25 @@ extension WorkspaceViewController {
     func discoverHerdrWorkspaces() {
         herdrDiscoveryTask?.cancel()
         herdrDiscoveryTask = Task { [weak self] in
-            guard let self else { return }
-            while self.herdrOperationPending {
-                do { try await Task.sleep(for: .milliseconds(50)) }
-                catch { return }
-            }
-            guard !Task.isCancelled, !self.herdrWorkspaceClosed else { return }
+            guard let self, !self.herdrWorkspaceClosed else { return }
+            let local = HerdrSettings.endpoint
+            self.startHerdrAgentMonitoring(local)
             do {
-                let endpoint = HerdrSettings.endpoint
-                self.startHerdrAgentMonitoring(endpoint)
-                if self.herdrClient?.endpoint != endpoint {
+                if self.herdrClient == nil { try self.configureHerdrWorkspace(local) }
+                if self.herdrClient?.endpoint.machine == nil, self.herdrClient?.endpoint != local {
                     self.selectLocalWorkspace()
                     self.herdrDiscoveredWorkspaces = []
-                    self.refreshWorkspacePicker()
-                    try self.configureHerdrWorkspace(endpoint)
-                } else { self.herdrManagement?.connect() }
-                let generation = self.herdrManagementGeneration
+                    try self.configureHerdrWorkspace(local)
+                }
                 guard let client = self.herdrClient else { return }
+                let generation = self.herdrManagementGeneration
                 let snapshot = try await client.snapshot()
-                guard !Task.isCancelled, !self.herdrWorkspaceClosed, generation == self.herdrManagementGeneration else { return }
+                guard !Task.isCancelled, generation == self.herdrManagementGeneration else { return }
                 self.reconcileHerdrSnapshot(snapshot)
             } catch {
-                guard !Task.isCancelled, !self.herdrWorkspaceClosed else { return }
+                guard !Task.isCancelled else { return }
                 self.herdrLastError = error.localizedDescription
-                if self.herdrWindowWorkspaceID == nil {
-                    self.herdrDiscoveredWorkspaces = []
-                    self.refreshWorkspacePicker()
-                }
+                self.refreshWorkspacePicker()
             }
         }
     }
@@ -3951,9 +3954,46 @@ extension WorkspaceViewController {
             }
             herdrDiscoveredWorkspaces = workspaces
         }
-        rootView.toolbarView.updateWorkspaces(herdrDiscoveredWorkspaces,
-            selectedID: herdrWindowWorkspaceID ?? "local." + localWorkspaceID.uuidString,
-            localWorkspaces: localWorkspaceStates.map { ($0.pickerID, $0.name) })
+        var entries = localWorkspaceStates.map {
+            WorkspaceEntry(reference: .init(source: .local($0.id)), name: $0.name)
+        }
+        let live = herdrCatalog.workspaces
+        var backend = Dictionary(uniqueKeysWithValues: workspaceEntries.filter { $0.kind != .local }.map { ($0.id, $0) })
+        for state in herdrCatalog.states.values {
+            guard let snapshot = state.snapshot else { continue }
+            let ids = Set(snapshot.workspaces.map(\.workspace_id))
+            backend = backend.filter { _, entry in
+                if case .herdr(let endpoint, let id) = entry.reference.source, endpoint.id == state.endpoint.id { return ids.contains(id) }
+                return true
+            }
+        }
+        for entry in live { backend[entry.id] = entry }
+        if let active = herdrClient?.endpoint {
+            let endpoint = herdrCatalog.states[active.id]?.endpoint ?? active
+            for workspace in herdrDiscoveredWorkspaces {
+                let reference = WorkspaceReference(source: .herdr(endpoint: endpoint, workspaceID: workspace.workspace_id))
+                if backend[reference.id] == nil || endpoint.id == herdrClient?.endpoint.id {
+                    let available = herdrCatalog.states[endpoint.id].map {
+                        $0.identity != nil || ($0.snapshot == nil && $0.status == .connecting && herdrLatestQuerySnapshot != nil)
+                    }
+                        ?? (herdrWindowWorkspaceID != nil ? herdrShellSession?.failure == nil : herdrLatestQuerySnapshot != nil)
+                    backend[reference.id] = .init(reference: reference, name: workspace.label,
+                        isAvailable: available)
+                }
+            }
+        }
+        let catalogIDs = Set(herdrCatalog.states.keys)
+        if !catalogIDs.isEmpty {
+            backend = backend.filter { _, entry in
+                if case .herdr(let endpoint, _) = entry.reference.source { return catalogIDs.contains(endpoint.id) || endpoint == herdrClient?.endpoint }
+                return false
+            }
+        }
+        entries += backend.values.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        workspaceEntries = entries
+        let selected = herdrWindowWorkspaceID.flatMap { id in herdrClient.map { WorkspaceReference(source: .herdr(endpoint: $0.endpoint, workspaceID: id)) } }
+            ?? WorkspaceReference(source: .local(localWorkspaceID))
+        rootView.toolbarView.updateWorkspaceEntries(entries, selectedID: selected.id)
     }
 
     func collectHerdrDiagnostics() async -> HerdrDiagnostics {
@@ -4022,6 +4062,58 @@ extension WorkspaceViewController {
             catch { presentHerdrError(error); return }
         }
         createHerdrPane()
+    }
+
+    @objc func addRemoteHerdrMachine(_: Any?) {
+        guard !herdrOperationPending, !isClosingNotes, !herdrWorkspaceClosed else { return }
+        let alert = NSAlert()
+        alert.messageText = "Add Remote Herdr Machine"
+        alert.informativeText = "Setup opens in a local terminal. Herdr handles SSH authentication, session discovery, and any installation or replacement confirmation."
+        alert.addButton(withTitle: "Open Setup"); alert.addButton(withTitle: "Cancel")
+        let target = NSTextField(), session = NSTextField(), label = NSTextField()
+        target.placeholderString = "SSH host or ssh://user@host:port"
+        session.placeholderString = "Session (blank to discover)"
+        label.placeholderString = "Machine label (optional)"
+        target.setAccessibilityLabel("SSH target"); session.setAccessibilityLabel("Herdr session"); label.setAccessibilityLabel("Machine label")
+        for field in [target, session, label] { field.usesSingleLineMode = true; field.widthAnchor.constraint(equalToConstant: 360).isActive = true }
+        let stack = NSStackView(views: [target, session, label]); stack.orientation = .vertical; stack.alignment = .leading
+        stack.setFrameSize(stack.fittingSize)
+        alert.accessoryView = stack; alert.window.initialFirstResponder = target
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            let command = try HerdrMachineProfile.setupCommand(binary: HerdrSettings.endpoint.binary,
+                target: target.stringValue, session: session.stringValue, label: label.stringValue)
+            openHerdrSetupTerminal(command)
+        } catch { presentHerdrError(error) }
+    }
+
+    @objc func authenticateRemoteHerdrMachine(_: Any?) {
+        let machines = herdrCatalog.states.values.compactMap { $0.endpoint.machine }.sorted { $0.label < $1.label }
+        guard !machines.isEmpty else { NSSound.beep(); return }
+        let alert = NSAlert()
+        alert.messageText = "Authenticate Remote Herdr Machine"
+        alert.informativeText = "Herdr verifies the saved machine in a local terminal. This does not install or update Herdr."
+        alert.addButton(withTitle: "Open Terminal"); alert.addButton(withTitle: "Cancel")
+        let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 26))
+        picker.addItems(withTitles: machines.map { $0.label + " · " + $0.target })
+        if let active = herdrClient?.endpoint.machine, let index = machines.firstIndex(where: { $0.id == active.id }) { picker.selectItem(at: index) }
+        alert.accessoryView = picker
+        guard alert.runModal() == .alertFirstButtonReturn, machines.indices.contains(picker.indexOfSelectedItem) else { return }
+        let machine = machines[picker.indexOfSelectedItem]
+        openHerdrSetupTerminal(HerdrSSHBridge.quote(HerdrSettings.endpoint.binary.path) + " machine reconnect " + HerdrSSHBridge.quote(machine.id))
+    }
+
+    private func openHerdrSetupTerminal(_ command: String) {
+        guard !herdrOperationPending, !isClosingNotes, !herdrWorkspaceClosed else { return }
+        selectLocalWorkspace()
+        let script = command + "; printf '\\nHerdr setup finished. Remote workspaces refresh automatically.\\n'; exec \"${SHELL:-/bin/zsh}\" -l"
+        let pane = makeTerminalPaneController(launchCommand: "/bin/sh -c " + HerdrSSHBridge.quote(script))
+        pane.name = "Herdr Setup"
+        let tab = WorkspaceTabState(layoutNode: .panel(pane.id), paneControllers: [pane.id: pane],
+            paneAutoResizeConfigurations: [:], focusedPaneID: pane.id)
+        tabs.append(tab); selectedTabID = tab.id
+        rebuildWorkspaceLayout(); pane.startIfNeeded(); scheduleWorkspaceSave()
+        startHerdrAgentMonitoring(HerdrSettings.endpoint)
     }
 
     @objc func renameWorkspace(_: Any?) {
@@ -4242,6 +4334,8 @@ extension WorkspaceViewController {
         for tab in tabs {
             for case let pane as TerminalPaneController in tab.paneControllers.values {
                 guard let binding = pane.herdrBinding else { continue }
+                // Remote subscription reads have no verified boot; ClientShell owns invalidation.
+                guard binding.endpoint.machine == nil || snapshot.panes.contains(where: { $0.serviceIdentity == binding.serviceIdentity }) else { continue }
                 pane.applyHerdrSnapshot(snapshot.panes.first { binding.matches($0, requireRuntime: false) })
             }
         }
@@ -4265,15 +4359,18 @@ extension WorkspaceViewController {
         herdrShellRecoveryAttempts = 0
         // Reconnection cannot use the mutation gate: a disconnected shell has no presentation.
         herdrOperationPending = true
-        rootView.toolbarView.workspaceSwitcher.isEnabled = false
+        rootView.toolbarView.workspaceSwitcher.isEnabled = herdrClient?.endpoint.machine != nil
         herdrLastError = nil
+        let selection = workspaceSelectionGeneration
         herdrShellReconnectTask = Task { [weak self] in
             guard let self else { return }
             defer {
-                self.herdrShellReconnectTask = nil
-                self.herdrOperationPending = false
-                self.rootView.toolbarView.workspaceSwitcher.isEnabled = true
-                self.flushHerdrFocus(); self.flushHerdrSplit()
+                if self.workspaceSelectionGeneration == selection {
+                    self.herdrShellReconnectTask = nil
+                    self.herdrOperationPending = false
+                    self.rootView.toolbarView.workspaceSwitcher.isEnabled = true
+                    self.flushHerdrFocus(); self.flushHerdrSplit()
+                }
             }
             do {
                 try await self.enterHerdrWorkspace(workspaceID)
@@ -4327,7 +4424,8 @@ extension WorkspaceViewController {
 
     func releaseHerdrConnections() {
         herdrWorkspaceClosed = true
-        herdrAgentMonitor.stop()
+        workspaceSelectionGeneration += 1; workspaceSelectionTask?.cancel(); workspaceSelectionTask = nil
+        herdrCatalog.stop()
         paletteNavigationTask?.cancel()
         herdrDiscoveryTask?.cancel()
         selectLocalWorkspace()
@@ -4364,6 +4462,9 @@ extension WorkspaceViewController {
             document.parkedSelectedTabID = parkedSelectedTabID
         }
         document.herdrAuxiliaryTabs = herdrAuxiliaryTabs.isEmpty ? nil : savedWorkspaceTabs(herdrAuxiliaryTabs, selected: nil).tabs
+        document.workspaces = workspaceEntries
+        document.selectedWorkspace = herdrWindowWorkspaceID.flatMap { id in herdrClient.map { .init(source: .herdr(endpoint: $0.endpoint, workspaceID: id)) } }
+            ?? .init(source: .local(localWorkspaceID))
         document.localWorkspaceID = localWorkspaceID
         document.localWorkspaceName = localWorkspaceName
         document.otherLocalWorkspaces = otherLocalWorkspaces.isEmpty ? nil : otherLocalWorkspaces.map {
@@ -4448,6 +4549,12 @@ extension WorkspaceViewController {
 
     func restoreWorkspace(_ document: SavedWorkspace) throws {
         try document.validate()
+        workspaceEntries = (document.workspaces ?? []).map {
+            var entry = $0
+            if entry.kind != .local { entry.isAvailable = false; entry.status = "Reconnecting" }
+            return entry
+        }
+        restoredWorkspaceSelection = document.selectedWorkspace
         herdrShellReconnectTask?.cancel()
         herdrShellRecoveryTask?.cancel()
         herdrShellRecoveryAttempts = 0
@@ -4653,9 +4760,18 @@ extension WorkspaceViewController {
               orderedTabs.allSatisfy({ !$0.tab_id.isEmpty && $0.tab_id.utf8.count <= 1024 && $0.label.utf8.count <= 4096 }) else { throw CLIError("Invalid Herdr tabs") }
         var layouts: [String: HerdrLayout] = [:]
         for tab in orderedTabs {
-            guard let layout = try await client.request("layout.export", params: .init(tab_id: tab.tab_id)).layout,
-                  layout.workspace_id == targetID, layout.tab_id == tab.tab_id, layout.serviceIdentity == panes.first?.serviceIdentity else { throw CLIError("Missing Herdr tab layout") }
             let tabPanes = panes.filter { $0.workspace_id == targetID && $0.tab_id == tab.tab_id }
+            let layout: HerdrLayout
+            if let shell, tabPanes.count == 1, let pane = tabPanes.first {
+                layout = .init(workspace_id: targetID, tab_id: tab.tab_id,
+                    zoomed: shell.tabs.first(where: { $0.tab_id == tab.tab_id })?.zoomed == true,
+                    focused_pane_id: pane.pane_id, root: .pane(pane.pane_id), serviceIdentity: pane.serviceIdentity)
+            } else {
+                guard let exported = try await client.request("layout.export", params: .init(tab_id: tab.tab_id)).layout else { throw CLIError("Missing Herdr tab layout") }
+                layout = exported
+            }
+            guard layout.workspace_id == targetID, layout.tab_id == tab.tab_id,
+                  layout.serviceIdentity == panes.first?.serviceIdentity else { throw CLIError("Missing Herdr tab layout") }
             let ids = layout.root.paneIDs
             guard !ids.isEmpty, ids.count == Set(ids).count, ids.contains(layout.focused_pane_id),
                   tabPanes.allSatisfy({ pane in
@@ -4823,24 +4939,82 @@ extension WorkspaceViewController {
     }
 
     func selectWorkspace(_ id: String) {
-        guard !herdrOperationPending, !herdrWorkspaceClosed else { NSSound.beep(); return }
-        guard !isClosingNotes else { return }
-        if id.isEmpty { selectLocalWorkspace(); return }
-        if let local = localWorkspaceStates.first(where: { $0.pickerID == id }) { selectLocalWorkspace(local.id); return }
-        guard id != herdrWindowWorkspaceID else { return }
-        runHerdrOperation(requiresPresentation: false) { client in
-            self.rootView.toolbarView.workspaceSwitcher.isEnabled = false
-            defer { self.rootView.toolbarView.workspaceSwitcher.isEnabled = true }
-            if self.herdrWindowWorkspaceID == nil || self.herdrShellSession?.isPresentationReady != true {
-                self.herdrWindowIdentity = nil
-                self.herdrShellRecoveryAttempts = 0
-                try await self.enterHerdrWorkspace(id)
-            } else if let binding = self.tabs.first?.herdrTabBinding {
-                try await client.verify(binding)
-                _ = try await client.request("workspace.focus", params: .init(workspace_id: id))
+        if id.isEmpty { selectWorkspace(WorkspaceReference(source: .local(localWorkspaceID))); return }
+        if let entry = workspaceEntries.first(where: { $0.id == id }) {
+            guard entry.isAvailable || entry.reference.id == selectedWorkspaceReference.id else { NSSound.beep(); return }
+            selectWorkspace(entry.reference)
+        } else if let local = localWorkspaceStates.first(where: { $0.pickerID == id }) {
+            selectWorkspace(.init(source: .local(local.id)))
+        } else if let endpoint = herdrClient?.endpoint {
+            selectWorkspace(.init(source: .herdr(endpoint: endpoint, workspaceID: id)))
+        }
+    }
+
+    private var selectedWorkspaceReference: WorkspaceReference {
+        if let id = herdrWindowWorkspaceID, let endpoint = herdrClient?.endpoint {
+            return .init(source: .herdr(endpoint: endpoint, workspaceID: id))
+        }
+        return .init(source: .local(localWorkspaceID))
+    }
+
+    func selectWorkspace(_ reference: WorkspaceReference) {
+        guard !herdrWorkspaceClosed, !isClosingNotes else { return }
+        if case .local(let id) = reference.source {
+            guard !herdrOperationPending || workspaceSelectionTask != nil || herdrShellRecoveryTask != nil || herdrShellReconnectTask != nil else { NSSound.beep(); return }
+            workspaceSelectionGeneration += 1; workspaceSelectionTask?.cancel(); workspaceSelectionTask = nil
+            restoredWorkspaceSelection = nil
+            herdrOperationPending = false
+            rootView.toolbarView.workspaceSwitcher.isEnabled = true
+            selectLocalWorkspace(id)
+            return
+        }
+        guard !herdrOperationPending else { NSSound.beep(); return }
+        guard case .herdr(let endpoint, let workspaceID) = reference.source else { return }
+        if reference.id == selectedWorkspaceReference.id, herdrShellSession?.isPresentationReady == true { return }
+        restoredWorkspaceSelection = nil
+        workspaceSelectionGeneration += 1
+        let epoch = workspaceSelectionGeneration
+        workspaceSelectionTask?.cancel()
+        herdrOperationPending = true
+        workspaceSelectionTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.workspaceSelectionGeneration == epoch {
+                    self.workspaceSelectionTask = nil; self.herdrOperationPending = false
+                    self.refreshWorkspacePicker(); self.flushHerdrFocus(); self.flushHerdrSplit()
+                }
+            }
+            do {
+                if self.herdrClient?.endpoint != endpoint {
+                    self.selectLocalWorkspace()
+                    self.herdrDiscoveredWorkspaces = []
+                    try self.configureHerdrWorkspace(endpoint)
+                }
+                try Task.checkCancellation()
+                guard self.workspaceSelectionGeneration == epoch, let client = self.herdrClient else { throw CancellationError() }
+                if self.herdrWindowWorkspaceID == nil || self.herdrShellSession?.isPresentationReady != true {
+                    self.herdrWindowIdentity = nil; self.herdrShellRecoveryAttempts = 0
+                    try await self.enterHerdrWorkspace(workspaceID)
+                } else {
+                    guard self.herdrShellSession?.projection.snapshot?.workspaces.contains(where: { $0.workspace_id == workspaceID }) == true else {
+                        throw CLIError("The selected Herdr workspace no longer exists")
+                    }
+                    _ = try await client.request("workspace.focus", params: .init(workspace_id: workspaceID))
+                }
+            } catch is CancellationError { }
+            catch {
+                guard self.workspaceSelectionGeneration == epoch else { return }
+                self.presentHerdrError(error)
             }
         }
     }
+
+    var debugWorkspaceEntries: [WorkspaceEntry] { workspaceEntries }
+    var debugHerdrEndpointStatus: [String: String] {
+        herdrCatalog.states.mapValues { "identity=\($0.identity != nil), state=\($0.status.diagnosticName), error=\($0.monitor.session?.failure?.localizedDescription ?? "nil")" }
+    }
+    var debugSelectedWorkspace: WorkspaceReference { selectedWorkspaceReference }
+    func waitForWorkspaceSelection() async { await workspaceSelectionTask?.value }
 
     private func queueHerdrFocus(_ binding: HerdrPaneBinding) {
         optimisticHerdrFocus = binding
@@ -4907,7 +5081,7 @@ extension WorkspaceViewController {
     }
 
     func selectLocalWorkspace() {
-        herdrShellReconnectTask?.cancel()
+        herdrShellReconnectTask?.cancel(); herdrShellReconnectTask = nil
         herdrShellRecoveryTask?.cancel()
         herdrShellRecoveryAttempts = 0; herdrShellConnectedAt = nil
         stopHerdrClientShell()
@@ -4973,7 +5147,13 @@ extension WorkspaceViewController {
             tab.herdrSplitEdits.removeAll()
             tab.composeHerdrLayout()
         }
-        herdrShellSession?.disconnect(); herdrShellSession = nil
+        herdrClient?.retireCommands()
+        if let session = herdrShellSession, let callbacks = borrowedHerdrCallbacks {
+            session.onProjection = nil; session.onEffect = nil
+            session.onState = callbacks.state; session.onFailure = callbacks.failure
+            do { try session.deactivate() } catch { session.disconnect() }
+        } else { herdrShellSession?.disconnect() }
+        borrowedHerdrCallbacks = nil; herdrShellSession = nil
         herdrShellPopup?.setPresented(false)
         rootView.removeHerdrPopupView(); herdrShellPopup = nil
         if wasShell {
@@ -4992,9 +5172,13 @@ extension WorkspaceViewController {
         guard let client = herdrClient else { throw CLIError("Herdr endpoint is unavailable") }
         let epoch = herdrShellGeneration
         guard herdrShellGeneration == epoch, herdrClient === client, !herdrWorkspaceClosed else { throw CancellationError() }
-        let session = HerdrClientShellSession(endpoint: client.endpoint)
+        let borrowed = herdrCatalog.states[client.endpoint.id]?.monitor.session
+        let session = borrowed ?? HerdrClientShellSession(endpoint: client.endpoint)
+        let callbacks = borrowed.map { ($0.onState, $0.onFailure) }
+        borrowedHerdrCallbacks = callbacks.map { (state: $0.0, failure: $0.1) }
         herdrShellSession = session
         session.onState = { [weak self] state in
+            callbacks?.0?(state)
             guard let self, self.herdrShellGeneration == epoch else { return }
             self.herdrShellPopup?.applyState(state)
             for tab in self.tabs {
@@ -5010,6 +5194,7 @@ extension WorkspaceViewController {
             self.queueHerdrShellProjection(snapshot, surface, assets)
         }
         session.onFailure = { [weak self] error, recoverable in
+            callbacks?.1?(error, recoverable)
             guard let self, self.herdrShellGeneration == epoch else { return }
             if recoverable { self.scheduleHerdrShellRecovery(epoch: epoch) }
             else { self.presentHerdrError(error) }
@@ -5022,9 +5207,12 @@ extension WorkspaceViewController {
         }
         try syncHerdrShellTheme(session, dark: view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
         // The inactive hello uses unknown cell pixels; only the measured viewport is activated.
-        try await session.start(size: .init(cols: 80, rows: 24), cellWidth: 0, cellHeight: 0,
-            focused: view.window?.isKeyWindow == true, activateWhenMetadataReady: false)
-        for _ in 0..<500 {
+        if borrowed == nil {
+            try await session.start(size: .init(cols: 80, rows: 24), cellWidth: 0, cellHeight: 0,
+                focused: view.window?.isKeyWindow == true, activateWhenMetadataReady: false)
+        }
+        try session.setFocused(view.window?.isKeyWindow == true)
+        for _ in 0..<(client.endpoint.machine == nil ? 500 : 2000) {
             try Task.checkCancellation()
             guard herdrShellGeneration == epoch, herdrShellSession === session, !herdrWorkspaceClosed else { throw CancellationError() }
             if let failure = session.failure { throw failure }
@@ -5041,6 +5229,7 @@ extension WorkspaceViewController {
             guard herdrShellGeneration == epoch, herdrShellSession === session, !herdrWorkspaceClosed else { throw CancellationError() }
             if let failure = session.failure { throw failure }
             guard let metadata = session.projection.snapshot else { throw CLIError("Herdr shell initial metadata timed out") }
+            try client.establishQueryIdentity(session)
             if try await refreshHerdrLayout(workspaceID: workspaceID, shellMetadata: metadata) {
                 while ProcessInfo.processInfo.systemUptime < deadline {
                     try Task.checkCancellation()
@@ -5080,6 +5269,7 @@ extension WorkspaceViewController {
     }
 
     private func scheduleHerdrShellRecovery(epoch: Int) {
+        if herdrClient?.endpoint.machine != nil { scheduleRemoteHerdrRecovery(epoch: epoch); return }
         guard herdrShellRecoveryTask == nil, let workspaceID = herdrWindowWorkspaceID,
               let identity = herdrWindowIdentity, herdrWindowWorkspaceID != nil, !herdrWorkspaceClosed else { return }
         if let connected = herdrShellConnectedAt, ProcessInfo.processInfo.systemUptime - connected >= 30 { herdrShellRecoveryAttempts = 0 }
@@ -5119,6 +5309,43 @@ extension WorkspaceViewController {
                     catch {
                         self.herdrLastError = error.localizedDescription
                         if !(error is HerdrShellConnectionLost), (error as? CLIConnectionError)?.isRecoverable != true { return }
+                    }
+                }
+            } catch { }
+        }
+    }
+
+    private func scheduleRemoteHerdrRecovery(epoch: Int) {
+        guard herdrShellRecoveryTask == nil, let endpoint = herdrClient?.endpoint,
+              let workspaceID = herdrWindowWorkspaceID, !herdrWorkspaceClosed else { return }
+        if let since = herdrShellConnectedAt, ProcessInfo.processInfo.systemUptime - since >= 60 { herdrShellRecoveryAttempts = 0 }
+        let selection = workspaceSelectionGeneration
+        herdrShellRecoveryTask = Task { [weak self] in
+            guard let self else { return }
+            var ownsOperation = false
+            defer {
+                self.herdrShellRecoveryTask = nil
+                if ownsOperation, self.workspaceSelectionGeneration == selection {
+                    self.herdrOperationPending = false
+                    self.refreshWorkspacePicker(); self.flushHerdrFocus(); self.flushHerdrSplit()
+                }
+            }
+            do {
+                while self.herdrOperationPending { try await Task.sleep(for: .milliseconds(20)) }
+                guard self.herdrShellGeneration == epoch else { return }
+                self.herdrOperationPending = true; ownsOperation = true
+                while !Task.isCancelled {
+                    let delay = min(120.0, pow(2, Double(min(self.herdrShellRecoveryAttempts, 7))))
+                    self.herdrShellRecoveryAttempts += 1
+                    try await Task.sleep(for: .seconds(delay))
+                    guard !self.herdrWorkspaceClosed, self.workspaceSelectionGeneration == selection,
+                          self.herdrClient?.endpoint == endpoint, self.herdrWindowWorkspaceID == workspaceID else { return }
+                    self.herdrWindowIdentity = nil
+                    do { try await self.enterHerdrWorkspace(workspaceID); return }
+                    catch is CancellationError { return }
+                    catch {
+                        self.herdrLastError = error.localizedDescription
+                        if (error as? HerdrSSHFailure)?.needsAttention == true { self.presentHerdrError(error); return }
                     }
                 }
             } catch { }
@@ -5580,7 +5807,7 @@ extension WorkspaceViewController {
                     .compactMap { $0 }.joined(separator: " · "),
                 symbol: "terminal",
                 isCurrent: selectedTabState?.focusedPaneController.flatMap { ($0 as? TerminalPaneController)?.herdrBinding } == session.binding,
-                isInCurrentWorkspace: herdrWindowWorkspaceID == session.binding.workspaceID,
+                isInCurrentWorkspace: herdrWindowWorkspaceID == session.binding.workspaceID && herdrClient?.endpoint.id == session.binding.endpoint.id,
                 perform: { [weak self] in self?.navigateToHerdrAgent(session.binding) })
         }
         let localSelected = herdrWindowWorkspaceID == nil
@@ -5605,17 +5832,26 @@ extension WorkspaceViewController {
                 }
             }
         }
-        guard let endpoint = herdrClient?.endpoint else { return items }
-        let metadata: HerdrSnapshot
-        if let shell = herdrShellSession?.projection.snapshot, let identity = herdrShellSession?.serviceIdentity {
-            metadata = .init(workspaces: shell.workspaces.map { .init(workspace_id: $0.workspace_id, label: $0.label, active_tab_id: $0.active_tab_id) },
+        func metadata(_ shell: HerdrShellSnapshot, identity: HerdrServiceIdentity) -> HerdrSnapshot {
+            .init(workspaces: shell.workspaces.map { .init(workspace_id: $0.workspace_id, label: $0.label, active_tab_id: $0.active_tab_id) },
                 tabs: shell.tabs.map { .init(tab_id: $0.tab_id, workspace_id: $0.workspace_id, label: $0.label) },
                 version: "", protocolVersion: 22, panes: shell.panes.map {
                     .init(pane_id: $0.pane_id, terminal_id: nil, workspace_id: $0.workspace_id, tab_id: $0.tab_id,
                           label: $0.label, cwd: $0.cwd, foreground_cwd: $0.foreground_cwd, serviceIdentity: identity)
                 })
-        } else if let snapshot = herdrLatestQuerySnapshot { metadata = snapshot }
-        else { return items }
+        }
+        var sources: [String: (HerdrEndpoint, HerdrSnapshot)] = [:]
+        for state in herdrCatalog.states.values {
+            if let shell = state.snapshot, let identity = state.identity {
+                sources[state.endpoint.id] = (state.endpoint, metadata(shell, identity: identity))
+            }
+        }
+        if let endpoint = herdrClient?.endpoint {
+            if let shell = herdrShellSession?.projection.snapshot, let identity = herdrShellSession?.serviceIdentity {
+                sources[endpoint.id] = (endpoint, metadata(shell, identity: identity))
+            } else if let snapshot = herdrLatestQuerySnapshot { sources[endpoint.id] = (endpoint, snapshot) }
+        }
+        for (endpoint, metadata) in sources.values.sorted(by: { $0.0.id < $1.0.id }) {
         let spaces = metadata.workspaces ?? [], backendTabs = metadata.tabs ?? []
         // Search uses management metadata too, so apply topology limits before indexing it.
         guard spaces.count <= 64, backendTabs.count <= 256, metadata.panes.count <= 512,
@@ -5627,16 +5863,18 @@ extension WorkspaceViewController {
                   && spaces.contains(where: { $0.workspace_id == candidate.workspace_id }) }),
               metadata.panes.allSatisfy({ candidate in (candidate.label?.utf8.count ?? 0) <= 4096 && (candidate.title?.utf8.count ?? 0) <= 4096
                   && backendTabs.contains(where: { $0.tab_id == candidate.tab_id && $0.workspace_id == candidate.workspace_id }) })
-        else { return items }
+        else { continue }
         func key(_ kind: String, _ binding: HerdrPaneBinding, _ id: String) -> String {
-            let parts = [kind, endpoint.socketPath, endpoint.session, String(describing: binding.serviceIdentity), binding.workspaceID, id]
+            let parts = [kind, endpoint.id, endpoint.session, String(describing: binding.serviceIdentity), binding.workspaceID, id]
             return (try? JSONEncoder().encode(parts).base64EncodedString()) ?? id
         }
         for space in spaces {
             let spacePanes = metadata.panes.filter { $0.workspace_id == space.workspace_id }
             guard let first = spacePanes.first, let representative = try? HerdrPaneBinding(endpoint: endpoint, pane: first) else { continue }
-            let inWorkspace = space.workspace_id == herdrWindowWorkspaceID
-            item(key("workspace", representative, space.workspace_id), space.label, .workspace, "Herdr Workspace", "server.rack",
+            let inWorkspace = space.workspace_id == herdrWindowWorkspaceID && herdrClient?.endpoint.id == endpoint.id
+            let sourceTitle = endpoint.machine.map { space.label + " · " + $0.label } ?? space.label
+            let kind: WorkspaceKind = endpoint.machine == nil ? .herdr : .remoteHerdr
+            item(key("workspace", representative, space.workspace_id), sourceTitle, .workspace, kind.title, kind.symbol,
                  current: inWorkspace, inWorkspace: inWorkspace,
                  target: .herdr(binding: representative, tab: nil, pane: nil, localPane: nil))
             for (index, backendTab) in backendTabs.filter({ $0.workspace_id == space.workspace_id }).enumerated() {
@@ -5671,6 +5909,7 @@ extension WorkspaceViewController {
                     }
                 }
             }
+        }
         }
         return items
     }
@@ -5733,7 +5972,13 @@ extension WorkspaceViewController {
                     if let tabID { self.selectTab(withID: tabID) }
                     if let paneID { self.handlePaneFocusRequest(withID: paneID) }
                 case .herdr(let binding, let tabID, let paneID, let localPane):
-                    guard let client = self.herdrClient, client.endpoint == binding.endpoint else { throw CLIError("Herdr connection settings changed") }
+                    if self.herdrClient?.endpoint != binding.endpoint {
+                        guard self.herdrCatalog.states[binding.endpoint.id]?.identity == binding.serviceIdentity else { throw CLIError("The selected Herdr service changed or is unavailable") }
+                        self.selectLocalWorkspace()
+                        self.herdrDiscoveredWorkspaces = []
+                        try self.configureHerdrWorkspace(binding.endpoint)
+                    }
+                    guard let client = self.herdrClient else { throw CLIError("Herdr connection closed") }
                     if self.herdrWindowWorkspaceID != nil {
                         try await self.waitForPaletteNavigation { self.herdrShellSession?.isPresentationReady == true }
                     }
@@ -5754,7 +5999,7 @@ extension WorkspaceViewController {
                     if let tabID {
                         let method = paneID == nil ? "tab.focus" : "pane.focus"
                         let needsPaneFocus = paneID != nil && paneID != self.herdrShellSession?.projection.snapshot?.focused_pane_id
-                        if needsPaneFocus || tabID != self.selectedTabState?.herdrTabBinding?.tabID {
+                        if needsPaneFocus || tabID != self.herdrShellSession?.projection.snapshot?.focused_tab_id {
                             _ = try await activeClient.request(method, params: .init(pane_id: paneID, tab_id: paneID == nil ? tabID : nil))
                         }
                         try await self.waitForPaletteNavigation {
@@ -5801,7 +6046,7 @@ extension WorkspaceViewController {
     func navigateToHerdrAgent(_ binding: HerdrPaneBinding) {
         if herdrClient == nil {
             do {
-                guard binding.endpoint == HerdrSettings.endpoint else { throw CLIError("Herdr connection settings changed") }
+                guard binding.endpoint == HerdrSettings.endpoint || herdrCatalog.states[binding.endpoint.id]?.identity == binding.serviceIdentity else { throw CLIError("Herdr connection settings changed") }
                 try configureHerdrWorkspace(binding.endpoint)
             } catch {
                 rootView.toolbarView.showNavigationStatus("Navigation failed: \(error.localizedDescription)")
@@ -5821,12 +6066,28 @@ extension WorkspaceViewController {
             return self.herdrClient?.endpoint == binding.endpoint && self.herdrShellSession?.serviceIdentity == binding.serviceIdentity
                 && self.selectedTabState?.herdrTabBinding?.tabID == binding.tabID
         }
-        herdrAgentMonitor.onGeneralNotification = { [weak self] event in
+        herdrCatalog.onGeneralNotification = { [weak self] endpoint, event in
             guard let self, self.workspaceStore?.canWrite != false else { return }
             AgentNotifier.shared.notifyTerminal(title: event.title, body: event.body, sound: event.sound != nil,
-                identity: "herdr.general")
+                identity: "herdr.general." + endpoint.id)
         }
-        herdrAgentMonitor.start(endpoint)
+        herdrCatalog.onChange = { [weak self] in
+            guard let self, !self.herdrWorkspaceClosed else { return }
+            if let active = self.herdrClient?.endpoint, active.machine != nil, self.herdrCatalog.states[active.id]?.endpoint != active {
+                self.workspaceSelectionGeneration += 1; self.workspaceSelectionTask?.cancel(); self.workspaceSelectionTask = nil
+                self.herdrOperationPending = false
+                self.selectLocalWorkspace()
+                self.herdrDiscoveredWorkspaces = []
+                try? self.configureHerdrWorkspace(HerdrSettings.endpoint)
+            }
+            self.refreshWorkspacePicker()
+            if let restored = self.restoredWorkspaceSelection,
+               let entry = self.workspaceEntries.first(where: { $0.reference.id == restored.id && $0.isAvailable }) {
+                self.restoredWorkspaceSelection = nil
+                self.selectWorkspace(entry.reference)
+            }
+        }
+        herdrCatalog.start(local: endpoint)
     }
 
     private func verifyPaletteHerdrTarget(_ binding: HerdrPaneBinding, tab tabID: String?, pane paneID: String?, localPane: PaneID?) async throws {

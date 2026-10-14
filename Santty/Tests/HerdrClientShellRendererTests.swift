@@ -802,6 +802,25 @@ final class HerdrClientShellRendererTests: XCTestCase {
     }
 
     @MainActor
+    func testViewportWaitAcceptsDelayedDisplayFeedback() async throws {
+        let feedback = HerdrShellDisplayFeedback()
+        let memory = InMemoryTerminalSession(write: { bytes in
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(5)) { feedback.receive(bytes) }
+        }, resize: { _ in feedback.invalidateViewport() })
+        let terminal = TerminalView(frame: NSRect(x: 0, y: 0, width: 720, height: 480))
+        terminal.configuration = .init(backend: .inMemory(memory))
+        terminal.controller = TerminalController(configuration: TerminalDefaults.configuration, theme: TerminalDefaults.theme)
+        let window = NSWindow(contentRect: terminal.frame, styleMask: [], backing: .buffered, defer: false)
+        window.contentView = terminal; window.orderBack(nil); terminal.fitToSize()
+        defer { window.orderOut(nil); window.contentView = nil }
+        for _ in 0..<100 where terminal.scrollModeGrid == nil { try await Task.sleep(for: .milliseconds(10)) }
+        let grid = try XCTUnwrap(terminal.scrollModeGrid)
+        let size = HerdrShellSize(cols: grid.columns, rows: grid.rows)
+        try await feedback.waitForViewport(size, in: memory)
+        XCTAssertTrue(feedback.hasConfirmedViewport(size, in: memory))
+    }
+
+    @MainActor
     func testBackendResizeRepaintsEveryRowAndCursorInRealGhostty() async throws {
         do {
             let replies = Replies()

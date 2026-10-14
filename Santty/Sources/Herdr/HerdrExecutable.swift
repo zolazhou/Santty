@@ -45,9 +45,10 @@ enum HerdrExecutable {
         // EOF alone is insufficient if the executable closes output then hangs.
         while process.isRunning, ProcessInfo.processInfo.systemUptime < deadline { usleep(5000) }
         guard !process.isRunning else { throw CLIError("Herdr client version check timed out") }
-        guard process.terminationStatus == 0,
-              String(decoding: output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "herdr 0.9.3"
-        else { throw CLIError("Unsupported Herdr client. Choose Herdr 0.9.3; Santty will not install or upgrade it.") }
-        return "0.9.3"
+        let text = String(decoding: output, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard process.terminationStatus == 0, text.utf8.count <= 128,
+              text.range(of: #"^herdr [0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"#, options: .regularExpression) != nil
+        else { throw CLIError("Invalid Herdr client version response; Santty will not install or upgrade it.") }
+        return String(text.dropFirst(6))
     }
 }

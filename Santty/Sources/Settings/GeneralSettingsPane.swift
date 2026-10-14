@@ -46,7 +46,7 @@ private struct HerdrSettingsSection: View {
         } header: {
             Text("Herdr Workspaces")
         } footer: {
-            Text("Discovers workspaces from your running local Herdr service. Use absolute paths. Changing the connection returns to the local workspace; terminal processes in Herdr keep running.")
+            Text("Local and saved SSH machines appear in the workspace switcher. Add a remote machine from Pane > Add Remote Herdr Machine. Setup and authentication run in a local terminal using Herdr and OpenSSH. Use absolute local paths.")
         }
     }
 }

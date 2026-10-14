@@ -35,6 +35,8 @@ final class HerdrClientShellTransport: @unchecked Sendable {
     private let writer = DispatchQueue(label: "Santty.Herdr.shell.writer")
     private var readFD: CInt
     private let writeFD: CInt
+    private let bridge: HerdrSSHBridge?
+    private let endpoint: HerdrEndpoint?
     private var stopped = false
     private var queuedWriteBytes = 0
     private var queuedReadBytes = 0
@@ -50,14 +52,25 @@ final class HerdrClientShellTransport: @unchecked Sendable {
                      queuedDecodedBytes: queuedDecodedBytes, peakDecodedBytes: peakDecodedBytes)
     }
 
-    init(socketPath: String, requestedReuse: Bool = HerdrShellHello.requestSurfaceReuse, requestedScroll: Bool = HerdrShellHello.requestSurfaceScroll, requestedDelta: Bool = HerdrShellHello.requestSurfaceDelta) throws {
+    init(socketPath: String, endpoint: HerdrEndpoint? = nil, connection: (fd: CInt, bridge: HerdrSSHBridge)? = nil, requestedReuse: Bool = HerdrShellHello.requestSurfaceReuse, requestedScroll: Bool = HerdrShellHello.requestSurfaceScroll, requestedDelta: Bool = HerdrShellHello.requestSurfaceDelta) throws {
+        self.endpoint = endpoint
         let fd: CInt
-        do { fd = try CLITransport.connect(to: socketPath) }
+        do {
+            if let connection { fd = connection.fd; bridge = connection.bridge }
+            else if let endpoint, endpoint.machine != nil {
+                let connection = try HerdrSSHBridge.connect(endpoint: endpoint, lane: .client)
+                fd = connection.fd; bridge = connection.bridge
+            } else { fd = try CLITransport.connect(to: socketPath); bridge = nil }
+        }
         catch let error as CLIConnectionError where error.isRecoverable {
             throw HerdrShellConnectionLost(message: "Cannot connect to Herdr client socket: \(error.localizedDescription)")
         }
+        catch let error as HerdrSSHFailure { throw error }
         catch { throw CLIError("Cannot connect to Herdr client socket: \(error.localizedDescription)") }
-        do { serviceIdentity = try HerdrServiceIdentity.read(socket: fd) }
+        do {
+            if let endpoint, endpoint.machine != nil { serviceIdentity = .remote(endpoint: endpoint, bootID: "") }
+            else { serviceIdentity = try HerdrServiceIdentity.read(socket: fd) }
+        }
         catch { close(fd); throw error }
         let duplicate = dup(fd)
         guard duplicate >= 0 else { close(fd); throw CLIError("Cannot duplicate Herdr client socket") }
@@ -117,7 +130,9 @@ final class HerdrClientShellTransport: @unchecked Sendable {
         lock.lock()
         guard !stopped else { lock.unlock(); return }
         stopped = true
+        if error != nil, let endpoint, bridge != nil { HerdrSSHBridge.invalidate(endpoint) }
         if readFD >= 0 { _ = shutdown(readFD, SHUT_RDWR) }
+        bridge?.stop()
         writer.async { [self] in close(writeFD) }
         lock.unlock()
         continuation.finish(throwing: error)
@@ -166,7 +181,10 @@ final class HerdrClientShellTransport: @unchecked Sendable {
                 @unknown default: throw CLIError("Herdr shell event delivery failed")
                 }
             }
-        } catch { stop(error) }
+        } catch {
+            if let bridge, !bridge.errorSummary.isEmpty { stop(HerdrSSHFailure(message: "Herdr SSH: " + bridge.errorSummary)) }
+            else { stop(error) }
+        }
     }
 
     private func readExactly(_ count: Int, from fd: CInt) throws -> Data {

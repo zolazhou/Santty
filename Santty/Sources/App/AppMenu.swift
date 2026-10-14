@@ -193,6 +193,10 @@ enum AppMenu {
         diagnosticsItem.target = target
         addKeybindingMenuItem(to: menu, action: .newWorkspace, selector: #selector(WorkspaceViewController.newWorkspace(_:)), target: target)
         addKeybindingMenuItem(to: menu, action: .newHerdrWorkspace, selector: #selector(WorkspaceViewController.newHerdrWorkspace(_:)), target: target)
+        let remoteItem = menu.addItem(withTitle: "Add Remote Herdr Machine...", action: #selector(WorkspaceViewController.addRemoteHerdrMachine(_:)), keyEquivalent: "")
+        remoteItem.target = target
+        let authenticateItem = menu.addItem(withTitle: "Authenticate Remote Herdr Machine...", action: #selector(WorkspaceViewController.authenticateRemoteHerdrMachine(_:)), keyEquivalent: "")
+        authenticateItem.target = target
         addKeybindingMenuItem(to: menu, action: .renameWorkspace, selector: #selector(WorkspaceViewController.renameWorkspace(_:)), target: target)
         addKeybindingMenuItem(to: menu, action: .closeWorkspace, selector: #selector(WorkspaceViewController.closeWorkspace(_:)), target: target)
         let reconnectItem = addKeybindingMenuItem(to: menu, action: .reconnectPersistentTerminal, selector: #selector(WorkspaceViewController.reconnectPersistentTerminal(_:)), target: target)

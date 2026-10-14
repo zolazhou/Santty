@@ -19,6 +19,7 @@ final class HerdrClientShellSession {
         let message: HerdrShellClientMessage
         let completion: CheckedContinuation<Data, Error>?
         let activation: Bool
+        var deactivation = false
         var navigation: (method: String, target: String)? = nil
         var response = Data()
         var sentAt: TimeInterval? = nil
@@ -72,6 +73,7 @@ final class HerdrClientShellSession {
     }
 
     let endpoint: HerdrEndpoint
+    private let makeTransport: @Sendable (HerdrEndpoint) throws -> HerdrClientShellTransport
     private var offeredPresentation: Presentation?
     private var presented: Presentation?
     private var presentedGeometry: Geometry?
@@ -129,7 +131,9 @@ final class HerdrClientShellSession {
     private var pairMissingSince: TimeInterval?
     private var navigation: (requestID: String, method: String, target: String, minimumRevision: UInt64, acknowledged: Bool)?
 
-    init(endpoint: HerdrEndpoint) { self.endpoint = endpoint }
+    init(endpoint: HerdrEndpoint, makeTransport: @escaping @Sendable (HerdrEndpoint) throws -> HerdrClientShellTransport = {
+        try HerdrClientShellTransport(socketPath: $0.clientSocketPath, endpoint: $0)
+    }) { self.endpoint = endpoint; self.makeTransport = makeTransport }
 
     deinit {
         readerTask?.cancel(); timerTask?.cancel()
@@ -145,11 +149,11 @@ final class HerdrClientShellSession {
         activatesWhenMetadataReady = activateWhenMetadataReady
         generation += 1
         let epoch = generation
-        let api = URL(fileURLWithPath: endpoint.socketPath)
-        let socket = api.deletingLastPathComponent().appendingPathComponent(api.deletingPathExtension().lastPathComponent + "-client.sock").path
         updateState(.connecting)
         do {
-            let connection = try await Task.detached { try HerdrClientShellTransport(socketPath: socket) }.value
+            let endpoint = self.endpoint
+            let makeTransport = self.makeTransport
+            let connection = try await Task.detached { try makeTransport(endpoint) }.value
             guard generation == epoch else { connection.stop(); throw CancellationError() }
             transport = connection
             serviceIdentity = connection.serviceIdentity
@@ -333,7 +337,9 @@ final class HerdrClientShellSession {
         guard welcome != nil else {
             guard case let .control(kind, data) = message, kind == "endpoint.welcome.v1" else { throw CLIError("Expected Herdr endpoint welcome") }
             let value = try JSONDecoder().decode(HerdrShellWelcome.self, from: Data(data.utf8))
-            try value.validate(); welcome = value; return
+            try value.validate()
+            if endpoint.machine != nil, value.capabilities?.contains("health_check") != true { throw CLIError("Remote Herdr does not support health checks") }
+            welcome = value; return
         }
         switch message {
         case let .control(kind, data):
@@ -344,6 +350,7 @@ final class HerdrClientShellSession {
                 if let previous = projection.snapshot, previous.boot_id != snapshot.boot_id {
                     throw CLIError("Herdr service restarted; reconnect to establish a new runtime identity")
                 }
+                if endpoint.machine != nil { serviceIdentity = .remote(endpoint: endpoint, bootID: snapshot.boot_id) }
                 let appliedAt = now
                 _ = try projection.receive(snapshot)
                 recordStage("snapshotApply", seconds: now - appliedAt)
@@ -390,6 +397,22 @@ final class HerdrClientShellSession {
         try resize(size, cellWidth: cellWidth, cellHeight: cellHeight)
         activatesWhenMetadataReady = true
         try activate(snapshot)
+    }
+
+    func deactivate() throws {
+        guard let transport, let snapshot = projection.snapshot, activationQueued else { return }
+        try releaseHeldInput()
+        activatesWhenMetadataReady = false; activationQueued = false; activationRevision = nil
+        fenceToken = nil; pairMissingSince = nil
+        offeredPresentation = nil; presented = nil; presentedGeometry = nil; pinnedPresentation = nil
+        presentedFromPinnedFrame = false; hasPresentedSurface = false
+        deferredEffects.removeAll(); deferredEffectBytes = 0
+        let id = UUID().uuidString
+        let json = String(decoding: try JSONEncoder().encode(Request(id: id, method: "client_shell.surface.set", params: SurfaceInterest(active: false))), as: UTF8.self)
+        pending.append(.init(id: id, boot: snapshot.boot_id, message: .request(boot: snapshot.boot_id, json: json), completion: nil, activation: true, deactivation: true))
+        try transport.send(.focus(false))
+        updateState(.subscribed)
+        try sendNext()
     }
 
     private func activate(_ snapshot: HerdrShellSnapshot) throws {
@@ -467,7 +490,9 @@ final class HerdrClientShellSession {
             if request.activation { throw failure }
         } else {
             guard response.result != nil else { throw CLIError("Missing Herdr endpoint operation result") }
-            if request.activation {
+            if request.deactivation {
+                guard response.result?.active == false else { throw CLIError("Herdr surface deactivation acknowledgement is invalid") }
+            } else if request.activation {
                 guard response.result?.active == true, let revision = response.result?.projection_revision else {
                     throw CLIError("Herdr surface activation acknowledgement is invalid")
                 }
@@ -670,7 +695,7 @@ final class HerdrClientShellSession {
     }
 
     private func fail(_ error: any Error) {
-        let recoverable = hasPresentedSurface && (error is HerdrShellConnectionLost)
+        let recoverable = hasPresentedSurface && (error is HerdrShellConnectionLost || (error as? HerdrSSHFailure)?.needsAttention == false)
         var snapshot = currentDiagnostics
         snapshot.state = "failed"; snapshot.presentationReady = false; snapshot.capturedAtFailure = true
         disconnect()

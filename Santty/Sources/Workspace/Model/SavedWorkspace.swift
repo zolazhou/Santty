@@ -1,7 +1,7 @@
 import Foundation
 
 struct SavedWorkspace: Codable, Sendable, Equatable {
-    static let currentVersion = 5
+    static let currentVersion = 6
     var version = Self.currentVersion
     var selectedTabID: UUID?
     var tabs: [Tab]
@@ -14,6 +14,8 @@ struct SavedWorkspace: Codable, Sendable, Equatable {
     var localWorkspaceID: UUID? = nil
     var localWorkspaceName: String? = nil
     var otherLocalWorkspaces: [LocalWorkspace]? = nil
+    var workspaces: [WorkspaceEntry]? = nil
+    var selectedWorkspace: WorkspaceReference? = nil
 
     struct LocalWorkspace: Codable, Sendable, Equatable {
         let id: UUID
@@ -64,6 +66,20 @@ struct SavedWorkspace: Codable, Sendable, Equatable {
 
     private func validate(allowMissingRuntime: Bool) throws {
         guard (1...Self.currentVersion).contains(version) else { throw CLIError("Unsupported workspace version \(version); the file will not be overwritten") }
+        if let workspaces {
+            guard version >= 6, workspaces.count <= 4096, Set(workspaces.map(\.id)).count == workspaces.count,
+                  selectedWorkspace.map({ selected in workspaces.contains { $0.reference == selected } }) != false else {
+                throw CLIError("Invalid unified workspace directory")
+            }
+            for entry in workspaces {
+                guard !entry.name.isEmpty, entry.name.utf8.count <= 4096 else { throw CLIError("Invalid workspace name") }
+                if case .herdr(let endpoint, let id) = entry.reference.source {
+                    guard !id.isEmpty, id.utf8.count <= 1024, endpoint.binary.isFileURL,
+                          endpoint.binary.path.hasPrefix("/"), !endpoint.session.isEmpty else { throw CLIError("Invalid workspace source") }
+                    if let machine = endpoint.machine { try machine.validate() }
+                }
+            }
+        } else if selectedWorkspace != nil { throw CLIError("Missing unified workspace directory") }
         guard tabs.count <= 64, Set(tabs.map(\.id)).count == tabs.count,
               selectedTabID == nil || tabs.contains(where: { $0.id == selectedTabID }) else { throw CLIError("Invalid workspace tabs") }
         if let parkedTabs {
@@ -129,7 +145,10 @@ struct SavedWorkspace: Codable, Sendable, Equatable {
                   binding.endpoint.session.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }),
                   [binding.paneID, binding.workspaceID, binding.tabID].allSatisfy({ !$0.isEmpty && $0.utf8.count <= 1024 })
             else { throw CLIError("Invalid saved terminal identity") }
-            try CLITransport.withAddress(binding.endpoint.socketPath) { _, _ in }
+            if let machine = binding.endpoint.machine {
+                try machine.validate()
+                guard machine.session == binding.endpoint.session else { throw CLIError("Invalid remote workspace session") }
+            } else { try CLITransport.withAddress(binding.endpoint.socketPath) { _, _ in } }
         }
         if let binding = herdrWindowBinding {
             try validateBinding(binding)

@@ -112,7 +112,7 @@ struct HerdrDiagnostics: Encodable, Sendable {
     var lastError: String?
     var windowTransport: HerdrPaneTransport? = nil
     var clientShell: ClientShell? = nil
-    let serviceLifecycle = "external-only; never started, stopped or upgraded by Santty"
+    var serviceLifecycle = "external-only; never started, stopped or upgraded by Santty"
     let historyCapability = "frozen recent text; at most 1000 rows / 256 KiB; no inline images or live cross-history selection"
 
     func json() throws -> String {
@@ -121,12 +121,13 @@ struct HerdrDiagnostics: Encodable, Sendable {
     }
 
     mutating func inspect(_ endpoint: HerdrEndpoint) async {
+        if endpoint.machine != nil { serviceLifecycle = "native SSH bridge; may start the existing remote server; upgrades and replacement require interactive Herdr setup" }
         let result = await Task.detached(priority: .utility) { () -> (String?, HerdrServerInfo?, String?) in
             do {
                 try endpoint.validate()
                 let version = try HerdrExecutable.version(at: endpoint.binary)
                 do {
-                    let server = try HerdrConnection.preflight(socketPath: endpoint.socketPath)
+                    let server = try HerdrConnection.preflight(socketPath: endpoint.socketPath, endpoint: endpoint)
                     return (version, server, nil)
                 } catch { return (version, nil, HerdrDiagnosticError.summary(error.localizedDescription)) }
             } catch { return (nil, nil, HerdrDiagnosticError.summary(error.localizedDescription)) }

@@ -11,14 +11,17 @@ final class HerdrAgentMonitor {
     private let store: AgentSessionStore
     private var stopped = true
     private var retryDelay: Double = 1
+    private var healthySince: TimeInterval?
     var onGeneralNotification: ((HerdrShellNotification) -> Void)?
+    var onMetadata: ((HerdrShellSnapshot, HerdrServiceIdentity) -> Void)?
+    var onState: ((HerdrConnectionState) -> Void)?
 
     init(store: AgentSessionStore = .shared) { self.store = store }
 
     func start(_ endpoint: HerdrEndpoint) {
         if !stopped, self.endpoint == endpoint { return }
         stop()
-        stopped = false; self.endpoint = endpoint; retryDelay = 1
+        stopped = false; self.endpoint = endpoint; retryDelay = 1; healthySince = nil
         store.configure(endpoint)
         connect()
         notificationTimer = Task { [weak self] in
@@ -35,7 +38,15 @@ final class HerdrAgentMonitor {
         connectionTask?.cancel(); retryTask?.cancel(); notificationTimer?.cancel()
         connectionTask = nil; retryTask = nil; notificationTimer = nil
         session?.disconnect(); session = nil
-        store.markUnavailable()
+        store.markUnavailable(endpoint: endpoint)
+    }
+
+    func updatePresentation(_ endpoint: HerdrEndpoint) {
+        guard self.endpoint == endpoint else { return }
+        self.endpoint = endpoint
+        if let session, let snapshot = session.projection.snapshot, let identity = session.serviceIdentity {
+            try? store.apply(snapshot, completions: session.agentCompletions, endpoint: endpoint, identity: identity)
+        }
     }
 
     private func connect() {
@@ -47,16 +58,23 @@ final class HerdrAgentMonitor {
         connection.onMetadata = { [weak self, weak connection] snapshot in
             guard let self, let connection, self.generation == epoch, let identity = connection.serviceIdentity else { return }
             do {
-                try self.store.apply(snapshot, completions: connection.agentCompletions, endpoint: endpoint, identity: identity)
-                self.retryDelay = 1
+                try self.store.apply(snapshot, completions: connection.agentCompletions, endpoint: self.endpoint ?? endpoint, identity: identity)
+                let now = ProcessInfo.processInfo.systemUptime
+                if self.healthySince == nil { self.healthySince = now }
+                if let since = self.healthySince, now - since >= 60 { self.retryDelay = 1 }
+                self.onMetadata?(snapshot, identity)
             } catch { connection.disconnect(); self.retry(epoch) }
         }
         connection.onNotification = { [weak self] event in
             guard let self, self.generation == epoch else { return }
             if event.kind >= 2 && event.pane_id == nil { self.onGeneralNotification?(event) }
-            else { self.store.receive(event) }
+            else { self.store.receive(event, endpoint: endpoint) }
         }
-        connection.onFailure = { [weak self] _, _ in self?.retry(epoch) }
+        connection.onFailure = { [weak self] error, _ in self?.retry(epoch, attention: (error as? HerdrSSHFailure)?.needsAttention == true) }
+        connection.onState = { [weak self] state in
+            guard let self, self.generation == epoch else { return }
+            self.onState?(state)
+        }
         connectionTask = Task { [weak self, weak connection] in
             guard let connection else { return }
             do {
@@ -67,10 +85,11 @@ final class HerdrAgentMonitor {
         }
     }
 
-    private func retry(_ epoch: Int) {
+    private func retry(_ epoch: Int, attention: Bool = false) {
         guard !stopped, generation == epoch, retryTask == nil else { return }
-        store.markUnavailable()
-        let delay = retryDelay; retryDelay = min(30, delay * 2)
+        store.markUnavailable(endpoint: endpoint)
+        healthySince = nil
+        let delay = attention ? 30 : retryDelay; retryDelay = min(120, retryDelay * 2)
         retryTask = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(delay)) } catch { return }
             guard let self, self.generation == epoch, !self.stopped else { return }

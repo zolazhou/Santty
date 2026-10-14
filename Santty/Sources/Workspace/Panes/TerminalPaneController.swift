@@ -127,6 +127,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
         id: PaneID = UUID(),
         workingDirectory: String? = nil,
         herdr: HerdrPaneBinding? = nil,
+        launchCommand: String? = nil,
         foregroundProcessIDProvider: (@MainActor () -> Int32?)? = nil,
         processWorkingDirectoryProvider: @escaping (Int32) -> String? = {
             ProcessWorkingDirectoryResolver.workingDirectory(for: $0)
@@ -147,7 +148,8 @@ final class TerminalPaneController: NSObject, PaneControlling {
             configuration: Self.terminalConfiguration(
                 for: id,
                 workingDirectory: workingDirectory,
-                clientShell: herdr != nil
+                clientShell: herdr != nil,
+                launchCommand: launchCommand
             ),
             theme: TerminalDefaults.theme
         )
@@ -602,7 +604,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
         if let query = herdrQueryBinding { return query }
         guard herdrBinding != nil else { throw CLIError("Herdr runtime identity is unavailable") }
         let generation = herdrGeneration, epoch = clientShellQueryEpoch
-        let metadata = try await HerdrWorkspaceClient(endpoint: binding.endpoint).verify(binding, requireRuntime: false)
+        let metadata = try await HerdrWorkspaceClient(endpoint: binding.endpoint, identity: binding.serviceIdentity).verify(binding, requireRuntime: false)
         try Task.checkCancellation()
         guard let runtime = metadata.terminal_id, !runtime.isEmpty else {
             throw CLIError("Herdr runtime identity is unavailable for this pane")
@@ -622,7 +624,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
         guard herdrBinding != nil, isLive else { return }
         let generation = herdrGeneration
         let binding = try await resolveHerdrQueryBinding()
-        let info = try await HerdrWorkspaceClient(endpoint: binding.endpoint).processInfo(binding)
+        let info = try await HerdrWorkspaceClient(endpoint: binding.endpoint, identity: binding.serviceIdentity).processInfo(binding)
         guard isLive, generation == herdrGeneration, herdrQueryBinding == binding else { return }
         herdrProcessInfo = info
     }
@@ -676,7 +678,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
                     guard let self else { return }
                     let binding = try await self.resolveHerdrQueryBinding()
                     guard self.historyGeneration == generation, self.isScrollModeActive else { return }
-                    let read = try await HerdrWorkspaceClient(endpoint: binding.endpoint).read(binding)
+                    let read = try await HerdrWorkspaceClient(endpoint: binding.endpoint, identity: binding.serviceIdentity).read(binding)
                     guard self.historyGeneration == generation, self.isScrollModeActive,
                           self.herdrQueryBinding == binding else { return }
                     try history?.load(read, paneID: self.id)
@@ -919,9 +921,11 @@ final class TerminalPaneController: NSObject, PaneControlling {
         for paneID: PaneID,
         workingDirectory: String?,
         scrollMode: Bool = false,
-        clientShell: Bool = false
+        clientShell: Bool = false,
+        launchCommand: String? = nil
     ) -> TerminalConfiguration {
         TerminalConfiguration(startingFrom: TerminalDefaults.configuration) { builder in
+            if let launchCommand { builder.withCustom("command", launchCommand) }
             if clientShell {
                 builder.withCustom("window-padding-x", "0")
                 builder.withCustom("window-padding-y", "0")

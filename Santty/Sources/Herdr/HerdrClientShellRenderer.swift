@@ -485,6 +485,7 @@ final class HerdrShellDisplayFeedback: @unchecked Sendable {
     @MainActor
     func waitForViewport(_ size: HerdrShellSize, in memory: InMemoryTerminalSession) async throws {
         // View metrics change before Ghostty's IO thread applies the terminal resize.
+        var queryGeneration: UInt64?
         for _ in 0..<100 {
             try Task.checkCancellation()
             let identity = ObjectIdentifier(memory)
@@ -493,10 +494,17 @@ final class HerdrShellDisplayFeedback: @unchecked Sendable {
             }
             if confirmed { return }
             await Task.detached { memory.waitForPendingOutput() }.value
-            _ = takeViewport()
+            let pending = takeViewport()
+            // Output drains before the asynchronous reply callback necessarily arrives.
+            if queryGeneration == generation, pending == size, lock.withLock({
+                guard viewportGeneration == generation else { return false }
+                confirmedViewport = (size, identity)
+                return true
+            }) { return }
             guard memory.receiveIfAttached(Data("\u{1b}[18t".utf8)) else {
                 throw CLIError("Ghostty viewport is detached")
             }
+            queryGeneration = generation
             await Task.detached { memory.waitForPendingOutput() }.value
             if takeViewport() == size, lock.withLock({
                 guard viewportGeneration == generation else { return false }

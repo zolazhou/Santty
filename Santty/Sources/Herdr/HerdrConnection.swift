@@ -145,6 +145,7 @@ final class HerdrConnection: @unchecked Sendable {
         var params = Params()
     }
     private let socketPath: String
+    private let endpoint: HerdrEndpoint?
     private let lock = NSRecursiveLock()
     private var generation = 0
     private var hasConnected = false
@@ -152,15 +153,16 @@ final class HerdrConnection: @unchecked Sendable {
     private let snapshotReceived: @Sendable (HerdrSnapshot) -> Void
     private let stateChanged: @Sendable (HerdrConnectionState) -> Void
 
-    init(socketPath: String, snapshot: @escaping @Sendable (HerdrSnapshot) -> Void,
+    init(socketPath: String, endpoint: HerdrEndpoint? = nil, snapshot: @escaping @Sendable (HerdrSnapshot) -> Void,
          state: @escaping @Sendable (HerdrConnectionState) -> Void) {
         self.socketPath = socketPath
+        self.endpoint = endpoint
         snapshotReceived = snapshot
         stateChanged = state
     }
 
-    static func preflight(socketPath: String) throws -> HerdrServerInfo {
-        let result = try request(Request(id: UUID().uuidString, method: "ping"), socketPath: socketPath)
+    static func preflight(socketPath: String, endpoint: HerdrEndpoint? = nil) throws -> HerdrServerInfo {
+        let result = try request(Request(id: UUID().uuidString, method: "ping"), socketPath: socketPath, endpoint: endpoint)
         guard result.type == "pong", let version = result.version, let protocolVersion = result.protocol else {
             throw CLIError("Invalid Herdr ping response")
         }
@@ -177,15 +179,34 @@ final class HerdrConnection: @unchecked Sendable {
         }
     }
 
-    static func request(_ request: Request, socketPath: String) throws -> HerdrAPIEnvelope.Result {
-        let fd = try openSocket(socketPath)
-        defer { Darwin.close(fd) }
-        let identity = try HerdrServiceIdentity.read(socket: fd)
-        try CLITransport.write(request, to: fd)
-        let data = try CLITransport.readLine(fd, limit: HerdrLineDecoder.maximumBytes)
-        var result = try JSONDecoder().decode(HerdrAPIEnvelope.self, from: data).response(to: request.id)
-        result.assignServiceIdentity(identity)
-        return result
+    private static func open(socketPath: String, endpoint: HerdrEndpoint?) throws -> (fd: CInt, bridge: HerdrSSHBridge?) {
+        if let endpoint, endpoint.machine != nil {
+            let connection = try HerdrSSHBridge.connect(endpoint: endpoint, lane: .api)
+            var timeout = timeval(tv_sec: 10, tv_usec: 0)
+            _ = setsockopt(connection.fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout.size(ofValue: timeout)))
+            _ = setsockopt(connection.fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout.size(ofValue: timeout)))
+            return (connection.fd, connection.bridge)
+        }
+        return (try openSocket(socketPath), nil)
+    }
+
+    static func request(_ request: Request, socketPath: String, endpoint: HerdrEndpoint? = nil) throws -> HerdrAPIEnvelope.Result {
+        let connection = try open(socketPath: socketPath, endpoint: endpoint)
+        let fd = connection.fd
+        defer { Darwin.close(fd); connection.bridge?.stop() }
+        do {
+            let identity: HerdrServiceIdentity
+            if let endpoint, endpoint.machine != nil { identity = .remote(endpoint: endpoint, bootID: "") }
+            else { identity = try HerdrServiceIdentity.read(socket: fd) }
+            try CLITransport.write(request, to: fd)
+            let data = try CLITransport.readLine(fd, limit: HerdrLineDecoder.maximumBytes)
+            var result = try JSONDecoder().decode(HerdrAPIEnvelope.self, from: data).response(to: request.id)
+            result.assignServiceIdentity(identity)
+            return result
+        } catch {
+            if connection.bridge != nil, let endpoint, !(error is HerdrRemoteError) { HerdrSSHBridge.invalidate(endpoint) }
+            throw error
+        }
     }
 
     func connect() {
@@ -198,12 +219,14 @@ final class HerdrConnection: @unchecked Sendable {
         lock.unlock()
         DispatchQueue.global(qos: .utility).async { [self] in
             do {
-                _ = try Self.preflight(socketPath: socketPath)
-                let fd = try Self.openSocket(socketPath)
+                _ = try Self.preflight(socketPath: socketPath, endpoint: endpoint)
+                let connection = try Self.open(socketPath: socketPath, endpoint: endpoint)
+                let fd = connection.fd
                 defer {
                     lock.lock()
                     if generation == current { subscriptionFD = nil }
                     Darwin.close(fd)
+                    connection.bridge?.stop()
                     lock.unlock()
                 }
                 lock.lock()
@@ -226,7 +249,7 @@ final class HerdrConnection: @unchecked Sendable {
                     let count = Darwin.read(fd, &bytes, bytes.count)
                     if count < 0, errno == EINTR { continue }
                     if count < 0, (errno == EAGAIN || errno == EWOULDBLOCK), subscribed {
-                        _ = try Self.preflight(socketPath: socketPath)
+                        _ = try Self.preflight(socketPath: socketPath, endpoint: endpoint)
                         continue
                     }
                     guard count > 0 else {
@@ -261,7 +284,7 @@ final class HerdrConnection: @unchecked Sendable {
     }
 
     private func deliverSnapshot(generation current: Int) throws {
-        let result = try Self.request(Request(id: UUID().uuidString, method: "session.snapshot"), socketPath: socketPath)
+        let result = try Self.request(Request(id: UUID().uuidString, method: "session.snapshot"), socketPath: socketPath, endpoint: endpoint)
         guard result.type == "session_snapshot", var snapshot = result.snapshot else { throw CLIError("Invalid Herdr snapshot") }
         try HerdrServerInfo(version: snapshot.version, protocolVersion: snapshot.protocolVersion).validate()
         lock.lock()

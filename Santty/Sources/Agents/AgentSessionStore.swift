@@ -51,13 +51,26 @@ final class AgentSessionStore {
     private var published: [String: AgentSessionSnapshot] = [:]
     private var publishedMessages: [AgentMessage] = []
     private var endpoint: HerdrEndpoint?
-    private var identity: HerdrServiceIdentity?
-    private var bootID: String?
-    private var revision: UInt64 = 0
-    private var latest: HerdrShellSnapshot?
-    private var completions: [String: UInt64] = [:]
-    private var pending: [(HerdrShellNotification, Date)] = []
-    private var customNotices: [String: Date] = [:]
+    private final class EndpointState {
+        let endpointID: String
+        init(endpointID: String = "") { self.endpointID = endpointID }
+        var identity: HerdrServiceIdentity?
+        var bootID: String?
+        var revision: UInt64 = 0
+        var latest: HerdrShellSnapshot?
+        var completions: [String: UInt64] = [:]
+        var pending: [(HerdrShellNotification, Date)] = []
+        var customNotices: [String: Date] = [:]
+    }
+    private var endpointStates: [String: EndpointState] = [:]
+    private var currentState = EndpointState()
+    private var identity: HerdrServiceIdentity? { get { currentState.identity } set { currentState.identity = newValue } }
+    private var bootID: String? { get { currentState.bootID } set { currentState.bootID = newValue } }
+    private var revision: UInt64 { get { currentState.revision } set { currentState.revision = newValue } }
+    private var latest: HerdrShellSnapshot? { get { currentState.latest } set { currentState.latest = newValue } }
+    private var completions: [String: UInt64] { get { currentState.completions } set { currentState.completions = newValue } }
+    private var pending: [(HerdrShellNotification, Date)] { get { currentState.pending } set { currentState.pending = newValue } }
+    private var customNotices: [String: Date] { get { currentState.customNotices } set { currentState.customNotices = newValue } }
     var onNotification: ((AgentMessage) -> Void)?
     var isTargetVisible: ((HerdrPaneBinding) -> Bool)?
 
@@ -88,9 +101,9 @@ final class AgentSessionStore {
     }
 
     func configure(_ endpoint: HerdrEndpoint) {
-        guard self.endpoint != endpoint else { return }
-        reset()
         self.endpoint = endpoint
+        if endpointStates[endpoint.id] == nil { endpointStates[endpoint.id] = EndpointState(endpointID: endpoint.id) }
+        currentState = endpointStates[endpoint.id]!
     }
 
     func apply(_ snapshot: HerdrShellSnapshot, completions evidence: HerdrShellAgentCompletions?,
@@ -100,15 +113,15 @@ final class AgentSessionStore {
         let sameBoot = self.identity == identity && bootID == snapshot.boot_id
         if sameBoot && snapshot.revision < revision { return }
         if !sameBoot {
-            if self.identity != nil { markUnavailable(); pending.removeAll() }
+            if self.identity != nil { markUnavailable(endpoint: endpoint); pending.removeAll() }
             customNotices.removeAll()
             self.identity = identity; bootID = snapshot.boot_id
         }
         revision = snapshot.revision; latest = snapshot
         completions = evidence.flatMap { $0.boot_id == snapshot.boot_id && $0.revision == snapshot.revision ? $0.completions : nil } ?? [:]
-        guard let agents = snapshot.agents else { markUnavailable(); return }
+        guard let agents = snapshot.agents else { markUnavailable(endpoint: endpoint); return }
         let active = Set(agents.map { key(identity, snapshot.boot_id, $0.pane_id) })
-        for id in records.keys where !active.contains(id) {
+        for id in records.keys where records[id]?.snapshot.binding.endpoint.id == endpoint.id && !active.contains(id) {
             guard let old = records[id] else { continue }
             records[id]?.snapshot = replacing(old.snapshot, state: .sessionEnded, available: false)
         }
@@ -133,7 +146,7 @@ final class AgentSessionStore {
             }
             let space = snapshot.workspaces.first { $0.workspace_id == pane.workspace_id }?.label ?? pane.workspace_id
             let tab = snapshot.tabs.first { $0.tab_id == pane.tab_id }?.label ?? pane.tab_id
-            let context = "\(space) › \(tab) › \(pane.label ?? agent.title ?? pane.pane_id)"
+            let context = (endpoint.machine.map { $0.label + " › " } ?? "") + "\(space) › \(tab) › \(pane.label ?? agent.title ?? pane.pane_id)"
             let changed = old?.sequence != agent.state_change_seq
             var record = Record(snapshot: .init(id: id, agent: kind, paneID: old?.snapshot.paneID ?? UUID(), sessionID: nil,
                 displayState: state, paneTitle: context, workingDirectory: pane.foreground_cwd ?? pane.cwd,
@@ -152,24 +165,30 @@ final class AgentSessionStore {
         }
         // Keep ended history bounded independently of the server's live-agent limit.
         if records.count > 1024 {
-            let ended = records.values.filter { !active.contains($0.snapshot.id) }.sorted { $0.snapshot.lastEventAt < $1.snapshot.lastEventAt }
+            let ended = records.values.filter { $0.snapshot.displayState == .sessionEnded }.sorted { $0.snapshot.lastEventAt < $1.snapshot.lastEventAt }
             for old in ended.prefix(records.count - 1024) { records.removeValue(forKey: old.snapshot.id) }
         }
         drainPending(now: now)
         postDidChange()
     }
 
-    func receive(_ event: HerdrShellNotification, now: Date = Date()) {
+    func receive(_ event: HerdrShellNotification, endpoint: HerdrEndpoint? = nil, now: Date = Date()) {
+        if let endpoint { configure(endpoint) }
         guard event.title.utf8.count <= 4096, (event.body?.utf8.count ?? 0) <= 16384 else { return }
         // The server can send a notification before its matching metadata update.
         if !consume(event, now: now), pending.count < 64 { pending.append((event, now.addingTimeInterval(5))) }
     }
 
     func drainPending(now: Date = Date()) {
-        let work = pending; pending.removeAll()
-        for (event, deadline) in work where now < deadline {
-            if !consume(event, now: now) { pending.append((event, deadline)) }
+        let previous = currentState
+        for state in endpointStates.values {
+            currentState = state
+            let work = pending; pending.removeAll()
+            for (event, deadline) in work where now < deadline {
+                if !consume(event, now: now) { pending.append((event, deadline)) }
+            }
         }
+        currentState = previous
     }
 
     private func consume(_ event: HerdrShellNotification, now: Date) -> Bool {
@@ -234,9 +253,10 @@ final class AgentSessionStore {
     }
 
     func markViewed(_ bindings: [HerdrPaneBinding], snapshot: HerdrShellSnapshot) {
-        guard snapshot.boot_id == bootID else { return }
+        guard !bindings.isEmpty else { return }
         let ids = records.values.filter { record in
-            bindings.contains { $0.endpoint == record.snapshot.binding.endpoint && $0.serviceIdentity == record.snapshot.binding.serviceIdentity && $0.paneID == record.snapshot.binding.paneID }
+            endpointStates[record.snapshot.binding.endpoint.id]?.bootID == snapshot.boot_id
+                && bindings.contains { $0.endpoint == record.snapshot.binding.endpoint && $0.serviceIdentity == record.snapshot.binding.serviceIdentity && $0.paneID == record.snapshot.binding.paneID }
                 && snapshot.agents?.contains(where: { $0.pane_id == record.snapshot.binding.paneID && $0.state_change_seq == record.sequence }) == true
         }.map { $0.snapshot.paneID }
         if !ids.isEmpty { markRead(forPaneIDs: Set(ids)) }
@@ -248,24 +268,25 @@ final class AgentSessionStore {
         postDidChange()
     }
 
-    func markUnavailable() {
-        for id in records.keys {
+    func markUnavailable(endpoint: HerdrEndpoint? = nil) {
+        for id in records.keys where endpoint == nil || records[id]?.snapshot.binding.endpoint.id == endpoint?.id {
             if let old = records[id] { records[id]?.snapshot = replacing(old.snapshot, available: false) }
         }
-        latest = nil
-        pending.removeAll()
+        for (id, state) in endpointStates where endpoint == nil || id == endpoint?.id {
+            state.latest = nil; state.pending.removeAll()
+        }
         postDidChange()
     }
 
     func reset() {
-        endpoint = nil
+        endpoint = nil; endpointStates.removeAll(); currentState = EndpointState()
         records.removeAll(); messages.removeAll(); pending.removeAll(); customNotices.removeAll()
         identity = nil; bootID = nil; latest = nil; completions.removeAll(); revision = 0
         postDidChange()
     }
 
     private func key(_ identity: HerdrServiceIdentity, _ boot: String, _ pane: String) -> String {
-        (try? JSONEncoder().encode([String(identity.pid), String(identity.startedSeconds), String(identity.startedMicroseconds), boot, pane]).base64EncodedString()) ?? pane
+        (try? JSONEncoder().encode([currentState.endpointID, String(identity.pid), String(identity.startedSeconds), String(identity.startedMicroseconds), boot, pane]).base64EncodedString()) ?? pane
     }
 
     private func replacing(_ old: AgentSessionSnapshot, state: AgentSessionDisplayState? = nil,

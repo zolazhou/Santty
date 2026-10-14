@@ -80,6 +80,28 @@ final class WorkspaceToolbarView: NSView {
         needsLayout = true
     }
 
+    func updateWorkspaceEntries(_ entries: [WorkspaceEntry], selectedID: String?) {
+        let changed = workspaceSwitcher.itemArray.count != entries.count || !zip(entries, workspaceSwitcher.itemArray).allSatisfy {
+            $0.id == $1.representedObject as? String && $0.title == $1.title && $0.isAvailable == $1.isEnabled
+                && $1.toolTip == [$0.kind.title, $0.status].compactMap { $0 }.joined(separator: " · ")
+        }
+        if changed {
+            workspaceSwitcher.removeAllItems()
+            for entry in entries {
+                workspaceSwitcher.addItem(withTitle: entry.title)
+                workspaceSwitcher.lastItem?.representedObject = entry.id
+                workspaceSwitcher.lastItem?.image = NSImage(systemSymbolName: entry.kind.symbol, accessibilityDescription: entry.kind.title)
+                workspaceSwitcher.lastItem?.toolTip = [entry.kind.title, entry.status].compactMap { $0 }.joined(separator: " · ")
+                workspaceSwitcher.lastItem?.isEnabled = entry.isAvailable
+            }
+        }
+        selectedWorkspaceID = selectedID
+        workspaceSwitcher.select(workspaceSwitcher.itemArray.first { $0.representedObject as? String == selectedID })
+        workspaceSwitcher.isHidden = false
+        workspaceSwitcher.toolTip = workspaceSwitcher.titleOfSelectedItem
+        needsLayout = true
+    }
+
     @objc private func selectWorkspace(_ sender: NSPopUpButton) {
         guard let id = sender.selectedItem?.representedObject as? String else { return }
         // Keep the confirmed label while the request waits or is rejected by the operation gate.
@@ -250,7 +272,7 @@ final class WorkspaceToolbarView: NSView {
         workspaceSwitcherBackground.layer?.masksToBounds = true
         addSubview(workspaceSwitcherBackground, positioned: .below, relativeTo: workspaceSwitcher)
         workspaceSwitcherBackground.isHidden = !AppAppearanceSettings.isWindowHidden
-        updateWorkspaces([], selectedID: nil)
+        updateWorkspaces([HerdrSnapshot.Workspace](), selectedID: nil)
         // Santty chrome stays dark even when macOS uses the light appearance.
         workspaceSwitcher.appearance = NSAppearance(named: AppAppearanceDefaults.vibrancyAppearanceName)
         workspaceSwitcher.controlSize = .regular

@@ -6,6 +6,36 @@ import XCTest
 
 @MainActor
 final class HerdrClientShellSessionTests: XCTestCase {
+    func testSinglePaneRoundtripAvoidsAPILayoutQueriesButSplitFetchesTopology() async throws {
+        let (process, endpoint, path) = try await fixture("window-split-queries")
+        defer { cleanup(process, path); try? FileManager.default.removeItem(atPath: path) }
+        let workspace = WorkspaceViewController(); workspace.debugLoadForTesting()
+        workspace.herdrErrorHandler = { _ in }
+        let local = workspace.debugSelectedWorkspace
+        try workspace.configureHerdrWorkspace(endpoint)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 650), styleMask: [], backing: .buffered, defer: false)
+        window.contentView = workspace.view; window.orderBack(nil)
+        defer { workspace.releaseHerdrConnections(); window.orderOut(nil); window.contentView = nil }
+        try await workspace.enterHerdrWorkspace("w5")
+        let selected = workspace.debugSelectedWorkspace
+        workspace.selectWorkspace(local)
+        workspace.selectWorkspace(selected); await workspace.waitForWorkspaceSelection()
+        XCTAssertTrue(workspace.debugFocusedHerdrPane?.canAcceptInput == true)
+        func exports() throws -> [[String: Any]] {
+            let trace = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path + ".trace"))) as? [[String: Any]])
+            return trace.filter { $0["method"] as? String == "layout.export" }
+        }
+        XCTAssertTrue(try exports().isEmpty, "ClientShell already provides the complete single-pane topology")
+        workspace.debugSetFocusedPaneName("trigger external split")
+        for _ in 0..<500 where workspace.debugPaneIDsInTraversalOrder.count != 2 || workspace.debugHerdrOperationPending || workspace.debugFocusedHerdrPane?.canAcceptInput != true {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(workspace.debugPaneIDsInTraversalOrder.count, 2)
+        XCTAssertTrue(workspace.debugFocusedHerdrPane?.canAcceptInput == true)
+        XCTAssertFalse(try exports().isEmpty, "Split topology must still come from the native API")
+        XCTAssertNil(workspace.herdrLastError)
+    }
+
     func testDividerKeyboardPreviewAnimatesAndSurvivesDelayedOldProjection() async throws {
         let (process, endpoint, path) = try await fixture("window-split-slow")
         defer { cleanup(process, path); try? FileManager.default.removeItem(atPath: path) }
@@ -195,7 +225,7 @@ final class HerdrClientShellSessionTests: XCTestCase {
         try workspace.configureHerdrWorkspace(.init(binary: endpoint.binary, session: endpoint.session, socketPath: path + ".missing"))
         remote.perform()
         await workspace.waitForPaletteNavigationForTesting()
-        XCTAssertTrue(errors.last?.contains("settings changed") == true)
+        XCTAssertTrue(errors.last?.contains("changed") == true)
         XCTAssertEqual(workspace.debugTabIDs, locals)
 
     }
@@ -224,9 +254,11 @@ final class HerdrClientShellSessionTests: XCTestCase {
         XCTAssertFalse(toolbar.workspaceSwitcher.isHidden)
         XCTAssertEqual(toolbar.workspaceSwitcher.titleOfSelectedItem, "Default")
         let locals = workspace.debugTabIDs
+        let herdrPickerID = WorkspaceReference(source: .herdr(endpoint: endpoint, workspaceID: "w5")).id
+        let localPickerID = workspace.debugSelectedWorkspace.id
         workspace.discoverHerdrWorkspaces()
         await workspace.waitForHerdrWorkspaceDiscovery()
-        XCTAssertTrue(toolbar.workspaceSwitcher.itemArray.contains { $0.representedObject as? String == "w5" })
+        XCTAssertTrue(toolbar.workspaceSwitcher.itemArray.contains { $0.representedObject as? String == herdrPickerID })
         XCTAssertNil(workspace.debugFocusedHerdrPane, "Discovery must not attach a terminal or change the selected workspace")
         XCTAssertFalse(FileManager.default.fileExists(atPath: path + ".trace"))
 
@@ -234,35 +266,38 @@ final class HerdrClientShellSessionTests: XCTestCase {
         window.contentView = workspace.view; window.orderBack(nil)
         defer { workspace.releaseHerdrConnections(); window.orderOut(nil); window.contentView = nil }
         func choose(_ id: String) {
-            toolbar.workspaceSwitcher.select(toolbar.workspaceSwitcher.itemArray.first { $0.representedObject as? String == id })
+            let item = toolbar.workspaceSwitcher.itemArray.first { $0.representedObject as? String == id }
+            XCTAssertNotNil(item, "Missing workspace target \(id)")
+            XCTAssertTrue(item?.isEnabled == true, "A freshly discovered workspace must be selectable")
+            toolbar.workspaceSwitcher.select(item)
             _ = toolbar.workspaceSwitcher.sendAction(toolbar.workspaceSwitcher.action, to: toolbar.workspaceSwitcher.target)
         }
         func waitForSwitch() async throws {
             for _ in 0..<600 where workspace.debugHerdrOperationPending { try await Task.sleep(for: .milliseconds(10)) }
             XCTAssertFalse(workspace.debugHerdrOperationPending)
         }
-        choose("w5"); try await waitForSwitch()
+        choose(herdrPickerID); try await waitForSwitch()
         XCTAssertTrue(workspace.debugFocusedHerdrPane?.canAcceptInput == true)
         workspace.debugPerformCommand(withID: "pane.notes.new")
         let notes = workspace.savedWorkspace().tabs.flatMap(\.panes).filter { $0.kind == .notes }.map(\.id)
         XCTAssertEqual(notes.count, 1)
-        choose("")
+        choose(localPickerID)
         XCTAssertEqual(workspace.debugTabIDs, locals)
         XCTAssertEqual(toolbar.workspaceSwitcher.titleOfSelectedItem, "Default")
         let localSaved = workspace.savedWorkspace()
         try localSaved.validate()
         XCTAssertEqual(localSaved.herdrAuxiliaryTabs?.flatMap(\.panes).map(\.id), notes)
-        XCTAssertTrue(toolbar.workspaceSwitcher.itemArray.contains { $0.representedObject as? String == "w5" })
+        XCTAssertTrue(toolbar.workspaceSwitcher.itemArray.contains { $0.representedObject as? String == herdrPickerID })
         try workspace.restoreWorkspace(localSaved)
-        choose("w5"); try await waitForSwitch()
+        choose(herdrPickerID); try await waitForSwitch()
         let reconnected = await workspace.collectHerdrDiagnostics()
-        XCTAssertTrue(reconnected.clientShell?.presentationReady == true)
+        XCTAssertTrue(reconnected.clientShell?.presentationReady == true, workspace.herdrLastError ?? "Restored workspace was not presented")
         XCTAssertNil(workspace.debugFocusedHerdrPane, "The restored Notes pane keeps local focus")
         XCTAssertEqual(workspace.savedWorkspace().tabs.flatMap(\.panes).filter { $0.kind == .notes }.map(\.id), notes)
         try workspace.savedWorkspace().validate()
         XCTAssertTrue(process.isRunning)
 
-        choose("")
+        choose(localPickerID)
         var stale = workspace.savedWorkspace()
         let currentMetadata = try await HerdrWorkspaceClient(endpoint: endpoint).snapshot()
         var metadata = try XCTUnwrap(currentMetadata.panes.first)
@@ -270,8 +305,8 @@ final class HerdrClientShellSessionTests: XCTestCase {
         metadata.serviceIdentity = .init(pid: identity.pid, startedSeconds: identity.startedSeconds + 1, startedMicroseconds: identity.startedMicroseconds)
         stale.herdrAuxiliaryTabs?[0].backendBinding = try HerdrPaneBinding(endpoint: endpoint, pane: metadata)
         try workspace.restoreWorkspace(stale)
-        choose("w5"); try await waitForSwitch()
-        choose("")
+        choose(herdrPickerID); try await waitForSwitch()
+        choose(localPickerID)
         XCTAssertEqual(workspace.savedWorkspace().tabs.flatMap(\.panes).filter { $0.kind == .notes }.map(\.id), notes,
                        "A restarted service recovers old local additions into Default instead of attaching them to reused backend IDs")
         try workspace.savedWorkspace().validate()
@@ -1428,7 +1463,8 @@ final class HerdrClientShellSessionTests: XCTestCase {
         workspace.debugSetFocusedPaneName("cursor-home")
         for _ in 0..<200 {
             if pane.debugTerminalFrame.minX == TerminalSettings.padding,
-               pane.debugTerminalFrame.maxY == pane.debugPaneBounds.maxY - TerminalSettings.padding { break }
+               pane.debugTerminalFrame.maxY == pane.debugPaneBounds.maxY - TerminalSettings.padding,
+               pane.canAcceptInput { break }
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertEqual(pane.debugTerminalFrame.minX, TerminalSettings.padding)
@@ -1564,6 +1600,7 @@ final class HerdrClientShellSessionTests: XCTestCase {
             }
             json = try XCTUnwrap(legacyBindings(json) as? [String: Any])
             json["version"] = version
+            for key in ["workspaces", "selectedWorkspace", "localWorkspaceID", "localWorkspaceName", "otherLocalWorkspaces"] { json.removeValue(forKey: key) }
             json["herdrWindowMode"] = "observe"
             if version < 3 { json.removeValue(forKey: "herdrWindowTransport") }
             else { json["herdrWindowTransport"] = "direct" }

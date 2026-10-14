@@ -5,6 +5,12 @@ struct HerdrServiceIdentity: Codable, Sendable, Equatable {
     let pid: Int32
     let startedSeconds: UInt64
     let startedMicroseconds: UInt64
+    var endpointID: String? = nil
+    var bootID: String? = nil
+
+    static func remote(endpoint: HerdrEndpoint, bootID: String) -> Self {
+        .init(pid: 0, startedSeconds: 0, startedMicroseconds: 0, endpointID: endpoint.id, bootID: bootID)
+    }
 
     static func read(socket fd: CInt) throws -> Self {
         var pid: pid_t = 0

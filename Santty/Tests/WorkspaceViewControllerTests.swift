@@ -1804,7 +1804,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
                 XCTAssertEqual(
                     controller.debugCommandSnapshots.map(\.id),
                     [
-                        "terminal.herdr.diagnostics", "workspace.new", "workspace.herdr.new", "workspace.rename", "workspace.close", "terminal.herdr.disconnect", "terminal.herdr.reconnect",
+                        "terminal.herdr.diagnostics", "workspace.new", "workspace.herdr.new", "workspace.remote.add", "workspace.remote.authenticate", "workspace.rename", "workspace.close", "terminal.herdr.disconnect", "terminal.herdr.reconnect",
                 "terminal.herdr.takeover", "terminal.herdr.end",
                 "pane.rename",
                         "pane.split.horizontal",

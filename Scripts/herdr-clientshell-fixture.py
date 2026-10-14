@@ -235,6 +235,9 @@ def api_handle(connection):
             result = dict(type='session_snapshot', snapshot=dict(version='0.9.3', protocol=22, panes=panes,
                 workspaces=snapshot['workspaces'], tabs=snapshot['tabs'], focused_workspace_id=snapshot['focused_workspace_id']))
         elif method == 'layout.export':
+            if scenario == 'window-split-queries':
+                trace.append(dict(method=method, params=request['params']))
+                record_trace()
             tab_id = request['params']['tab_id']
             panes = [p['pane_id'] for p in snapshot['panes'] if p['tab_id'] == tab_id]
             pane = panes[0]
@@ -287,20 +290,7 @@ def record_trace():
     temporary.replace(Path(api_path + '.trace'))
 
 
-def serve_client(connection, hello=None):
-    global window_active, window_assets_sent, window_cells, window_size, connection_number, popup_live
-    window_active = False
-    window_assets_sent = False  # Delivery cache belongs to this connection, not the service.
-    connection_number += 1
-    trace.append(dict(connection=connection_number))
-    record_trace()
-    connection.settimeout(10)
-    hello = hello or read_message(connection)
-    assert hello[0] == 20
-    kind, i = take_string(hello, 1)
-    value, i = take_string(hello, i)
-    assert i == len(hello) and kind == 'endpoint.hello.v1'
-    assert json.loads(value)['surface_active'] is False
+def client_welcome():
     welcome = dict(generation=1, server_version='fixture-future', snapshot_codec='shell.snapshot.v1',
                    surface_codec='shell.surface.v1', input_codec='shell.input.semantic.v1', blob_codec='shell.blob.v1',
                    methods=['client_shell.surface.set', 'pane.rename', 'tab.rename', 'workspace.rename', 'pane.focus', 'workspace.focus'],
@@ -315,13 +305,33 @@ def serve_client(connection, hello=None):
         welcome['methods'].extend(['workspace.create', 'workspace.close'])
     if scenario in ('mouse-focus', 'window-tabs-palette'):
         welcome['methods'].append('tab.focus')
-    control(connection, 'endpoint.welcome.v1', welcome)
+    return welcome
+
+
+def serve_client(connection, hello=None, handshaken=False, first_message=None):
+    global window_active, window_assets_sent, window_cells, window_size, connection_number, popup_live
+    window_active = False
+    window_assets_sent = False  # Delivery cache belongs to this connection, not the service.
+    connection_number += 1
+    trace.append(dict(connection=connection_number))
+    record_trace()
+    connection.settimeout(10)
+    hello = hello or read_message(connection)
+    assert hello[0] == 20
+    kind, i = take_string(hello, 1)
+    value, i = take_string(hello, i)
+    assert i == len(hello) and kind == 'endpoint.hello.v1'
+    assert json.loads(value)['surface_active'] is False
+    if not handshaken:
+        control(connection, 'endpoint.welcome.v1', client_welcome())
     if scenario == 'malformed':
         send(connection, bytes([8, 2, 0]))
     else:
-        control(connection, 'shell.snapshot.v1', snapshot)
+        if not handshaken:
+            control(connection, 'shell.snapshot.v1', snapshot)
         while True:
-            message = read_message(connection)
+            message = first_message or read_message(connection)
+            first_message = None
             tag = message[0]
             trace.append(dict(tag=tag))
             if tag in (13, 14, 17):
@@ -371,8 +381,9 @@ def serve_client(connection, hello=None):
                 trace[-1]['params'] = request['params']
                 record_trace()
                 if request['method'] == 'client_shell.surface.set':
-                    assert request['params']['active'] is True
-                    result = dict(type='client_shell_surface_set', active=True, projection_revision=snapshot['revision'])
+                    active = request['params']['active']
+                    assert isinstance(active, bool)
+                    result = dict(type='client_shell_surface_set', active=active, projection_revision=snapshot['revision'])
                 else:
                     if scenario == 'stalled':
                         time.sleep(10)
@@ -420,6 +431,9 @@ def serve_client(connection, hello=None):
                 for final, data in [(False, response[:half]), (True, response[half:])]:
                     send(connection, b'\x12' + string('boot') + string(request['id']) + bytes([final]) + integer(len(data)) + data)
                 if request['method'] == 'client_shell.surface.set':
+                    if not request['params']['active']:
+                        window_active = False
+                        continue
                     if window_scenario:
                         window_active = True
                         send(connection, window_frame())
@@ -542,10 +556,9 @@ def serve_client(connection, hello=None):
 def serve_metadata(connection, hello):
     """Inactive observers receive metadata, never claim a terminal surface."""
     try:
-        control(connection, 'endpoint.welcome.v1', dict(generation=1, server_version='fixture',
-            snapshot_codec='shell.snapshot.v1', surface_codec='shell.surface.v1',
-            input_codec='shell.input.semantic.v1', blob_codec='shell.blob.v1',
-            methods=['client_shell.surface.set'], capabilities=['surface_interest', 'health_check', 'agent_completions']))
+        welcome = client_welcome()
+        welcome['capabilities'].append('agent_completions')
+        control(connection, 'endpoint.welcome.v1', welcome)
         control(connection, 'endpoint.agent-completions.v1', dict(boot_id=snapshot['boot_id'], revision=snapshot['revision'], completions={}))
         control(connection, 'shell.snapshot.v1', snapshot)
         if scenario == 'window-agents':
@@ -557,6 +570,7 @@ def serve_metadata(connection, hello):
             update['agents'][0].update(agent_status='idle', state_change_seq=11)
             control(connection, 'endpoint.agent-completions.v1', dict(boot_id=update['boot_id'], revision=update['revision'], completions={'w5:pA': 11}))
             control(connection, 'shell.snapshot.v1', update)
+            snapshot.update(update)
             notice = (b'\x0e' + integer(1) + string('Review finished') + b'\x01' + string('Ready to review')
                 + b'\x01' + integer(0) + b'\x01' + string('claude') + b'\x01' + string('w5')
                 + b'\x01' + string('w5:t4') + b'\x01' + string('w5:pA') + b'\x00')
@@ -564,6 +578,11 @@ def serve_metadata(connection, hello):
             send(connection, notice)  # Duplicate delivery must not duplicate unread messages.
         while True:
             message = read_message(connection)
+            if message[0] in (0, 12, 17):
+                serve_client(connection, hello, handshaken=True, first_message=message)
+                return
+            if message[0] == 4:
+                return
             assert message[0] == 20, 'Metadata observer sent terminal input'
             kind, i = take_string(message, 1)
             value, i = take_string(message, i)

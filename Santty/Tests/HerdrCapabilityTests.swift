@@ -45,6 +45,34 @@ final class HerdrCapabilityTests: XCTestCase {
         XCTAssertEqual(delivered, 1, "Disconnected metadata cannot accept stale notifications")
     }
 
+    func testAgentsAndPendingNotificationsAreScopedToTheirEndpoint() throws {
+        let store = AgentSessionStore()
+        func remote(_ id: String) -> HerdrEndpoint {
+            .init(binary: agentEndpoint.binary, session: "test", socketPath: agentEndpoint.socketPath,
+                machine: .init(id: String(repeating: id, count: 32), label: id, target: id, session: "test", enabled: true))
+        }
+        let first = remote("a"), second = remote("b")
+        let firstIdentity = HerdrServiceIdentity.remote(endpoint: first, bootID: "boot-v1")
+        let secondIdentity = HerdrServiceIdentity.remote(endpoint: second, bootID: "boot-v1")
+        try store.apply(agentSnapshot("working", sequence: 10), completions: nil, endpoint: first, identity: firstIdentity)
+        try store.apply(agentSnapshot("working", sequence: 10), completions: nil, endpoint: second, identity: secondIdentity)
+        XCTAssertEqual(store.snapshots.count, 2)
+        XCTAssertTrue(store.snapshots.allSatisfy(\.backendStatusAvailable))
+        store.receive(agentNotice(0), endpoint: first)
+        try store.apply(agentSnapshot("blocked", sequence: 11, revision: 8), completions: nil, endpoint: second, identity: secondIdentity)
+        XCTAssertEqual(store.messages.count, 1)
+        XCTAssertEqual(store.messages.first?.binding.endpoint.id, second.id)
+        try store.apply(agentSnapshot("blocked", sequence: 11, revision: 8), completions: nil, endpoint: first, identity: firstIdentity)
+        XCTAssertEqual(store.messages.count, 2)
+        let secondBinding = try XCTUnwrap(store.snapshots.first { $0.binding.endpoint.id == second.id }?.binding)
+        store.markViewed([secondBinding], snapshot: try agentSnapshot("blocked", sequence: 11, revision: 8))
+        XCTAssertEqual(store.messages.filter(\.isUnread).count, 1)
+        XCTAssertEqual(store.messages.first { $0.isUnread }?.binding.endpoint.id, first.id)
+        store.markUnavailable(endpoint: first)
+        XCTAssertTrue(try XCTUnwrap(store.snapshots.first { $0.binding.endpoint.id == second.id }).backendStatusAvailable)
+        XCTAssertFalse(try XCTUnwrap(store.snapshots.first { $0.binding.endpoint.id == first.id }).backendStatusAvailable)
+    }
+
     func testHerdrAttentionWaitsForMetadataAndValidatesTarget() throws {
         let store = AgentSessionStore()
         var delivered = 0
