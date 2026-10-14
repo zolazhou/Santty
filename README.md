@@ -150,7 +150,7 @@ ClientShell image display has been confirmed against a running Herdr service; co
 
 CLI read/search use the backend recent snapshot and report its source and truncation; line numbers refer to that snapshot. Process information and inherited cwd come from Herdr. Agent status and completion notifications come exclusively from Herdr; local hook installation, the agent event socket and PID liveness monitoring have been removed. Stale CLI socket hints are rediscovered using the backend pane and socket; ambiguous instances require `--socket`. Reinstall the bundled CLI after upgrading. See [the implementation plan](docs/plans/herdr-native-client.md).
 
-Persistent terminal actions (disconnect/reconnect/take control/end) have no default shortcut; assign them in **Settings → Keybindings → Pane**. Herdr workspace attachment remains experimental. Current-machine Debug/Release builds and connection stress have passed, but macOS 14 runtime, Intel runtime and full input-to-pixel performance coverage are still release gates.
+**Pane → Reconnect Herdr Window** appears when the selected Herdr window is disconnected. Disconnect and Take Control remain available in the command palette; use Close Pane to end a backend terminal. Herdr connection actions have no default shortcut; assign them in **Settings → Keybindings → Pane**. Herdr workspace attachment remains experimental. Current-machine Debug/Release builds and connection stress have passed, but macOS 14 runtime, Intel runtime and full input-to-pixel performance coverage are still release gates.
 
 ## Read Pane Logs from an Agent
 

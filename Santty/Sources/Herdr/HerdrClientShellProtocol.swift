@@ -3,9 +3,9 @@ import Foundation
 // Endpoint generation 1; wire order is frozen independently of Herdr's private protocol version.
 // Source: herdrdev/herdr 2563803, src/protocol/{wire,endpoint}.rs (Apache-2.0).
 struct HerdrShellHello: Encodable, Sendable {
-    static let requestSurfaceReuse = false
-    static let requestSurfaceScroll = false
-    static let requestSurfaceDelta = false
+    static let requestSurfaceReuse = true
+    static let requestSurfaceScroll = true
+    static let requestSurfaceDelta = true
     let generation = 1
     let cell_width_px: UInt32
     let cell_height_px: UInt32
@@ -74,11 +74,83 @@ struct HerdrShellCursor: Codable, Sendable, Equatable {
 }
 
 struct HerdrShellFrame: Sendable, Equatable {
-    var cells: [HerdrShellCell]
+    private var rowCells: [ArraySlice<HerdrShellCell>]
+    private var rowSymbolBytes: [Int]
+    private var rowHyperlinks: [UInt32?]
+    private(set) var cellCount: Int
+    // Wire decoders use contiguous cells; projection and rendering keep shared rows.
+    var cells: [HerdrShellCell] {
+        get { rowCells.flatMap { $0 } }
+        set {
+            self = .init(cells: newValue, width: width, height: height, cursor: cursor,
+                         hyperlinks: hyperlinks, graphics: graphics)
+        }
+    }
     let width: UInt16; let height: UInt16
     var cursor: HerdrShellCursor?
     let hyperlinks: [String]
-    let graphics: Data
+    var graphics: Data
+
+    init(cells: [HerdrShellCell], width: UInt16, height: UInt16, cursor: HerdrShellCursor?,
+         hyperlinks: [String], graphics: Data) {
+        self.width = width; self.height = height; self.cursor = cursor
+        self.hyperlinks = hyperlinks; self.graphics = graphics; cellCount = cells.count
+        rowCells = width == 0 ? [cells[...]] : stride(from: 0, to: cells.count, by: Int(width)).map {
+            cells[$0..<min($0 + Int(width), cells.count)]
+        }
+        rowSymbolBytes = rowCells.map { $0.reduce(0) { $0 + $1.symbol.utf8.count } }
+        rowHyperlinks = rowCells.map { $0.reduce(nil as UInt32?) { maximum, cell in
+            guard let link = cell.hyperlink else { return maximum }
+            return max(maximum ?? link, link)
+        } }
+    }
+
+    mutating func reuseCells(from frame: Self) {
+        rowCells = frame.rowCells; cellCount = frame.cellCount
+        rowSymbolBytes = frame.rowSymbolBytes; rowHyperlinks = frame.rowHyperlinks
+    }
+
+    var maximumHyperlink: UInt32? { rowHyperlinks.compactMap { $0 }.max() }
+
+    func cells(in row: Int) -> ArraySlice<HerdrShellCell> {
+        rowCells[row]
+    }
+
+    mutating func replaceCells(_ replacement: [HerdrShellCell], x: Int, y: Int) {
+        let start = rowCells[y].startIndex + x
+        rowCells[y].replaceSubrange(start..<(start + replacement.count), with: replacement)
+        rowSymbolBytes[y] = rowCells[y].reduce(0) { $0 + $1.symbol.utf8.count }
+        rowHyperlinks[y] = rowCells[y].reduce(nil as UInt32?) { maximum, cell in
+            guard let link = cell.hyperlink else { return maximum }
+            return max(maximum ?? link, link)
+        }
+    }
+
+    mutating func scroll(_ rect: HerdrShellRect, by shift: Int) {
+        let distance = abs(shift), height = Int(rect.height)
+        let rows = shift > 0 ? Array(0..<(height - distance)) : Array(stride(from: height - 1, through: distance, by: -1))
+        if rect.x == 0, rect.width == width {
+            for row in rows {
+                let a = Int(rect.y) + row, b = a + (shift > 0 ? distance : -distance)
+                rowCells.swapAt(a, b); rowSymbolBytes.swapAt(a, b); rowHyperlinks.swapAt(a, b)
+            }
+            return
+        }
+        var order = Array(0..<height)
+        for row in rows { order.swapAt(row, row + (shift > 0 ? distance : -distance)) }
+        let previous = rowCells
+        for (row, source) in order.enumerated() where row != source {
+            let cells = previous[Int(rect.y) + source], start = cells.startIndex + Int(rect.x)
+            replaceCells(Array(cells[start..<(start + Int(rect.width))]), x: Int(rect.x), y: Int(rect.y) + row)
+        }
+    }
+
+    var estimatedCellBytes: Int {
+        cellCount * MemoryLayout<HerdrShellCell>.stride
+            + rowCells.count * MemoryLayout<ArraySlice<HerdrShellCell>>.stride
+            + rowSymbolBytes.reduce(0, +)
+            + rowCells.count * (MemoryLayout<Int>.stride + MemoryLayout<UInt32?>.stride)
+    }
 }
 
 struct HerdrShellScroll: Codable, Sendable, Equatable {
@@ -158,6 +230,26 @@ struct HerdrShellPopup: Sendable, Equatable {
 }
 
 struct HerdrShellSurface: Decodable, Sendable, Equatable {
+    struct Damage: Sendable, Equatable {
+        struct Origin: Sendable, Equatable { let projection: UInt64; let surface: UInt64 }
+        let origin: Origin
+        var rows: [UInt64]
+        var panes: [String: UInt64]
+
+        mutating func mark(_ rect: HerdrShellRect, panes: [HerdrShellPane], revision: UInt64) {
+            for y in Int(rect.y)..<(Int(rect.y) + Int(rect.height)) { rows[y] = revision }
+            for pane in panes {
+                let inner = pane.inner_rect
+                if Int(rect.x) < Int(inner.x) + Int(inner.width), Int(inner.x) < Int(rect.x) + Int(rect.width),
+                   Int(rect.y) < Int(inner.y) + Int(inner.height), Int(inner.y) < Int(rect.y) + Int(rect.height) {
+                    self.panes[pane.pane_id] = revision
+                }
+            }
+        }
+    }
+    private enum CodingKeys: String, CodingKey {
+        case boot_id, projection_revision, surface_revision, frame, panes, splits, popup, graphics
+    }
     let boot_id: String
     let projection_revision: UInt64
     var surface_revision: UInt64
@@ -166,6 +258,28 @@ struct HerdrShellSurface: Decodable, Sendable, Equatable {
     let splits: [HerdrShellSplit]
     var popup: HerdrShellPopup?
     let graphics: HerdrShellGraphics
+    // Local revisions survive coalesced patches; never decode damage hints from the wire.
+    var damage: Damage? = nil
+    var hasRetainedCells = false
+
+    mutating func recordCellDamage(_ changed: [HerdrShellPatch.Row], previousPanes: [HerdrShellPane] = []) {
+        guard var damage else {
+            self.damage = .init(origin: .init(projection: projection_revision, surface: surface_revision),
+                rows: Array(repeating: surface_revision, count: Int(frame.height)),
+                panes: Dictionary(uniqueKeysWithValues: panes.map { ($0.pane_id, surface_revision) }))
+            return
+        }
+        for pane in panes {
+            if !previousPanes.contains(where: { $0.pane_id == pane.pane_id && $0.inner_rect == pane.inner_rect }) {
+                damage.panes[pane.pane_id] = surface_revision
+            }
+        }
+        damage.panes = damage.panes.filter { id, _ in panes.contains { $0.pane_id == id } }
+        for row in changed {
+            damage.mark(.init(x: row.x, y: row.y, width: UInt16(row.cells.count), height: 1), panes: panes, revision: surface_revision)
+        }
+        self.damage = damage
+    }
 
     func containsInputTarget(_ target: String, popup: Bool) -> Bool {
         if popup { return self.popup?.terminal_id == target }
@@ -174,12 +288,15 @@ struct HerdrShellSurface: Decodable, Sendable, Equatable {
 }
 
 struct HerdrShellPatch: Sendable, Equatable {
+    struct Scroll: Sendable, Equatable { let rect: HerdrShellRect; let shift: Int }
     struct Row: Sendable, Equatable { let x: UInt16; let y: UInt16; let cells: [HerdrShellCell] }
     let boot_id: String
     let projection_revision: UInt64
     let base_surface_revision: UInt64
     let surface_revision: UInt64
     let rows: [Row]
+    // Connection-local decoded regions; never accepted from ordinary wire patches.
+    var scrolls: [Scroll] = []
     let panes: [HerdrShellPane]
     let cursor: HerdrShellCursor?
 }
@@ -212,6 +329,17 @@ enum HerdrShellServerMessage: Sendable, Equatable {
     case notify(UInt32, String, String?)
     case reloadSound
 
+    var surfaceCodec: String? {
+        switch self {
+        case .surface: "full"
+        case .patch: "patch"
+        case .control("endpoint.surface-reuse.v1", _): "reuse"
+        case .control("endpoint.surface-scroll.v1", _): "scroll"
+        case .control("endpoint.surface-delta.v1", _): "delta"
+        default: nil
+        }
+    }
+
     // Charge each queued value conservatively, including shared cell/asset buffers.
     var estimatedDecodedBytes: Int {
         func keyBytes(_ key: HerdrShellAssetKey) -> Int {
@@ -226,7 +354,7 @@ enum HerdrShellServerMessage: Sendable, Equatable {
             cells.count * MemoryLayout<HerdrShellCell>.stride + cells.reduce(0) { $0 + $1.symbol.utf8.count }
         }
         func frameBytes(_ frame: HerdrShellFrame) -> Int {
-            MemoryLayout<HerdrShellFrame>.stride + cellsBytes(frame.cells) + frame.graphics.count
+            MemoryLayout<HerdrShellFrame>.stride + frame.estimatedCellBytes + frame.graphics.count
                 + frame.hyperlinks.count * MemoryLayout<String>.stride
                 + frame.hyperlinks.reduce(0) { $0 + $1.utf8.count }
         }
@@ -246,8 +374,11 @@ enum HerdrShellServerMessage: Sendable, Equatable {
                 + $0.title.utf8.count + frameBytes($0.frame) } ?? 0
             content = surface.boot_id.utf8.count + frameBytes(surface.frame) + panesBytes(surface.panes)
                 + assets + placements + retained + splits + popup
+                + (surface.damage.map { $0.rows.count * MemoryLayout<UInt64>.stride
+                    + $0.panes.reduce(0) { $0 + $1.key.utf8.count + MemoryLayout<UInt64>.stride + MemoryLayout<String>.stride } } ?? 0)
         case .patch(let patch):
             content = patch.boot_id.utf8.count + panesBytes(patch.panes)
+                + patch.scrolls.count * MemoryLayout<HerdrShellPatch.Scroll>.stride
                 + patch.rows.reduce(0) { $0 + MemoryLayout<HerdrShellPatch.Row>.stride + cellsBytes($1.cells) }
         case .response(let boot, let request, _, let bytes): content = boot.utf8.count + request.utf8.count + bytes.count
         case .shutdown(let value), .title(let value): content = value?.utf8.count ?? 0

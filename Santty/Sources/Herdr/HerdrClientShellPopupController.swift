@@ -26,7 +26,7 @@ final class HerdrClientShellPopupController: NSObject, TerminalSurfaceLifecycleD
         self.session = session; self.bootID = bootID; self.terminalID = terminalID
         let feedback = HerdrShellDisplayFeedback()
         self.feedback = feedback
-        memory = InMemoryTerminalSession(write: { feedback.receive($0) }, resize: { _ in })
+        memory = InMemoryTerminalSession(write: { feedback.receive($0) }, resize: { _ in feedback.invalidateViewport() })
         controller = TerminalController(configuration: Self.configuration(), theme: TerminalDefaults.theme)
         super.init()
         terminalView.configuration = .init(backend: .inMemory(memory))
@@ -65,8 +65,14 @@ final class HerdrClientShellPopupController: NSObject, TerminalSurfaceLifecycleD
             && session?.projection.coherentSurface?.containsInputTarget(terminalID, popup: true) == true
     }
 
-    func prepareRender(_ surface: HerdrShellSurface, assets: [HerdrShellAssetKey: Data]) async throws
-        -> HerdrShellPreparedRender? {
+    private var canSendClientShellInput: Bool {
+        isPresented && attached && terminalView.window != nil && session?.isInputReady == true
+            && session?.projection.snapshot?.boot_id == bootID
+            && session?.projection.coherentSurface?.containsInputTarget(terminalID, popup: true) == true
+    }
+
+    func prepareRenderRequest(_ surface: HerdrShellSurface) async throws
+        -> HerdrShellRenderRequest? {
         guard let session, surface.boot_id == bootID,
               session.canPresent(surface),
               let popup = surface.popup, popup.terminal_id == terminalID else { return nil }
@@ -82,11 +88,10 @@ final class HerdrClientShellPopupController: NSObject, TerminalSurfaceLifecycleD
         }
         try await feedback.waitForViewport(.init(cols: popup.frame.width, rows: popup.frame.height), in: memory)
         guard isCurrent() else { return nil }
-        let prepared = try await renderer.prepare(.popup(terminalID), from: surface, assets: assets)
         try Task.checkCancellation()
         guard isCurrent() else { return nil }
-        let bytes = prepared.bytes, preparedRenderer = prepared.renderer
-        return .init(byteCount: bytes.count, isCurrent: isCurrent, commit: { [self] in
+        return .init(input: .init(renderer: renderer, target: .popup(terminalID)),
+                     isCurrent: isCurrent, commit: { [self] preparedRenderer, bytes in
             guard isCurrent() else { return nil }
             guard memory.receiveIfAttached(bytes) else { return nil }
             renderer = preparedRenderer
@@ -129,6 +134,7 @@ final class HerdrClientShellPopupController: NSObject, TerminalSurfaceLifecycleD
     func terminalDidDetachSurface() { attached = false; invalidateDisplay() }
 
     private func invalidateDisplay() {
+        feedback.invalidateViewport()
         renderEpoch += 1; renderer.reset(); displayError = nil
         applyState(.connecting)
         guard isPresented else { return }
@@ -156,7 +162,7 @@ final class HerdrClientShellPopupController: NSObject, TerminalSurfaceLifecycleD
 
     @discardableResult
     private func sendClientShellInput(_ events: [HerdrShellInput]) -> Bool {
-        guard canAcceptInput else { return false }
+        guard canSendClientShellInput else { return false }
         return session?.input(target: terminalID, popup: true, events: events) == true
     }
 
@@ -174,7 +180,7 @@ final class HerdrClientShellPopupController: NSObject, TerminalSurfaceLifecycleD
         let held = button.map { clientShellPressedButtons.contains($0) } == true
         if !wheel, !held, (!clientShellMouseReporting || event.modifierFlags.contains(.shift)) { return false }
         let release = [NSEvent.EventType.leftMouseUp, .rightMouseUp, .otherMouseUp].contains(event.type) && held
-        guard canAcceptInput || release, let grid = terminalView.scrollModeGrid,
+        guard canSendClientShellInput || release, let grid = terminalView.scrollModeGrid,
               grid.cellWidthPixels > 0, grid.cellHeightPixels > 0 else { return true }
         let scale = terminalView.convertToBacking(NSSize(width: 1, height: 1))
         let p = terminalView.convert(event.locationInWindow, from: nil)

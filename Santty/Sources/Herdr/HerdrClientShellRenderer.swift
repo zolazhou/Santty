@@ -1,7 +1,7 @@
 import Foundation
 import GhosttyTerminal
 
-enum HerdrShellRenderTarget: Sendable, Equatable {
+enum HerdrShellRenderTarget: Sendable, Hashable {
     case pane(String)
     case popup(String)
 
@@ -15,14 +15,43 @@ enum HerdrShellRenderTarget: Sendable, Equatable {
 }
 
 struct HerdrShellViewportFrame: Sendable, Equatable {
+    struct Revision: Sendable, Equatable {
+        let boot: String
+        let projection: UInt64
+        let surface: UInt64
+        let target: HerdrShellRenderTarget
+    }
     let frame: HerdrShellFrame
     let originX: UInt16
     let originY: UInt16
     let placements: [HerdrShellPlacement]
     let retained: Set<HerdrShellAssetKey>
+    var cellRect: HerdrShellRect? = nil
+    var hidesCursor = false
+    var revision: Revision? = nil
+    var rowRevisions: [UInt64] = []
+    var contentRevision: UInt64? = nil
+    var damageOrigin: HerdrShellSurface.Damage.Origin? = nil
+
+    var width: UInt16 { cellRect?.width ?? frame.width }
+    var height: UInt16 { cellRect?.height ?? frame.height }
+    var cursor: HerdrShellCursor? {
+        guard !hidesCursor, let cursor = frame.cursor else { return nil }
+        guard let rect = cellRect else { return cursor }
+        guard cursor.x >= rect.x, cursor.y >= rect.y,
+              Int(cursor.x) < Int(rect.x) + Int(rect.width), Int(cursor.y) < Int(rect.y) + Int(rect.height) else { return nil }
+        return .init(x: cursor.x - rect.x, y: cursor.y - rect.y, visible: cursor.visible, shape: cursor.shape)
+    }
+
+    func cells(in row: Int) -> ArraySlice<HerdrShellCell> {
+        let cells = frame.cells(in: row + Int(cellRect?.y ?? 0))
+        let start = cells.startIndex + Int(cellRect?.x ?? 0)
+        return cells[start..<(start + Int(width))]
+    }
 
     static func extract(_ target: HerdrShellRenderTarget, from surface: HerdrShellSurface) throws -> Self {
         let frame: HerdrShellFrame, x: UInt16, y: UInt16
+        var cellRect: HerdrShellRect?, hidesCursor = false, contentRevision: UInt64?
         switch target {
         case .pane(let id):
             guard let pane = surface.panes.first(where: { $0.pane_id == id }), pane.inner_rect.width > 0,
@@ -30,21 +59,13 @@ struct HerdrShellViewportFrame: Sendable, Equatable {
             let rect = pane.inner_rect
             guard Int(rect.x) + Int(rect.width) <= Int(surface.frame.width),
                   Int(rect.y) + Int(rect.height) <= Int(surface.frame.height),
-                  surface.frame.cells.count == Int(surface.frame.width) * Int(surface.frame.height)
+                  surface.frame.cellCount == Int(surface.frame.width) * Int(surface.frame.height)
             else { throw CLIError("Herdr pane content lies outside its surface") }
-            var cells: [HerdrShellCell] = []; cells.reserveCapacity(Int(rect.width) * Int(rect.height))
-            for row in Int(rect.y)..<(Int(rect.y) + Int(rect.height)) {
-                try Task.checkCancellation()
-                let start = row * Int(surface.frame.width) + Int(rect.x)
-                cells.append(contentsOf: surface.frame.cells[start..<(start + Int(rect.width))])
-            }
-            let cursor = surface.frame.cursor.flatMap { c -> HerdrShellCursor? in
-                guard pane.focused, c.x >= rect.x, c.y >= rect.y,
-                      Int(c.x) < Int(rect.x) + Int(rect.width), Int(c.y) < Int(rect.y) + Int(rect.height) else { return nil }
-                return .init(x: c.x - rect.x, y: c.y - rect.y, visible: c.visible, shape: c.shape)
-            }
-            frame = .init(cells: cells, width: rect.width, height: rect.height, cursor: cursor,
-                          hyperlinks: surface.frame.hyperlinks, graphics: Data())
+            var paneFrame = surface.frame
+            paneFrame.graphics = Data()
+            frame = paneFrame
+            cellRect = rect; hidesCursor = !pane.focused
+            contentRevision = surface.damage?.panes[id]
             x = rect.x; y = rect.y
         case .popup(let id):
             guard let popup = surface.popup, popup.terminal_id == id else { throw CLIError("Herdr popup is absent from the visible surface") }
@@ -52,7 +73,12 @@ struct HerdrShellViewportFrame: Sendable, Equatable {
         }
         return .init(frame: frame, originX: x, originY: y,
                      placements: surface.graphics.placements.filter { target.accepts($0.asset.source) },
-                     retained: Set(surface.graphics.retained_assets.filter { target.accepts($0.source) }))
+                     retained: Set(surface.graphics.retained_assets.filter { target.accepts($0.source) }),
+                     cellRect: cellRect, hidesCursor: hidesCursor,
+                     revision: .init(boot: surface.boot_id, projection: surface.projection_revision,
+                        surface: surface.surface_revision, target: target),
+                     rowRevisions: cellRect == nil ? [] : surface.damage?.rows ?? [], contentRevision: contentRevision,
+                     damageOrigin: cellRect == nil ? nil : surface.damage?.origin)
     }
 }
 
@@ -63,8 +89,31 @@ struct HerdrShellPreparedRender {
     let commit: @MainActor () -> InMemoryTerminalSession?
 }
 
+@MainActor
+struct HerdrShellRenderRequest {
+    let input: HerdrClientShellRenderer.Input
+    let isCurrent: @MainActor () -> Bool
+    let commit: @MainActor (HerdrClientShellRenderer, Data) -> InMemoryTerminalSession?
+
+    func output(_ encoded: HerdrClientShellRenderer.Output) -> HerdrShellPreparedRender {
+        .init(byteCount: encoded.bytes.count, isCurrent: isCurrent, commit: {
+            guard isCurrent() else { return nil }
+            return commit(encoded.renderer, encoded.bytes)
+        })
+    }
+}
+
+struct HerdrShellRenderTiming: Sendable {
+    let queue: TimeInterval
+    let encode: TimeInterval
+    var resume: TimeInterval = 0
+}
+
 // One encoder per Ghostty surface; its image namespace never reaches the backend PTY.
 struct HerdrClientShellRenderer: Sendable {
+    struct Input: Sendable { let renderer: HerdrClientShellRenderer; let target: HerdrShellRenderTarget }
+    struct Output: Sendable { let renderer: HerdrClientShellRenderer; let bytes: Data }
+
     static let maximumBatchOutputBytes = 256 * 1024 * 1024
     static func clipboardOutput(_ text: String) throws -> Data {
         let bytes = Data(text.utf8)
@@ -82,7 +131,18 @@ struct HerdrClientShellRenderer: Sendable {
         let placementID: UInt32
         let localX: UInt16; let localY: UInt16
     }
-    private var previous: HerdrShellFrame?
+    private struct Baseline: Sendable {
+        let width: UInt16; let height: UInt16
+        let cellRect: HerdrShellRect?
+        let cursor: HerdrShellCursor?
+        let hyperlinks: [String]
+        let placements: [HerdrShellPlacement]
+        let retained: Set<HerdrShellAssetKey>
+        let revision: HerdrShellViewportFrame.Revision?
+        let rows: [[HerdrShellCell]]
+        let damageOrigin: HerdrShellSurface.Damage.Origin?
+    }
+    private var previous: Baseline?
     private var uploaded: [HerdrShellAssetKey: UInt32] = [:]
     private var placed: [Slot: Placed] = [:]
     private var nextImageID: UInt32 = 1
@@ -95,23 +155,67 @@ struct HerdrClientShellRenderer: Sendable {
 
     func prepare(_ target: HerdrShellRenderTarget, from surface: HerdrShellSurface,
                  assets: [HerdrShellAssetKey: Data]) async throws
-        -> (renderer: Self, bytes: Data) {
+        -> (renderer: Self, bytes: Data, timing: HerdrShellRenderTiming?) {
+        let scene = try await Self.prepareScene([.init(renderer: self, target: target)], from: surface, assets: assets)
+        return (scene.outputs[0].renderer, scene.outputs[0].bytes, scene.timing)
+    }
+
+    static func prepareScene(_ inputs: [Input], from surface: HerdrShellSurface,
+                             assets: [HerdrShellAssetKey: Data]) async throws
+        -> (outputs: [Output], timing: HerdrShellRenderTiming?) {
+        try Task.checkCancellation()
+        let reused = try inputs.map { try $0.renderer.canReuse($0.target, from: surface, assets: assets) }
+        if reused.allSatisfy({ $0 }) { return (inputs.map { .init(renderer: $0.renderer, bytes: Data()) }, nil) }
+        let enqueuedAt = ProcessInfo.processInfo.systemUptime
         let worker = Task.detached(priority: .userInitiated) {
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            var outputs: [Output] = []; outputs.reserveCapacity(inputs.count)
+            var totalBytes = 0
+            for (index, input) in inputs.enumerated() {
+                try Task.checkCancellation()
+                var candidate = input.renderer
+                let bytes = reused[index] ? Data() : try candidate.render(.extract(input.target, from: surface), assets: assets)
+                guard bytes.count <= maximumBatchOutputBytes - totalBytes else {
+                    throw CLIError("Herdr native render batch exceeds output budget")
+                }
+                totalBytes += bytes.count
+                outputs.append(.init(renderer: candidate, bytes: bytes))
+            }
             try Task.checkCancellation()
-            let viewport = try HerdrShellViewportFrame.extract(target, from: surface)
-            var candidate = self
-            let bytes = try candidate.render(viewport, assets: assets)
-            try Task.checkCancellation()
-            return (renderer: candidate, bytes: bytes)
+            let finishedAt = ProcessInfo.processInfo.systemUptime
+            return (outputs: outputs, timing: HerdrShellRenderTiming(
+                queue: startedAt - enqueuedAt, encode: finishedAt - startedAt), finishedAt: finishedAt)
         }
         return try await withTaskCancellationHandler {
             let result = try await worker.value
             try Task.checkCancellation()
-            return result
+            var timing = result.timing
+            timing.resume = ProcessInfo.processInfo.systemUptime - result.finishedAt
+            return (result.outputs, timing)
         } onCancel: { worker.cancel() }
     }
 
     func ownsImage(_ id: UInt32) -> Bool { uploaded.values.contains(id) }
+
+    private func patchBaseline(for viewport: HerdrShellViewportFrame) -> UInt64? {
+        guard let previous, let old = previous.revision, let next = viewport.revision,
+              old.boot == next.boot, old.target == next.target,
+              previous.damageOrigin != nil, previous.damageOrigin == viewport.damageOrigin,
+              old.surface <= next.surface, previous.cellRect == viewport.cellRect,
+              previous.width == viewport.width, previous.height == viewport.height,
+              previous.hyperlinks == viewport.frame.hyperlinks,
+              viewport.rowRevisions.count == Int(viewport.frame.height) else { return nil }
+        return old.surface
+    }
+
+    func canReuse(_ target: HerdrShellRenderTarget, from surface: HerdrShellSurface,
+                  assets: [HerdrShellAssetKey: Data]) throws -> Bool {
+        let viewport = try HerdrShellViewportFrame.extract(target, from: surface)
+        guard let baseline = patchBaseline(for: viewport), let content = viewport.contentRevision,
+              content <= baseline, let previous, previous.cursor == viewport.cursor,
+              previous.placements == viewport.placements, previous.retained == viewport.retained else { return false }
+        return !viewport.placements.contains { uploaded[$0.asset] == nil && assets[$0.asset] != nil }
+    }
 
     // Build on a copy so a rejected scene cannot advance the display's baseline.
     mutating func render(_ viewport: HerdrShellViewportFrame, assets: [HerdrShellAssetKey: Data]) throws -> Data {
@@ -123,8 +227,8 @@ struct HerdrClientShellRenderer: Sendable {
 
     private mutating func encode(_ viewport: HerdrShellViewportFrame, assets: [HerdrShellAssetKey: Data]) throws -> Data {
         let frame = viewport.frame
-        let width = Int(frame.width), height = Int(frame.height)
-        guard width > 0, height > 0, frame.cells.count == width * height, frame.graphics.isEmpty else {
+        let width = Int(viewport.width), height = Int(viewport.height)
+        guard width > 0, height > 0, frame.cellCount == Int(frame.width) * Int(frame.height), frame.graphics.isEmpty else {
             throw CLIError("Invalid Herdr pane render frame")
         }
         // Herdr owns history; resizing a projected normal buffer would create local scrollback.
@@ -133,26 +237,39 @@ struct HerdrClientShellRenderer: Sendable {
         if previous == nil {
             output.append(contentsOf: "\u{1b}[0m\u{1b}[2J\u{1b}_Ga=d,d=A,q=2;\u{1b}\\".utf8)
         }
-        let changedSize = previous?.width != frame.width || previous?.height != frame.height
+        let changedSize = previous?.width != viewport.width || previous?.height != viewport.height
         let changedLinks = previous?.hyperlinks != frame.hyperlinks
+        let baseline = patchBaseline(for: viewport)
+        // Retain only this pane's rows, so idle panes cannot pin whole historical surfaces.
+        var retainedRows = changedSize ? Array(repeating: [HerdrShellCell](), count: height) : previous!.rows
         for row in 0..<height {
             try Task.checkCancellation()
-            let start = row * width
-            let cells = frame.cells[start..<(start + width)]
+            if let baseline, viewport.rowRevisions[row + Int(viewport.cellRect?.y ?? 0)] <= baseline { continue }
+            let cells = viewport.cells(in: row)
+            let oldCells = changedSize || changedLinks ? nil : previous?.rows[row]
             if !changedSize, !changedLinks, let previous,
-               previous.cells[start..<(start + width)].elementsEqual(cells) { continue }
+               previous.rows[row].elementsEqual(cells) { continue }
+            retainedRows[row] = Array(cells)
             var coveredThrough = 0
+            var invalidatedThrough = 0
             var lastStyle: (fg: UInt32, bg: UInt32, modifier: UInt16)?
             var nextColumn: Int?
             var currentLink: String?
             for column in 0..<width {
-                let cell = frame.cells[start + column]
+                let cell = cells[cells.startIndex + column]
                 guard column >= coveredThrough, !cell.skip else { continue }
                 let ascii = cell.symbol.utf8.count == 1 && cell.symbol.utf8.first.map { (32...126).contains($0) } == true
                 let clean = ascii ? cell.symbol : Self.printable(cell.symbol)
                 let columns = ascii ? 1 : Self.columnWidth(clean)
                 let symbol = columns > width - column || clean.isEmpty ? " " : clean
                 coveredThrough = column + max(1, columns > width - column ? 1 : columns)
+                let previousCell = oldCells.map { $0[$0.startIndex + column] }
+                guard previousCell != cell || column < invalidatedThrough else { continue }
+                if let previousCell {
+                    let oldWidth = previousCell.symbol.utf8.count == 1 ? 1 : Self.columnWidth(Self.printable(previousCell.symbol))
+                    // A narrower replacement must repaint cells previously covered by a wide glyph.
+                    invalidatedThrough = max(invalidatedThrough, column + (oldWidth <= width - column ? oldWidth : 1))
+                }
                 // Only ASCII runs rely on cursor advance; Unicode keeps explicit placement across width differences.
                 if nextColumn != column || !ascii { output.append(contentsOf: "\u{1b}[\(row + 1);\(column + 1)H".utf8) }
                 nextColumn = ascii ? column + 1 : nil
@@ -174,12 +291,14 @@ struct HerdrClientShellRenderer: Sendable {
         }
         try encodeGraphics(viewport, assets: assets, output: &output)
         output.append(contentsOf: "\u{1b}[0m".utf8)
-        if let cursor = frame.cursor, cursor.visible, cursor.x < frame.width, cursor.y < frame.height {
+        if let cursor = viewport.cursor, cursor.visible, cursor.x < viewport.width, cursor.y < viewport.height {
             output.append(contentsOf: "\u{1b}[\(cursor.y + 1);\(cursor.x + 1)H\u{1b}[\(cursor.shape) q\u{1b}[?25h".utf8)
         }
         output.append(contentsOf: "\u{1b}[?2026l".utf8)
         guard output.count <= HerdrClientShellTransport.queueBudget else { throw CLIError("Herdr render output exceeds budget") }
-        previous = frame
+        previous = .init(width: viewport.width, height: viewport.height, cellRect: viewport.cellRect,
+            cursor: viewport.cursor, hyperlinks: frame.hyperlinks, placements: viewport.placements,
+            retained: viewport.retained, revision: viewport.revision, rows: retainedRows, damageOrigin: viewport.damageOrigin)
         return output
     }
 
@@ -189,8 +308,8 @@ struct HerdrClientShellRenderer: Sendable {
             try Task.checkCancellation()
             guard placement.cols > 0, placement.rows > 0, placement.x >= viewport.originX, placement.y >= viewport.originY else { throw CLIError("Herdr image has an invalid pane origin") }
             let x = placement.x - viewport.originX, y = placement.y - viewport.originY
-            guard UInt64(x) + UInt64(placement.cols) <= UInt64(viewport.frame.width),
-                  UInt64(y) + UInt64(placement.rows) <= UInt64(viewport.frame.height) else { throw CLIError("Herdr image lies outside its pane") }
+            guard UInt64(x) + UInt64(placement.cols) <= UInt64(viewport.width),
+                  UInt64(y) + UInt64(placement.rows) <= UInt64(viewport.height) else { throw CLIError("Herdr image lies outside its pane") }
             let slot = Slot(source: placement.asset.source, logical: placement.logical_placement_id, x: placement.x, y: placement.y)
             guard desired[slot] == nil else { throw CLIError("Duplicate Herdr image placement") }
             var imageID = uploaded[placement.asset]
@@ -340,6 +459,8 @@ final class HerdrShellDisplayFeedback: @unchecked Sendable {
     private var colorQuery: ColorQuery?
     private var colorQueryID: UInt64 = 0
     private var reportedViewport: HerdrShellSize?
+    private var confirmedViewport: (HerdrShellSize, ObjectIdentifier)?
+    private var viewportGeneration: UInt64 = 0
     private static let end = Data([27, 92])
     private static let limit = 8192
 
@@ -349,18 +470,39 @@ final class HerdrShellDisplayFeedback: @unchecked Sendable {
         return reportedViewport
     }
 
+    func invalidateViewport() {
+        lock.withLock {
+            viewportGeneration &+= 1
+            confirmedViewport = nil
+            reportedViewport = nil
+        }
+    }
+
+    func hasConfirmedViewport(_ size: HerdrShellSize, in memory: InMemoryTerminalSession) -> Bool {
+        lock.withLock { confirmedViewport?.0 == size && confirmedViewport?.1 == ObjectIdentifier(memory) }
+    }
+
     @MainActor
     func waitForViewport(_ size: HerdrShellSize, in memory: InMemoryTerminalSession) async throws {
         // View metrics change before Ghostty's IO thread applies the terminal resize.
         for _ in 0..<100 {
             try Task.checkCancellation()
+            let identity = ObjectIdentifier(memory)
+            let (confirmed, generation) = lock.withLock {
+                (confirmedViewport?.0 == size && confirmedViewport?.1 == identity, viewportGeneration)
+            }
+            if confirmed { return }
             await Task.detached { memory.waitForPendingOutput() }.value
             _ = takeViewport()
             guard memory.receiveIfAttached(Data("\u{1b}[18t".utf8)) else {
                 throw CLIError("Ghostty viewport is detached")
             }
             await Task.detached { memory.waitForPendingOutput() }.value
-            if takeViewport() == size { return }
+            if takeViewport() == size, lock.withLock({
+                guard viewportGeneration == generation else { return false }
+                confirmedViewport = (size, identity)
+                return true
+            }) { return }
             try await Task.sleep(for: .milliseconds(10))
         }
         throw CLIError("Ghostty terminal viewport did not synchronize")

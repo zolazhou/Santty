@@ -73,12 +73,17 @@ final class HerdrBetaTests: XCTestCase {
         for seconds in [Double.nan, .infinity, -1] { samples.record(seconds: seconds) }
         XCTAssertEqual(samples.summary.sampleCount, 0)
         XCTAssertNil(samples.summary.p50Milliseconds)
-        for milliseconds in 0..<200 { samples.record(seconds: Double(milliseconds) / 1000) }
+        samples.record(seconds: 0.001)
+        XCTAssertEqual(samples.summary.sampleCount, 1)
+        XCTAssertEqual(try XCTUnwrap(samples.summary.lastMilliseconds), 1, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(samples.summary.p99Milliseconds), 1, accuracy: 0.0001)
+        for milliseconds in 0..<1200 { samples.record(seconds: Double(milliseconds) / 1000) }
         let summary = samples.summary
-        XCTAssertEqual(summary.sampleCount, 128)
-        XCTAssertEqual(try XCTUnwrap(summary.lastMilliseconds), 199, accuracy: 0.0001)
-        XCTAssertEqual(try XCTUnwrap(summary.p50Milliseconds), 135, accuracy: 0.0001)
-        XCTAssertEqual(try XCTUnwrap(summary.p95Milliseconds), 193, accuracy: 0.0001)
+        XCTAssertEqual(summary.sampleCount, 1024)
+        XCTAssertEqual(try XCTUnwrap(summary.lastMilliseconds), 1199, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(summary.p50Milliseconds), 687, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(summary.p95Milliseconds), 1148, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(summary.p99Milliseconds), 1189, accuracy: 0.0001)
         XCTAssertEqual(HerdrDiagnosticError.summary("Ghostty image 1: SECRET_IMAGE_ERROR"), "Local terminal image upload failed")
         XCTAssertEqual(HerdrDiagnosticError.summary("SECRET cache exceeds budget"), "ClientShell resource limit exceeded")
     }

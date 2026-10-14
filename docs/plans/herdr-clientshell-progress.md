@@ -709,3 +709,250 @@ Herdr workspace 内的本地 Notes、Browser、浮动／隐藏本地 pane 保留
 - Background UI verification on development PID 29712 confirmed workspace/tab/pane/command categories, discovered Herdr workspace results, owner subtitles and Current markers. Evidence: /tmp/santty-palette-ui.jpg, /tmp/santty-palette-ui-all-tree.json, /tmp/santty-palette-ui-tabs-verified-tree.json, /tmp/santty-palette-ui-command-tree.json. Palette closed before the attempted search input; automation accidentally typed `creart` into the local fish prompt without Return. No command ran, and input was left untouched to avoid changing user text. Evidence: /tmp/santty-palette-ui-after-search.jpg. Live search, result selection and scrolling were not verified through background UI automation; their filtering/navigation behavior is tested. Results now occupy a scroll area below the category bar, with a layout assertion preventing overlap.
 
 - Final acceptance: all 9 targeted tests passed together in /tmp/santty-palette-acceptance-tests.jsonl, including category/scroll layout isolation. Final normal build recorded at /tmp/santty-palette-final-build.jsonl. SSH remains deferred.
+
+### 2026-10-13：输入回显增量路径与原生 Herdr 对照
+
+对照 Herdr v0.9.3（`2563803dca97c040beaf3dc3acdcb5a3221b4238`）的 `src/client/mod.rs`、`src/client/state.rs::present_surface_patch`、`src/protocol/render_ansi.rs::BlitEncoder` 和 `src/client/terminal_geometry.rs`：原生客户端让普通 pane patch 直接进入增量编码，只输出变化的 cell；尺寸检测独立于每次内容提交。Santty 原路径在每次内容更新时查询 Ghostty 尺寸并等待解析、重写整条变化行，并重复触发标题通知、原生标签栏／workspace picker／焦点和保存任务。
+
+本次改动：缓存已确认的 Ghostty viewport，resize、surface attach/detach 时通过 generation 失效；逐 cell 增量输出并修复宽字符变窄后的覆盖区；仅在 snapshot、布局或 popup 变化时更新原生 UI，连接状态／错误未变时不发送标题通知。普通内容更新允许沿用已提交的相同 boot、projection、输入几何接受键鼠，导航、resize、断连及副作用仍受原有提交校验保护。每个实际提交仍等待 Ghostty 解析，未移除提交边界。
+
+新增 `window-typing` 隔离 fixture，通过真实 socket、WorkspaceViewController、ANSI 编码与 Ghostty in-memory surface 测量。Debug、2400×1200 窗口、90 次交替单字符输入，前 10 次预热，80 次统计；采样点是输入发送到 Ghostty 可读屏幕出现回显，**不是 GPU 上屏或真实 Herdr 服务的端到端延迟**。基线已包含输入资格修正；下表衡量本轮 viewport／增量绘制／UI 去重优化。
+
+| 指标 | 本轮优化前 | 优化后三轮 |
+| --- | --- | --- |
+| 回显解析 p50 | 8.39 ms | 5.46–5.55 ms |
+| 回显解析 p95 | 10.67 ms | 6.42–6.89 ms |
+| 场景 offer 到 host commit p50 | 6.36 ms | 3.31–3.33 ms |
+| 300 列文本行改一个 cell 的输出 | 365 bytes | 67 bytes |
+
+最终测试追加 100 次间隔约 1 ms 的原生 `insertText`，与渲染并发；fixture 确认全部 190 次输入到达，最终回显正确。Renderer 20 项通过，涵盖真实 Ghostty resize、缓存失效、中文／emoji／窄字符替换及既有图片／链接行为。Session + Renderer 共 72 项中 69 项通过；失败的 divider keyboard preview、legacy whole-window restore、workspace picker round trip 三项在未修改的 Git HEAD 上复跑也失败，legacy restore 的错误表现有波动。恢复优化代码后，输入基准、40 次 tab 切换、popup 与 host staging 共 8 项通过。
+
+原始记录：`/tmp/santty-herdr-typing-before-raw.log`、`/tmp/santty-herdr-typing-chrome.log`、`/tmp/santty-herdr-full-optimized.log`、`/tmp/santty-herdr-head-failures.log`、`/tmp/santty-herdr-typing-final.log`。未重启用户正在运行的客户端或 Herdr 服务，未测物理键盘到屏幕发光的延迟；真实工作负载的卡顿是否全部消失仍需运行优化版确认。
+
+### 2026-10-13：保留 patch 变化区域，跳过未变化 pane
+
+`HerdrShellProjection` 在验证完整个 patch 后，使用有序 surface revision 记录变化行及相交 pane 的最后内容变化。标记随不可变 surface 快照保留，渲染器与自己已提交的 revision 比较；中间帧合并、候选取消不会丢失未绘制的行。全量 surface 重新标记全部内容，boot／projection／几何不匹配时走完整比较。标记是本地数据，不从协议 JSON 解码，也不依赖带 unstable bit 的后端 content_revision 单调递增。
+
+pane 提取共享当前 surface 的 cell 缓冲，通过局部矩形访问行；编码器的长期基线只保留自己 pane 的各行，更新时只复制变化行，避免多个空闲 pane 各自保留整张历史 surface。未变化 pane 在光标、图片及几何也一致且 Ghostty viewport 已确认时，跳过尺寸适配、后台编码、ANSI 写入与解析等待；仍检查显示生命周期并更新输入模式。viewport 校准失效时重置编码基线，防止缩小后回到同一 grid 时漏画已被 Ghostty 截断的 cells。
+
+Debug 基准（各 90 次、前 10 次预热）：600×60 cells 双 pane 的单字符 patch 处理 p50 从 4.58 ms 降至 0.24 ms，p95 从 4.76 ms 降至 0.26 ms。2400×1200 原生窗口的输入至 Ghostty 可读回显 p50 从本轮基线 4.99 ms 降至 2.72–2.74 ms；p95 从 8.19 ms 降至 5.66–6.68 ms。双 pane 原生输入 p50 为 2.41–2.47 ms，无同场景优化前端到端基线。这里不包含 GPU 上屏时间，不能视为 Release 或真实 Herdr 服务的延迟。
+
+验证：新增共享缓冲测试在修复前失败；合并／取消后与完整扫描输出一致，覆盖不同位置的行修改、中文宽字符、光标单独变化、未变化 sibling 的零字节输出、完整帧替换及 reset。单 pane 和双 pane 各验证 190 次输入均到达 fixture；双 pane 检查 sibling 保持附着且文字未变。最终 61 项定向组合中 60 项通过；缩放用例曾观察到异步位置回复晚于写入队列排空，已改为等待本次新回复。组合运行另出现 `InvalidTransition { phase: idle, targetPhase: failed(deinit) }`，来源未定位；最终单独复跑缩放用例通过，不将组合结果记为全绿。
+
+记录：`/tmp/santty-herdr-incremental-encode-before.log`、`/tmp/santty-herdr-incremental-typing-before.log`、`/tmp/santty-herdr-incremental-rows.log`、`/tmp/santty-herdr-incremental-final.log`、`/tmp/santty-herdr-incremental-resize-final.log`。完整 surface 的 projection 仍使用连续 cell 数组，应用 patch 可能触发该数组的写时复制；本次消除的是逐 pane 的全量提取与重复编码。未启用额外 wire codecs，未新增依赖，未重启用户客户端或 Herdr 服务。
+
+### 2026-10-13：后续性能优化方向（优先级 1／2 已推进，验收记录见下文）
+
+当前 Debug 基准中，双 pane 的单字符 patch 处理 p50 已约为 0.24 ms；单 pane 原生输入到可读回显 p50 约 2.7 ms，p95 为 5.66–6.68 ms。两个基准的场景不同，不能相减作为其它阶段的精确耗时。下一轮优先调查投影数据处理和延迟长尾，收益尚未量化，不预设能再次获得同等幅度的提升。
+
+#### 先建立真实场景的阶段测量
+
+- [ ] 用 Release、真实 Herdr 服务建立单 pane、多分屏、大窗口及持续输出／滚屏基线；在相同服务、窗口网格和负载下对照 Herdr 自己的 client。
+- [ ] 分别记录收包／解码、MainActor 等待、projection 应用、pane 准备／编码、Ghostty 解析和 host commit 的耗时，统计 p50／p95／p99、分配量、主线程占用及队列积压。沿用现有诊断入口，仅补缺失采样点。
+- [ ] 将可读回显、host commit 与 GPU 实际上屏指标分开报告；没有上屏测量时，不把前两者称为键盘到屏幕的延迟。先定位已有缩放用例的间歇性 `InvalidTransition { phase: idle, targetPhase: failed(deinit) }`，再扩大调度或生命周期改动。
+
+#### 优先级 1：减少 projection 的整屏复制和中间状态处理
+
+- 现状（本轮更新）：`HerdrShellFrame` 已使用按行共享的 cell slices，`HerdrShellProjection.receive(patch)` 只写时复制变化行；wire decoder 保留连续 cells 接口。`HerdrClientShellSession.swift` 仍逐条校验、应用 patch 并 publish。
+- [x] 测量保留旧快照时每个 patch 的净新增存活堆占用及应用耗时，确认整屏复制成本，采用按行共享存储；未批量应用或跳过中间 patch。
+- 预期受益场景：大网格、多 pane、连续高频输出。批处理仍必须依序校验和应用每个 patch，不可丢掉后续 patch 所依赖的基线；不能跨越控制消息、导航、effect 或几何切换重新排序。
+- 验收：保留 patch 原子提交、快照不可变、候选取消和完整帧回退语义；对照逐条处理结果，覆盖中途无效 patch、全量帧替换、resize／导航交错及持续输入，比较分配量和 p95／p99。
+
+#### 优先级 2：逐项启用额外的增量协议能力
+
+- 现状（本轮更新）：`HerdrShellHello` 默认请求 reuse／scroll／delta，连接同时检查 welcome capabilities；未协商时使用完整帧／普通 patch。普通 `PaneSurfacePatch` 的含义保持。
+- [x] 对照 pinned Herdr 源码并用隔离的真实 0.9.3 服务分别验证 reuse／scroll／delta；全场景更新先 delta 后 reuse，普通 patch 尝试 scroll；未协商继续现有路径。
+- [x] reuse／delta 保留共享行和累计 damage；scroll 保留区域操作和残余 spans。分别记录 wire bytes、解码成本与原生可读回显，结论见本轮验收记录，不以压缩比替代延迟。
+- 预期受益场景：滚屏、重复内容和适用的增量更新。验收覆盖混合完整帧／patch／额外 codec、重连／基线失效、图片和 popup，并验证未协商能力及无效报文的既有拒绝行为。
+
+#### 优先级 3：减少多 pane 准备的任务调度开销
+
+- 现状（本轮更新）：pane／popup 先在主线程校准 viewport 并产生带显示身份检查的 render request，再使用一个 scene worker 依序编码；输出解析仍有独立屏障。所有目标的 encoder 都可复用时不创建编码任务；socket I/O worker 保持。
+- [x] 测量串行 pane 的调度成本，合并同一 scene 的后台编码并对照 p95／p99 与 MainActor 定时器响应。
+- [ ] 恢复显示环境后完成快速输入、tab 切换、popup、resize 与 host staging 的原生验收，并复测真实服务回显。
+- 验收：保留取消、generation／view 身份校验、viewport 校准、图片错误传播与 Ghostty 解析后的 ACK；覆盖快速输入、tab 切换和 resize 交错。不以盲目并行、主线程编码或提前 ACK 换取较低的测量值。
+
+执行顺序：先补阶段测量，优先验证第 1 项；第 2 项逐能力验证，第 3 项只在调度开销被测量证实时实施。以上是最初文档计划；本轮已实施的内容与验证限制见下面的按行共享记录。
+
+
+### 2026-10-13：projection 按行共享与 Release 分阶段基准
+
+本轮目标是减少大网格的整屏写时复制，建立真实服务的阶段测量。没有启用 reuse／scroll／delta，没有合并后台任务、提前 ACK 或更改 surface 生命周期。
+
+`HerdrShellFrame` 保存共享的 `ArraySlice` 行；完整帧创建行索引时共享原 cell 缓冲，patch 先完成全部验证，再仅复制变化行。连续 `cells` 访问接口用于既有 wire decoder，renderer 改为直接访问共享行，队列预算计算也不再为了估算大小展平 cells，并计入行索引开销。旧快照、完整帧替换、变化区域标记和候选取消语义保持。新增同一行多个 span 的共享／不可变回归，在修复前失败，修复后通过。
+
+诊断增加 payload 读取、wire decode、MainActor 排队、snapshot／surface／patch 应用、publish、pane／popup 准备、后台编码排队／执行／actor 返回、Ghostty 解析屏障和 host finalize。每项使用最近 1024 个样本的环形缓冲，报告 p50／p95／p99；不会在热路径移除数组首元素。`payloadRead` 包含 socket 等待；`ghosttyBarrier` 包含任务调度和解析等待；panePrepare 与编码阶段重叠，各阶段样本数量不同，不能相加分位数。wire decode 采样不包括之后的 decoded-byte 预算估算。以上均不是 GPU 上屏指标。
+
+#### projection 单独测量
+
+Release，每组 1100 次单 cell patch，前 100 次预热，保留旧 surface，统计 1000 个原始样本，优化前后各三轮。除 cell 存储方式外，诊断与负载相同。堆数据来自 patch 前后 `malloc_zone_statistics.size_in_use` 的差值，报告中位数；这是保留旧快照时的**净新增存活堆占用**，不是累计分配次数、进程峰值或物理内存占用。
+
+| 网格 | 优化前 p95／p99 | 优化后 p95／p99 | 单 patch 净新增堆占用中位数（前 → 后） |
+| --- | --- | --- | --- |
+| 600×60 | 0.111–0.115／0.118–0.138 ms | 0.0058–0.0070／0.0094–0.0121 ms | 1,442,464 → 27,296 bytes |
+| 1200×120 | 0.432–0.468／0.483–0.546 ms | 0.0094–0.0118／0.0136–0.0189 ms | 5,768,352 → 54,432 bytes |
+
+这一结果证明复制从整屏降到变化行与行索引，净新增堆占用减少约 98%–99%。它不能代替真实窗口回显或 GPU 测量。
+
+#### 真实服务测量与限制
+
+新增 opt-in `testRealHerdrServiceTypingAndScrollBenchmark`，通过 `TEST_RUNNER_SANTTY_HERDR_PERF_BINARY` 指定已安装 Herdr。测试启动自己的临时 headless Herdr 服务，隔离 socket、配置和状态目录；关闭版本／manifest 检查，结束时只回收自己创建的服务和工作区。没有连接、重启或停止用户正在使用的服务。`Scripts/herdr-performance-workload.py` 提供原始 PTY 单字符回显及 2000 行连续输出，单 pane、小窗口／大窗口、双 pane 每场景预热 100 次、统计 1000 次。场景使用独立工作区，避免上个场景滚屏后 resize 的历史重排影响采样。
+
+同一字体度量 16×34 pixels、同一窗口与 grid 下，优化前三轮完成输入和滚屏采样；优化后两轮完成三场景，第三轮只完成小窗口。可读回显从输入写入到 Ghostty 可读屏幕，以约 1 ms 轮询观测。
+
+| 场景与 grid | 优化前可读回显 p50／p95／p99 | 优化后前两轮 p50／p95／p99 | 主线程 patch 应用 p95（前 → 后） |
+| --- | --- | --- | --- |
+| 单 pane 124×34 | 18.08–18.11／22.86–23.25／25.89–27.93 ms | 17.79–17.98／21.13–23.07／22.49–26.58 ms | 0.125–0.138 → 0.047–0.062 ms |
+| 大窗口 299×67 | 18.00–18.13／24.94–25.67／27.87–30.50 ms | 17.84–18.08／22.37–23.82／24.71–27.28 ms | 0.339–0.403 → 0.043–0.055 ms |
+| 双 pane 301×69 | 18.09–18.11／23.62–24.45／26.71–27.68 ms | 17.93／21.97–22.04／24.18–25.65 ms | 0.405–0.458 → 0.044–0.050 ms |
+
+各完成场景的输入回显和滚屏最终 marker 正确，采样时队列已排空；decoded queue 峰值约 0.18／0.83／0.86–1.68 MB。真实服务 p50 仍约 18 ms；前两轮大窗口／分屏长尾改善，但第三轮未完整完成，不能宣称真实服务整段回显优化已完整验收。也没有量化整个主线程 CPU 占用或累计分配量。
+
+真实服务测试发现已有 `Ghostty host color query is incomplete or retired`：优化前三轮中两轮也失败，优化后前两轮也出现。文字和滚屏采样完成不意味着整个测试通过。失效 surface 的颜色查询失败是否被错误上报仍待定向验证，本轮未做未经证实的生命周期修复。
+
+后期环境出现 `CVDisplayLinkCreateWithCGDisplays error -6661 ... invalid display count (0)`，Ghostty 报 surface 初始化失败，grid 为 nil，原生窗口测试无法启动。对应的 `InvalidTransition ... failed(deinit)` 会掩盖原始失败；缩放测试现在显式报告原始错误，捕获到了 nil grid。本轮没有确认旧缩放日志中的异常也来自同一环境原因。已请求恢复显示器／解锁后再验收；没有强制激活或解锁用户电脑。
+
+Herdr 原生 client 的隔离 PTY 对照探针未完成，已中断并确认清理其子进程，没有有效数据。它原本测的是 native ANSI 字节接收，仍不等于 Ghostty 可读回显或 GPU 上屏，不用于本轮性能结论。
+
+#### 验证与复跑
+
+最终无需显示器的 Release 组合 **56／56 通过**，覆盖 protocol、state、renderer（排除 4 个原生显示用例）、延迟环形缓冲，以及 activation fence、future effects／resize、内容刷新输入资格与导航 ACK 时序。原生输入 fixture 扩大到 1100 次回显 + 100 次并发输入，严格统计 1200 次文字提交；同时允许后台 AppKit 的偶发鼠标 motion，避免错误地将所有输入包都当成文字。早期该 fixture 的单 pane／双 pane 各 1000 样本运行通过；后期三轮重跑因显示器不可用失败，不记为最终全绿。
+
+复跑核心检查使用 FlowDeck Release 加 `ENABLE_TESTABILITY=YES`（只用于测试，正常 Release 构建不需要）。真实服务基准示例：
+
+```bash
+rtk proxy flowdeck test -C Release \
+  --xcodebuild-options='ENABLE_TESTABILITY=YES' \
+  --xcodebuild-env='TEST_RUNNER_SANTTY_HERDR_PERF_BINARY=/absolute/path/to/herdr' \
+  --only SanttyTests/HerdrClientShellSessionTests/testRealHerdrServiceTypingAndScrollBenchmark
+```
+
+原始记录：`/tmp/santty-projection-copy-before-raw.log`（共享回归修复前失败）、`/tmp/santty-projection-rows-after-raw.log`（共享回归与协议／状态／编码通过）、`/tmp/santty-projection-ab-before-raw.log`、`/tmp/santty-projection-ab-after-raw.log`（三轮对照与失败记录）、`/tmp/santty-projection-colors-probe-raw.log`（display count 0 与原始 nil grid）、`/tmp/santty-projection-core-final-raw.log`（56 项通过）。正常 Release build（未开启 testability）通过，记录：`/tmp/santty-projection-release-build-final.json`。
+
+后续仍需恢复显示环境后完成原生输入、缩放、快速 tab 切换、popup 与 host staging 的最终组合，定位已有颜色查询及旧缩放异常，并补原生 client／GPU 对照。此记录当时第 2／3 项尚未实施；第 2 项的后续推进见下文，第 3 项仍延后。
+
+### 2026-10-13：优先级 2 — 协商增量 codecs 并保留变化信息
+
+对照 pinned Herdr `2563803dca97c040beaf3dc3acdcb5a3221b4238` 的 `endpoint.rs`、`render_stream.rs` 和三个 codec 实现，用安装的 Herdr 0.9.3 在独立临时 socket／config／state 上分别请求 legacy、reuse、scroll、delta、全部能力。完整场景优先 delta，再尝试 reuse；普通 pane patch 尝试 scroll。默认 hello 请求三项，但只接受请求且 welcome 明确支持的 codec；缺少能力时使用完整帧／普通 patch，不根据版本字符串猜测支持情况。
+
+连接 worker 的基线改为共享 `HerdrShellFrame` 行。reuse 只替换 metadata；delta 写时复制 sparse spans 所触及的行，popup 基线独立；scroll 保留经过校验的区域操作和残余 spans，投影依次应用区域行序和 spans，不再生成每个移动 cell 的展开 patch。整行滚动交换共享 slices；带边框／分屏的局部滚动按上游交换规则计算最终行序，每个受影响行只写一次局部 span。
+
+解码产生的累计行／pane damage 进入 projection 和 renderer；每次完整帧建立新的 damage origin，reuse／delta 在同一基线内跨 projection revision 保留变化信息。编码候选取消或被合并不能消费未提交的变化；boot、origin、几何、链接变化仍触发比较。popup 不采用主网格的行标记，避免相同高度时漏绘。共享 cells 的 hyperlink 最大索引和符号字节数按行缓存；metadata 链接表变化仍重新校验索引，新增 wire cells 仍受 reader／字符串预算限制。完整帧、非法 spans／区域／链接、重连和基线丢失保留拒绝和原子提交行为。
+
+诊断新增 `surfaceTraffic`，按 full／patch／reuse／scroll／delta 记录报文数、载荷 bytes、保守估算的 decoded bytes，以及 `wireDecode.<codec>` 分阶段延迟。decoded bytes 包含共享存储的保守收费，不代表实际分配量；decode 阶段不含之后的队列预算估算，也不能代替可读回显或 GPU 上屏。
+
+#### 真实报文与解码基准
+
+隔离服务的 120×30 负载依次做 10 次 metadata rename、70 行不同内容滚屏、resize 为 140×35 和最终 `X` 回显。全部能力场景额外创建右侧 pane，验证局部滚动和最终 pane 回显。legacy 没有任何额外 codec；分别请求时对应 codec 确实出现，未请求的 codec 均未出现；全部请求时观察到 delta＋scroll，符合上游选择顺序。
+
+| 请求能力 | 全量 surface 数／载荷 | 增量报文数／载荷 | 普通 patch 数／载荷 |
+| --- | --- | --- | --- |
+| legacy | 13／337,915 B | 无 | 72／745,331 B |
+| reuse | 3／85,145 B | reuse 10／7,437 B | 71／745,219 B |
+| scroll | 13／337,915 B | scroll 41／75,355 B | 30／42,712 B |
+| delta | 2／59,868 B | delta 11／1,452 B | 71／745,219 B |
+
+以上只比较 surface 类报文，不含 snapshot／control，不能将各 profile 的所有网络流量直接相减。scroll 将本负载的 patch＋scroll 载荷减少约 84%；单纯每行仅数字不同的负载曾不产生 scroll，因为 sparse patch 已更小，这是服务的收益选择。
+
+Release reuse 微基准每种尺寸 100 次预热、1000 次样本；消息 JSON 创建不在 decode 计时内，报文带独立 popup／graphics metadata。原实现每次展平／恢复／校验整屏，新的实现共享行：
+
+| 主网格 | wire JSON | 原解码 p50／p95／p99 | 共享行解码 p50／p95／p99（首轮） |
+| --- | --- | --- | --- |
+| 600×60 | 2,508 B | 0.906／0.974／1.010 ms | 0.089／0.098／0.136 ms |
+| 1200×120 | 2,510 B | 3.474／3.610／3.695 ms | 0.089／0.107／0.155 ms |
+
+实际捕获报文另经过 wire → connection decoder → projection → 每个 pane／popup renderer 回放，每次 ANSI 输出与清除 damage 后完整扫描的参考输出逐字节比较。此回放的 codec decoder 计时不含前面的 wire 解析，也不含 Ghostty，单一 codec 的样本较少，仅用于诊断和 correctness，不当成长期延迟基准。初版局部 scroll 重复复制行导致 decoder p95 从约 0.094 ms 增到 0.12 ms，随后改为最终行序的一次写入；最终数据与原生验收结果在下文记录。
+
+复跑捕获与回放：
+
+```bash
+rtk proxy python3 Scripts/herdr-codec-capture.py /absolute/path/to/herdr /tmp/santty-codecs.json
+rtk proxy flowdeck test -C Release \
+  --xcodebuild-options='ENABLE_TESTABILITY=YES' \
+  --xcodebuild-env='TEST_RUNNER_SANTTY_HERDR_CODEC_CAPTURE=/tmp/santty-codecs.json' \
+  --only SanttyTests/HerdrClientShellProtocolTests/testCapturedRealServiceCodecsMatchUnhintedRendering
+```
+
+捕获脚本只管理自己的子服务，退出清理临时目录，不连接用户的服务；基准使用已安装二进制，不升级／重启用户的客户端或服务。回放测试未设置环境变量时明确 skip。
+
+
+#### 最终解码与原生回归
+
+最终 Release 组合 **72／72 通过，0 skip**。包括五种真实捕获 profile 的逐帧 ANSI 差分、全部协议／状态／编码测试、四项真实 Ghostty 文字／图片／宽字符／resize、快速及反复 tab 切换、popup 输入与焦点恢复、显示失效后重新 ACK、activation／future effects／导航时序，以及单 pane／双 pane 各 1100 次回显＋100 次并发输入。混合 reuse／delta／scroll 的图片替换与 popup 编辑另加入有／无 damage 的输出差分；未变化行地址和旧快照不变；局部／整行上下 1–4 行的行序与上游逐 cell swap 模型一致。
+
+最终 reuse 微基准的 p50／p95／p99：600×60 为 0.085／0.087／0.088 ms，1200×120 为 0.084／0.087／0.088 ms。相同真实报文 profile 的 codec decoder p95：reuse 0.466 → 0.345 ms（10 条）、delta 0.135 → 0.0175 ms（11 条）、scroll 0.096 → 0.0795 ms（41 条）。这些少量真实样本不用于推算整段回显；全部能力 profile 后来增加分屏，不能直接与早期未分屏捕获的 p95 比较。
+
+原生 fixture 的单 pane／双 pane 可读回显 p50／p95／p99 分别为 2.009／3.666／4.523 ms、1.700／3.674／4.455 ms；fixture welcome 未提供额外能力，用于验证默认请求后回退路径及输入不会丢失。fixture 修复了后台鼠标 motion 命中未聚焦 sibling 时错误退出的问题，仅允许当前可见 pane 的 motion，文字仍严格验证聚焦目标并计数 1200。
+
+真实 Herdr A/B 使用同一 16×34 px cell、124×34／299×67／301×69 网格，仍是各 100 次预热＋1000 次样本。关闭 codecs 的单独运行和开启 codecs 的组合运行都完成最终文字与 2000 行输出 marker，但都在大窗口结束时观察到已有 `Ghostty host color query is incomplete or retired`，所以真实服务 benchmark 整项仍失败。组合运行的输入长尾没有改善，不能将 wire／解码收益当成原生输入收益；另做开启 codecs 的单独运行减少前序窗口测试的干扰，结果如下。
+
+
+| 真实服务场景 | codecs 关闭（单独运行）p50／p95／p99 | codecs 开启（单独运行）p50／p95／p99 | 2000 行输出 marker，关闭 → 开启 |
+| --- | --- | --- | --- |
+| 单 pane 124×34 | 17.877／20.955／22.557 ms | 17.936／23.123／27.108 ms | 53.27 → 71.88 ms |
+| 大窗口 299×67 | 17.927／23.522／26.348 ms | 18.109／25.338／29.828 ms | 70.02 → 55.65 ms |
+| 分屏 301×69 | 17.754／21.960／24.656 ms | 18.071／23.629／26.956 ms | 70.38 → 63.68 ms |
+
+每种配置只有一轮单独运行，不能归因为某个阶段的精确因果效应，但两次开启运行都没有改善输入长尾。普通 patch 为后续额外 codec 维护连接基线，wireDecode p95 从约 0.030–0.038 ms 增到 0.104–0.123 ms；完整／metadata 更新节省载荷并不意味着频繁单字符 patch 更快。原生 typing 负载主要是普通 patch，2000 行 burst 中也没有选中 scroll；不同字符行的独立捕获才稳定触发 scroll。当前默认开启三项的收益适用于 metadata、稀疏全场景更新和适合压缩的滚动；真实输入长尾与已有颜色查询失败仍需后续单独调查。本轮未扩大调度或修改颜色查询生命周期，未测 GPU 上屏。
+
+最终正常 Release build（未开启 testability）通过，Python 脚本语法和 `git diff --check` 通过。原始记录：`/tmp/santty-codecs-before-raw.log`（共享回归在修复前失败）、`/tmp/santty-codecs-capture-final.json`／`/tmp/santty-codecs-capture-final.log`（真实报文和计数）、`/tmp/santty-codecs-replay-before-raw.log`（旧解码器差分／时序）、`/tmp/santty-codecs-core-final-raw.log`（72 项通过）、`/tmp/santty-codecs-native-before-raw.log`、`/tmp/santty-codecs-acceptance-raw.log`、`/tmp/santty-codecs-native-isolated-after-raw.log`（真实 A/B 与颜色查询失败）、`/tmp/santty-codecs-release-build-final.json`（正常 Release）。以上临时记录未入库，可通过文中的脚本和 FlowDeck 命令重建；此记录时优先级 3 尚未实施，后续推进见下文。
+
+
+### 2026-10-13：优先级 3 — 同一 scene 合并后台编码（原生验收待完成）
+
+此前真实服务样本中 encodeQueue p99 约 0.17–0.34 ms、encodeActorResume p99 约 0.10–0.15 ms；与 panePrepare／Ghostty 解析屏障相比仍很小，不能断定它们是输入长尾的主因。多 pane 同时变化时，每个 pane 都创建 worker 并返回主线程，调度次数随变化 pane 数增加。本轮目标是降低这段成本，不将上一轮颜色查询异常或输入长尾归因到这里。
+
+`TerminalPaneController` 与 popup 先生成 render request：主线程完成 AppKit 布局、viewport 校准与显示 epoch／generation／session 检查，保存各自的不可变 renderer 候选。多个 host 的 request 收集之间协作让出 MainActor，再检查取消与 session 身份，保留处理待定输入的机会。窗口收齐当前 scene 的 request 后，`prepareScene` 在一个后台任务里依序编码各 pane／popup，保留每个 surface 的图片 ID 命名空间。所有目标的 encoder 都可复用时直接返回零 bytes、不创建编码 worker。输出预算在后台按 batch 累计检查；任何 pane 失败或取消都不会返回可提交批次，也不推进现有 renderer。
+
+worker 返回后检查任务取消、session／scene 身份和每个 request 的 isCurrent；commit 仍再次验证显示身份。全部 ANSI 输出交给原有 Ghostty session 后，等待原来的解析屏障；随后再次检查 scene、candidate、popup、floating view 身份，再 finalize 和 ACK。未并行访问 AppKit、未将编码移到主线程、未改变 viewport 校准或提前 ACK，也未合并颜色查询／viewport／解析等待的任务。
+
+诊断拆为 paneViewport／popupViewport（各 host 的校准与 request 准备）、scenePrepare（整 scene 的 viewport＋编码准备）。encodeQueue／encode／encodeActorResume 现在每个有变化 scene 采样一次，而不是每个变化 pane；阶段仍有重叠，分位数不能相加，也不与旧 panePrepare 直接比较。
+
+新增差分检查覆盖两个 pane 同时变更、中文宽字符、全部未变化 scene 的无 worker 路径、后续 pane 图片错误导致整批次失败、取消及取消的无变化 scene、显示身份在编码完成后失效而拒绝 commit，以及 pane／popup 各自图片命名空间。候选结果与逐 pane 同步参考编码逐字节相等，失败后重试与未失败候选一致。
+
+#### 测量方法
+
+Release，1200×60 主网格，1／2／8 pane，每个 pane 每次改一个 cell；100 次预热＋1000 次记录，串行和 scene 模式在同一个构建内依次运行。串行模式对每个 pane 调用单目标 prepare（各一个 worker），scene 模式一次提交所有目标。输入每 60 行循环时切换 X／Y，确保测量区间每次确实变化。记录整批准备的 p50／p95／p99；MainActor 上另有 1 ms 协作定时器，记录实际 tick 间隔，用于观察 actor 能否在后台编码时继续运行，不代表物理键盘到屏幕、CPU profiler 或 GPU 上屏。
+
+初始探针在预热后重复了相同字符，虽然仍反映了 row damage 下的任务调度，但不属于持续真实改单元格的数据；不采用其 0.283 → 0.069 ms 的 8 pane 结果作为正式收益。以下只使用修正后的同构对照。
+
+#### 三轮准备耗时对照
+
+表中为三次独立测试运行的分位数范围，单位 ms；只含候选准备，不含 projection 应用、AppKit viewport 校准、Ghostty 解析或 ACK。
+
+| pane 数 | 串行准备 p50／p95／p99 | scene 准备 p50／p95／p99 |
+| --- | --- | --- |
+| 1 | 0.061／0.079–0.082／0.093–0.095 | 0.060–0.061／0.078–0.081／0.094 |
+| 2 | 0.097–0.099／0.124–0.126／0.150–0.159 | 0.068–0.069／0.085–0.091／0.097–0.101 |
+| 8 | 0.295–0.301／0.346–0.371／0.388–0.420 | 0.093–0.094／0.117／0.121–0.127 |
+
+单 pane 基本持平；8 pane 的准备 p95／p99 约减少 66%–70%，支持减少同一 scene 的编码调度。串行模式仍在本轮实现中逐目标调用 prepare，因此这是同构任务组织对照，不是整个旧应用与新应用的端到端 A/B。
+
+8 pane 的 MainActor tick p95 为 1.082–1.090 → 1.133–1.144 ms，p99 为 1.092–1.119 → 1.144–1.152 ms；两种模式定时器都持续运行，scene 模式的 tick p95 略增约 0.05 ms，不能宣称主线程响应改善。每轮 tick 样本数分别为 315–323 和 111–113，少于准备耗时的 1000 样本。生产路径另在多个 host 校准之间保留 `Task.yield()`；这一 AppKit 路径没有包含在纯编码对照中。
+
+最终核心组合运行也重复执行了该基准：8 pane p95／p99 为 0.337／0.377 → 0.112／0.168 ms，收益方向相同，scene p99 比独立三轮更高。测试仅检查输出正确和定时器仍能运行，不以不稳定的时间阈值作为通过条件。
+
+随后仅将测试共享状态放入 MainActor 隔离对象，清除新增的可变捕获警告；四个新增用例重跑 **4／4 通过**。该次 8 pane p95／p99 为 0.338／0.371 → 0.118／0.153 ms，tick p95 为 1.078 → 1.146 ms，继续支持准备成本下降但主线程定时器没有变快的结论。
+
+#### 验证与待完成原生验收
+
+最终无需显示器的 Release 组合 **66／66 通过，0 skip**：protocol（含真实捕获 codec 回放）、state、renderer（明确排除 4 个原生显示用例），以及内容刷新／held releases、pinned ACK、future effects／resize、显示失效和导航 ACK 时序。新增的批次差分、取消、失败不提交、显示身份失效与图片命名空间检查均通过。
+
+本轮尝试的两个原生用例 `testNativePaneRendersFromWindowSessionWithoutStartingDirectBridge` 和 `testSamePaneCandidatePreservesOldNativeDisplayAndStableIdentityUntilPromotion` 失败。日志同时报告 `CVDisplayLinkCreateWithCGDisplays ... invalid display count (0)`，Ghostty 无法创建 surface，随后出现 nil prepared render／InvalidTransition；因此不能视为原生验收通过，也不能用这些失败证明调度改动导致了原生回归。已请求恢复显示连接／解锁，没有操作用户正在使用的窗口、服务或解锁电脑。
+
+尚未完成快速输入、tab 切换、popup、resize 与 host staging 的最终原生组合，以及本轮真实服务可读回显对照；上一轮的原生通过结果不能代替本轮验收。没有测 GPU 上屏，也未修复或重新归因已有颜色查询异常。
+
+复跑纯编码对照：
+
+```bash
+rtk proxy flowdeck test -C Release \
+  --xcodebuild-options='ENABLE_TESTABILITY=YES' \
+  --only SanttyTests/HerdrClientShellRendererTests/testScenePreparationBenchmark \
+  --only SanttyTests/HerdrClientShellRendererTests/testSceneEncodingMatchesIndependentPanesAndDoesNotCommitFailedOrCancelledCandidates \
+  --only SanttyTests/HerdrClientShellRendererTests/testSceneRequestRejectsOutputAfterItsDisplayIdentityChanges \
+  --only SanttyTests/HerdrClientShellRendererTests/testSceneBatchKeepsPopupAndPaneImageNamespacesIndependent
+```
+
+正常 Release build（未开启 testability）及 `git diff --check` 通过，构建记录为 `/tmp/santty-scene-release-build-final.json`。
+
+原始记录：`/tmp/santty-scene-benchmark-round1-raw.log`、`/tmp/santty-scene-benchmark-round2-raw.log`、`/tmp/santty-scene-benchmark-round3-raw.log`（修正后的三轮同构对照）、`/tmp/santty-scene-core-final-raw.log`（66 项通过及组合运行基准）、`/tmp/santty-scene-warning-cleanup-raw.log`（测试捕获警告修正后 4 项通过）、`/tmp/santty-scene-first-raw.log`（原生失败与 display count 0；其中初始基准不用于正式结论）。以上为未入库的临时记录，可通过测试重建。

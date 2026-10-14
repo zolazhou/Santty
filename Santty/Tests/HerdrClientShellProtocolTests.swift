@@ -66,6 +66,145 @@ final class HerdrClientShellProtocolTests: XCTestCase {
         .control("endpoint.surface-delta.v1", bytes.base64EncodedString().replacingOccurrences(of: "=", with: ""))
     }
 
+    func testReuseAndDeltaShareUnchangedRowsAcrossProjectionChanges() throws {
+        var decoder = try reuseDecoder(delta: true)
+        let base = try scrollBaseline()
+        _ = try decoder.decode(.surface(base))
+        guard case .surface(let delta) = try decoder.decode(deltaMessage(deltaBytes(rows: [(0, 0, ["X"])]))) else {
+            return XCTFail("Missing delta")
+        }
+        XCTAssertEqual(base.frame.cells(in: 1).withUnsafeBufferPointer { $0.baseAddress },
+                       delta.frame.cells(in: 1).withUnsafeBufferPointer { $0.baseAddress })
+        XCTAssertEqual(delta.damage?.rows, [65537, 65536, 65536])
+        var json = try surfaceReuseJSON()
+        json["base_surface_revision"] = 65537
+        var metadata = try XCTUnwrap(json["surface"] as? [String: Any])
+        metadata["surface_revision"] = 65538; metadata["projection_revision"] = 253
+        var frame = try XCTUnwrap(metadata["frame"] as? [String: Any]); frame["height"] = 3
+        metadata["frame"] = frame; json["surface"] = metadata
+        guard case .surface(let reused) = try decoder.decode(reuseMessage(json)) else { return XCTFail("Missing reuse") }
+        XCTAssertEqual(delta.frame.cells(in: 0).withUnsafeBufferPointer { $0.baseAddress },
+                       reused.frame.cells(in: 0).withUnsafeBufferPointer { $0.baseAddress })
+        XCTAssertEqual(reused.damage?.rows, delta.damage?.rows)
+        XCTAssertEqual(base.frame.cells.first?.symbol, "a")
+    }
+
+    func testCapturedRealServiceCodecsMatchUnhintedRendering() throws {
+        guard let path = ProcessInfo.processInfo.environment["SANTTY_HERDR_CODEC_CAPTURE"] else {
+            throw XCTSkip("Run Scripts/herdr-codec-capture.py, then set TEST_RUNNER_SANTTY_HERDR_CODEC_CAPTURE")
+        }
+        struct Capture: Decodable { let name: String; let requested: [String]; let packets: [Data] }
+        let captures = try JSONDecoder().decode([Capture].self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+        XCTAssertEqual(captures.map(\.name), ["legacy", "reuse", "scroll", "delta", "all"])
+        for capture in captures {
+            var decoder = HerdrClientShellSurfaceDecoder(requestedReuse: capture.requested.contains("reuse"),
+                requestedScroll: capture.requested.contains("scroll"), requestedDelta: capture.requested.contains("delta"))
+            var projection = HerdrShellProjection(), hinted: [HerdrShellRenderTarget: HerdrClientShellRenderer] = [:]
+            var reference: [HerdrShellRenderTarget: HerdrClientShellRenderer] = [:]
+            var timings: [String: [Double]] = [:]
+            for payload in capture.packets {
+                let wire = try HerdrShellWire.decode(payload)
+                let codec = wire.surfaceCodec
+                let started = ProcessInfo.processInfo.systemUptime
+                let message = try decoder.decode(wire)
+                if let codec { timings[codec, default: []].append((ProcessInfo.processInfo.systemUptime - started) * 1000) }
+                switch message {
+                case .control("shell.snapshot.v1", let json):
+                    _ = try projection.receive(JSONDecoder().decode(HerdrShellSnapshot.self, from: Data(json.utf8)))
+                case .surface(let surface): _ = try projection.receive(surface)
+                case .patch(let patch): _ = try projection.receive(patch)
+                default: continue
+                }
+                guard let surface = projection.coherentSurface else { continue }
+                let targets = surface.panes.map { HerdrShellRenderTarget.pane($0.pane_id) }
+                    + (surface.popup.map { [.popup($0.terminal_id)] } ?? [])
+                for target in targets {
+                    var optimized = hinted[target] ?? HerdrClientShellRenderer()
+                    var unhinted = reference[target] ?? HerdrClientShellRenderer()
+                    let bytes = try optimized.render(.extract(target, from: surface), assets: projection.assets)
+                    var full = surface; full.damage = nil
+                    XCTAssertEqual(bytes, try unhinted.render(.extract(target, from: full), assets: projection.assets),
+                        "\(capture.name) revision \(surface.surface_revision) \(target)")
+                    hinted[target] = optimized; reference[target] = unhinted
+                }
+            }
+            let final = try XCTUnwrap(projection.coherentSurface)
+            XCTAssertTrue(try final.panes.contains {
+                try HerdrShellViewportFrame.extract(.pane($0.pane_id), from: final).cells(in: 0).first?.symbol == "X"
+            }, "Final pane echo after resize: \(capture.name)")
+            if capture.name == "all" { XCTAssertEqual(final.panes.count, 2) }
+            for (codec, samples) in timings {
+                let sorted = samples.sorted()
+                print("HERDR_CODEC_REPLAY profile=\(capture.name) codec=\(codec) count=\(sorted.count) p95=\(sorted[Int(ceil(Double(sorted.count) * 0.95)) - 1])")
+            }
+        }
+    }
+
+    func testScrollPermutationMatchesUpstreamCellSwaps() {
+        let original = HerdrShellFrame(cells: (0..<25).map {
+            .init(symbol: String($0), fg: 0, bg: 0, modifier: 0, skip: false, hyperlink: nil)
+        }, width: 5, height: 5, cursor: nil, hyperlinks: [], graphics: Data())
+        for rect in [HerdrShellRect(x: 0, y: 0, width: 5, height: 5), .init(x: 1, y: 0, width: 3, height: 5)] {
+            for shift in [-4, -3, -2, -1, 1, 2, 3, 4] {
+                var expected = original.cells, actual = original
+                let distance = abs(shift)
+                let rows = shift > 0 ? Array(0..<(5 - distance)) : Array(stride(from: 4, through: distance, by: -1))
+                for row in rows {
+                    let other = row + (shift > 0 ? distance : -distance)
+                    for x in Int(rect.x)..<(Int(rect.x) + Int(rect.width)) { expected.swapAt(row * 5 + x, other * 5 + x) }
+                }
+                actual.scroll(rect, by: shift)
+                XCTAssertEqual(actual.cells, expected)
+                XCTAssertEqual(original.cells.first?.symbol, "0")
+            }
+        }
+    }
+
+    func testRequestedCodecsFallBackWithoutCapabilitiesAndReconnectRequiresFullBaseline() throws {
+        var decoder = HerdrClientShellSurfaceDecoder(requestedReuse: true, requestedScroll: true, requestedDelta: true)
+        let welcome = #"{"generation":1,"server_version":"legacy","snapshot_codec":"shell.snapshot.v1","surface_codec":"shell.surface.v1","input_codec":"shell.input.semantic.v1","blob_codec":"shell.blob.v1","capabilities":["surface_interest"]}"#
+        _ = try decoder.decode(.control("endpoint.welcome.v1", welcome))
+        XCTAssertNoThrow(try decoder.decode(.surface(scrollBaseline())))
+        XCTAssertNoThrow(try decoder.decode(HerdrShellWire.decode(golden("patch"))))
+        XCTAssertThrowsError(try decoder.decode(reuseMessage(surfaceReuseJSON())))
+        XCTAssertThrowsError(try decoder.decode(deltaMessage(deltaBytes())))
+        let rect = HerdrShellRect(x: 0, y: 0, width: 2, height: 3)
+        XCTAssertThrowsError(try decoder.decode(scrollMessage(scrollBytes([(rect, 1)], rows: []))))
+        var reconnected = try reuseDecoder(scroll: true, delta: true)
+        XCTAssertThrowsError(try reconnected.decode(deltaMessage(deltaBytes())))
+        XCTAssertThrowsError(try reconnected.decode(reuseMessage(surfaceReuseJSON())))
+        _ = try reconnected.decode(.surface(scrollBaseline()))
+        XCTAssertNoThrow(try reconnected.decode(deltaMessage(deltaBytes())))
+    }
+
+    func testReuseDecodeBenchmark() throws {
+        for (width, height) in [(600, 60), (1200, 120)] {
+            var base = try scrollBaseline()
+            base.frame = .init(cells: Array(repeating: base.frame.cells[0], count: width * height),
+                width: UInt16(width), height: UInt16(height), cursor: nil, hyperlinks: [], graphics: Data())
+            var decoder = try reuseDecoder()
+            _ = try decoder.decode(.surface(base))
+            var json = try surfaceReuseJSON()
+            var metadata = try XCTUnwrap(json["surface"] as? [String: Any])
+            var frame = try XCTUnwrap(metadata["frame"] as? [String: Any])
+            frame["width"] = width; frame["height"] = height; metadata["frame"] = frame
+            var samples: [Double] = [], wireBytes = 0
+            for i in 0..<1100 {
+                json["base_surface_revision"] = 65536 + i; metadata["surface_revision"] = 65537 + i
+                json["surface"] = metadata
+                let message = try reuseMessage(json)
+                if case .control(_, let text) = message { wireBytes = text.utf8.count }
+                let start = ProcessInfo.processInfo.systemUptime
+                guard case .surface(let result) = try decoder.decode(message) else { return XCTFail("Missing reuse") }
+                let ms = (ProcessInfo.processInfo.systemUptime - start) * 1000
+                XCTAssertEqual(result.frame.cellCount, width * height)
+                if i >= 100 { samples.append(ms) }
+            }
+            samples.sort()
+            print("HERDR_REUSE_BENCHMARK \(width)x\(height) wire=\(wireBytes) p50=\(samples[499]) p95=\(samples[949]) p99=\(samples[989])")
+        }
+    }
+
     func testDeltaRestoresSparseMainCellsAndPopupReplacePatchCloseReopen() throws {
         var decoder = try reuseDecoder(delta: true)
         _ = try decoder.decode(.surface(scrollBaseline()))
@@ -160,8 +299,11 @@ final class HerdrClientShellProtocolTests: XCTestCase {
             _ = try decoder.decode(.surface(base))
             let bytes = try scrollBytes([(rect, shift)], rows: [(0, y, ["x", "y"])])
             guard case .patch(let expanded) = try decoder.decode(scrollMessage(bytes)) else { return XCTFail("Scroll must normalize into a patch") }
-            XCTAssertEqual(expanded.rows.count, 3)
-            var cells = base.frame.cells
+            XCTAssertEqual(expanded.rows.count, 1)
+            XCTAssertEqual(expanded.scrolls.count, 1)
+            var moved = base.frame
+            for scroll in expanded.scrolls { moved.scroll(scroll.rect, by: scroll.shift) }
+            var cells = moved.cells
             for row in expanded.rows {
                 let start = Int(row.y) * 2 + Int(row.x)
                 cells.replaceSubrange(start..<(start + row.cells.count), with: row.cells)
@@ -200,7 +342,8 @@ final class HerdrClientShellProtocolTests: XCTestCase {
         guard case .patch(let patch) = try decoder.decode(scrollMessage(scrollBytes([(region, 1)],
             rows: [(0, 2, ["r", "s"])], projection: 253, baseSurface: 65539))) else { return XCTFail("Missing scroll patch") }
         XCTAssertEqual(patch.surface_revision, 65540)
-        XCTAssertEqual(patch.rows.flatMap(\.cells).map(\.symbol), ["c", "d", "e", "f", "r", "s"])
+        XCTAssertEqual(patch.rows.flatMap(\.cells).map(\.symbol), ["r", "s"])
+        XCTAssertEqual(patch.scrolls.count, 1)
         json["base_surface_revision"] = 65540
         metadata["surface_revision"] = 65541; metadata["projection_revision"] = 254
         json["surface"] = metadata
@@ -209,6 +352,21 @@ final class HerdrClientShellProtocolTests: XCTestCase {
         XCTAssertEqual(final.popup?.frame.cells.first?.symbol, "P", "A new popup scene is independent of the main grid baseline")
         XCTAssertEqual(final.graphics.assets.count, 2)
         XCTAssertEqual(reused.frame.cells.map(\.symbol), ["x", "b", "c", "d", "e", "f"], "Later updates cannot mutate previously delivered values")
+        var optimized: [HerdrShellRenderTarget: HerdrClientShellRenderer] = [:]
+        var reference: [HerdrShellRenderTarget: HerdrClientShellRenderer] = [:]
+        var assets: [HerdrShellAssetKey: Data] = [:]
+        for scene in [reused, delta, final] {
+            for asset in scene.graphics.assets { assets[asset.key] = asset.data }
+            for target in [HerdrShellRenderTarget.pane("w5:pA"), .popup("popup-reuse")] {
+                var encoder = optimized[target] ?? HerdrClientShellRenderer()
+                var fullEncoder = reference[target] ?? HerdrClientShellRenderer()
+                var full = scene; full.damage = nil
+                XCTAssertEqual(try encoder.render(.extract(target, from: scene), assets: assets),
+                               try fullEncoder.render(.extract(target, from: full), assets: assets),
+                               "Popup edits and image replacement must match full scanning")
+                optimized[target] = encoder; reference[target] = fullEncoder
+            }
+        }
     }
 
     func testInvalidScrollDoesNotAdvanceBaselineAndRequiresNegotiation() throws {
@@ -272,7 +430,7 @@ final class HerdrClientShellProtocolTests: XCTestCase {
         XCTAssertThrowsError(try missing.decode(reuseMessage(original)))
         var disabled = HerdrClientShellSurfaceDecoder()
         XCTAssertThrowsError(try disabled.decode(reuseMessage(original)))
-        for mutation in 0..<5 {
+        for mutation in 0..<6 {
             var decoder = try reuseDecoder()
             _ = try decoder.decode(HerdrShellWire.decode(golden("surface_image")))
             var json = original
@@ -283,7 +441,11 @@ final class HerdrClientShellProtocolTests: XCTestCase {
             case 1: surface["boot_id"] = "other"
             case 2: frame["width"] = 3
             case 3: frame["cells"] = [[:]]
-            default: frame["hyperlinks"] = []
+            case 4: frame["hyperlinks"] = []
+            default:
+                var panes = try XCTUnwrap(surface["panes"] as? [[String: Any]])
+                panes[0]["inner_rect"] = ["x": 0, "y": 100, "width": 2, "height": 1]
+                surface["panes"] = panes
             }
             surface["frame"] = frame; json["surface"] = surface
             XCTAssertThrowsError(try decoder.decode(reuseMessage(json)))
@@ -488,6 +650,7 @@ final class HerdrClientShellProtocolTests: XCTestCase {
             from: Data(welcome.replacingOccurrences(of: "surface_interest", with: "other").utf8)).validate())
         let hello = HerdrShellHello(cell_width_px: 8, cell_height_px: 16, surface_size: .init(cols: 80, rows: 24), pixel_mouse: true)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(hello)) as? [String: Any])
+        for codec in ["surface_reuse", "surface_scroll", "surface_delta"] { XCTAssertEqual(json[codec] as? Bool, true) }
         XCTAssertEqual(json["surface_active"] as? Bool, false)
         XCTAssertEqual(json["direct_graphics"] as? Bool, false)
         XCTAssertEqual(json["endpoint_keybindings"] as? Bool, false)

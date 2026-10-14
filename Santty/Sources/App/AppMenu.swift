@@ -187,6 +187,7 @@ enum AppMenu {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Pane")
         item.submenu = menu
+        menu.delegate = target as? NSMenuDelegate
 
         let diagnosticsItem = menu.addItem(withTitle: "Herdr Diagnostics...", action: #selector(WorkspaceViewController.showPersistentDiagnostics(_:)), keyEquivalent: "")
         diagnosticsItem.target = target
@@ -194,10 +195,8 @@ enum AppMenu {
         addKeybindingMenuItem(to: menu, action: .newHerdrWorkspace, selector: #selector(WorkspaceViewController.newHerdrWorkspace(_:)), target: target)
         addKeybindingMenuItem(to: menu, action: .renameWorkspace, selector: #selector(WorkspaceViewController.renameWorkspace(_:)), target: target)
         addKeybindingMenuItem(to: menu, action: .closeWorkspace, selector: #selector(WorkspaceViewController.closeWorkspace(_:)), target: target)
-        addKeybindingMenuItem(to: menu, action: .disconnectPersistentTerminal, selector: #selector(WorkspaceViewController.disconnectPersistentTerminal(_:)), target: target)
-        addKeybindingMenuItem(to: menu, action: .reconnectPersistentTerminal, selector: #selector(WorkspaceViewController.reconnectPersistentTerminal(_:)), target: target)
-        addKeybindingMenuItem(to: menu, action: .takeOverPersistentTerminal, selector: #selector(WorkspaceViewController.takeOverPersistentTerminal(_:)), target: target)
-        addKeybindingMenuItem(to: menu, action: .endPersistentTerminal, selector: #selector(WorkspaceViewController.endPersistentTerminal(_:)), target: target)
+        let reconnectItem = addKeybindingMenuItem(to: menu, action: .reconnectPersistentTerminal, selector: #selector(WorkspaceViewController.reconnectPersistentTerminal(_:)), target: target)
+        reconnectItem.isHidden = true
         menu.addItem(.separator())
         let renameItem = menu.addItem(
             withTitle: "Rename Pane...",

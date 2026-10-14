@@ -143,8 +143,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
         case .renameWorkspace: "Rename Workspace"
         case .newHerdrWorkspace: "New Herdr Workspace"
         case .closeWorkspace: "Close Workspace"
-        case .disconnectPersistentTerminal: "Disconnect Persistent Terminal"
-        case .reconnectPersistentTerminal: "Reconnect Persistent Terminal"
+        case .disconnectPersistentTerminal: "Disconnect Herdr Window"
+        case .reconnectPersistentTerminal: "Reconnect Herdr Window"
         case .takeOverPersistentTerminal: "Take Control of Herdr Window"
         case .endPersistentTerminal: "End Persistent Terminal"
 

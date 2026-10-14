@@ -408,7 +408,7 @@ extension AgentSessionSnapshot {
         displayState == .sessionEnded
     }
 
-    fileprivate var statusText: String {
+    var statusText: String {
         guard backendStatusAvailable else { return "Status Unavailable" }
         let baseText =
             switch displayState {

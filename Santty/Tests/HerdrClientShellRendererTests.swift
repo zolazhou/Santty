@@ -1,10 +1,329 @@
 import AppKit
 import Foundation
+import Darwin
 import GhosttyTerminal
 import XCTest
 @testable import Santty
 
 final class HerdrClientShellRendererTests: XCTestCase {
+    private func patchScene(columns: Int = 600, rows: Int = 60, paneCount: Int = 2) throws -> HerdrShellProjection {
+        let panes = (["left", "right"] + (2..<max(2, paneCount)).map { "pane-\($0)" }).prefix(paneCount).enumerated().map { index, id in
+            let rect = HerdrShellRect(x: UInt16(index * columns / paneCount), y: 0, width: UInt16(columns / paneCount), height: UInt16(rows))
+            return HerdrShellPane(pane_id: id, content_revision: 1, rect: rect, inner_rect: rect,
+                scrollbar_rect: nil, scroll: nil, focused: index == 0, mouse_reporting: false,
+                sgr_pixel_mouse: false, alternate_screen_active: false, pixel_width: 2400, pixel_height: 960)
+        }
+        let snapshot = HerdrShellSnapshot(boot_id: "boot", revision: 1, focused_workspace_id: "w",
+            focused_tab_id: "t", focused_pane_id: "left",
+            workspaces: [.init(workspace_id: "w", active_tab_id: "t", number: 1, label: "w", focused: true)],
+            tabs: [.init(tab_id: "t", workspace_id: "w", number: 1, label: "t", zoomed: false, focused: true)],
+            panes: panes.map { .init(pane_id: $0.pane_id, workspace_id: "w", tab_id: "t", label: nil,
+                cwd: nil, foreground_cwd: nil, focused: $0.focused, right_click_passthrough: false) },
+            agents: nil, config_diagnostic: nil)
+        var projection = HerdrShellProjection()
+        try projection.receive(snapshot)
+        try projection.receive(HerdrShellSurface(boot_id: "boot", projection_revision: 1, surface_revision: 1,
+            frame: .init(cells: Array(repeating: cell("A"), count: columns * rows), width: UInt16(columns), height: UInt16(rows),
+                cursor: nil, hyperlinks: [], graphics: Data()), panes: panes, splits: [], popup: nil,
+            graphics: .init(assets: [], placements: [], retained_assets: [])))
+        return projection
+    }
+
+    func testPaneExtractionSharesTheSurfaceCellBuffer() throws {
+        let surface = try XCTUnwrap(patchScene().coherentSurface)
+        let viewport = try HerdrShellViewportFrame.extract(.pane("right"), from: surface)
+        surface.frame.cells(in: 0).withUnsafeBufferPointer { source in
+            viewport.frame.cells(in: 0).withUnsafeBufferPointer { extracted in
+                XCTAssertEqual(source.baseAddress, extracted.baseAddress, "Pane extraction must share immutable cells")
+            }
+        }
+    }
+
+    func testPatchPreparationBenchmark() async throws {
+        var projection = try patchScene()
+        var left = HerdrClientShellRenderer(), right = HerdrClientShellRenderer()
+        let initial = try XCTUnwrap(projection.coherentSurface)
+        left = try await left.prepare(.pane("left"), from: initial, assets: [:]).renderer
+        right = try await right.prepare(.pane("right"), from: initial, assets: [:]).renderer
+        var samples = HerdrShellLatencySamples()
+        for index in 0..<90 {
+            let current = try XCTUnwrap(projection.coherentSurface)
+            let start = ProcessInfo.processInfo.systemUptime
+            try projection.receive(HerdrShellPatch(boot_id: "boot", projection_revision: 1,
+                base_surface_revision: current.surface_revision, surface_revision: current.surface_revision + 1,
+                rows: [.init(x: 0, y: 0, cells: [cell(index % 2 == 0 ? "X" : "Y")])],
+                panes: [current.panes[0]], cursor: nil))
+            let next = try XCTUnwrap(projection.coherentSurface)
+            left = try await left.prepare(.pane("left"), from: next, assets: [:]).renderer
+            right = try await right.prepare(.pane("right"), from: next, assets: [:]).renderer
+            if index >= 10 { samples.record(seconds: ProcessInfo.processInfo.systemUptime - start) }
+        }
+        print("HERDR_PATCH_BENCHMARK " + String(decoding: try JSONEncoder().encode(samples.summary), as: UTF8.self))
+    }
+
+    @MainActor
+    func testScenePreparationBenchmark() async throws {
+        @MainActor final class Heartbeat {
+            var recording = false
+            var samples: [Double] = []
+        }
+        for count in [1, 2, 8] {
+            for mode in ["serial", "scene"] {
+                var projection = try patchScene(columns: 1200, rows: 60, paneCount: count)
+                var encoders = Array(repeating: HerdrClientShellRenderer(), count: count)
+                let initial = try XCTUnwrap(projection.coherentSurface)
+                for (i, pane) in initial.panes.enumerated() {
+                    encoders[i] = try await encoders[i].prepare(.pane(pane.pane_id), from: initial, assets: [:]).renderer
+                }
+                var samples: [Double] = []
+                var queue = HerdrShellLatencySamples(), resume = HerdrShellLatencySamples()
+                let ticks = Heartbeat()
+                let heartbeat = Task { @MainActor in
+                    var previous = ProcessInfo.processInfo.systemUptime
+                    while !Task.isCancelled {
+                        do { try await Task.sleep(for: .milliseconds(1)) } catch { break }
+                        let now = ProcessInfo.processInfo.systemUptime
+                        if ticks.recording { ticks.samples.append((now - previous) * 1000) }
+                        previous = now
+                    }
+                }
+                defer { heartbeat.cancel() }
+                for index in 0..<1100 {
+                    let base = try XCTUnwrap(projection.coherentSurface)
+                    let changed = base.panes.map {
+                        HerdrShellPatch.Row(x: $0.inner_rect.x, y: UInt16(index % 60), cells: [cell((index / 60) % 2 == 0 ? "X" : "Y")])
+                    }
+                    try projection.receive(HerdrShellPatch(boot_id: "boot", projection_revision: 1,
+                        base_surface_revision: base.surface_revision, surface_revision: base.surface_revision + 1,
+                        rows: changed, panes: base.panes, cursor: nil))
+                    let scene = try XCTUnwrap(projection.coherentSurface)
+                    ticks.recording = index >= 100
+                    let start = ProcessInfo.processInfo.systemUptime
+                    if mode == "serial" {
+                        for (i, pane) in scene.panes.enumerated() {
+                            let result = try await encoders[i].prepare(.pane(pane.pane_id), from: scene, assets: [:])
+                            encoders[i] = result.renderer
+                            if ticks.recording, let timing = result.timing { queue.record(seconds: timing.queue); resume.record(seconds: timing.resume) }
+                        }
+                    } else {
+                        let inputs = scene.panes.enumerated().map {
+                            HerdrClientShellRenderer.Input(renderer: encoders[$0.offset], target: .pane($0.element.pane_id))
+                        }
+                        let result = try await HerdrClientShellRenderer.prepareScene(inputs, from: scene, assets: [:])
+                        encoders = result.outputs.map(\.renderer)
+                        if ticks.recording, let timing = result.timing { queue.record(seconds: timing.queue); resume.record(seconds: timing.resume) }
+                    }
+                    if ticks.recording { samples.append((ProcessInfo.processInfo.systemUptime - start) * 1000) }
+                }
+                heartbeat.cancel(); await heartbeat.value
+                samples.sort()
+                let heartbeats = ticks.samples.sorted()
+                print("HERDR_SCENE_BENCHMARK mode=\(mode) panes=\(count) p50=\(samples[499]) p95=\(samples[949]) p99=\(samples[989])")
+                print("HERDR_SCENE_SCHEDULE mode=\(mode) panes=\(count) queue=" + String(decoding: try JSONEncoder().encode(queue.summary), as: UTF8.self)
+                    + " resume=" + String(decoding: try JSONEncoder().encode(resume.summary), as: UTF8.self))
+                XCTAssertFalse(heartbeats.isEmpty, "The main actor must run while scene encoding is pending")
+                if !heartbeats.isEmpty {
+                    print("HERDR_SCENE_HEARTBEAT mode=\(mode) panes=\(count) count=\(heartbeats.count) p95=\(heartbeats[Int(ceil(Double(heartbeats.count) * 0.95)) - 1]) p99=\(heartbeats[Int(ceil(Double(heartbeats.count) * 0.99)) - 1])")
+                }
+            }
+        }
+    }
+
+    func testSceneEncodingMatchesIndependentPanesAndDoesNotCommitFailedOrCancelledCandidates() async throws {
+        var projection = try patchScene()
+        let initial = try XCTUnwrap(projection.coherentSurface)
+        let inputs = initial.panes.map { HerdrClientShellRenderer.Input(renderer: .init(), target: .pane($0.pane_id)) }
+        let first = try await HerdrClientShellRenderer.prepareScene(inputs, from: initial, assets: [:])
+        XCTAssertNotNil(first.timing)
+        let committed = zip(first.outputs, inputs).map { HerdrClientShellRenderer.Input(renderer: $0.0.renderer, target: $0.1.target) }
+        let unchanged = try await HerdrClientShellRenderer.prepareScene(committed, from: initial, assets: [:])
+        XCTAssertNil(unchanged.timing, "An unchanged scene must not enqueue an encoding worker")
+        XCTAssertTrue(unchanged.outputs.allSatisfy { $0.bytes.isEmpty })
+        try projection.receive(.init(boot_id: "boot", projection_revision: 1, base_surface_revision: 1, surface_revision: 2,
+            rows: [.init(x: 1, y: 0, cells: [cell("界"), cell(" ")]), .init(x: 300, y: 59, cells: [cell("Z")])],
+            panes: initial.panes, cursor: nil))
+        let changed = try XCTUnwrap(projection.coherentSurface)
+        let candidate = try await HerdrClientShellRenderer.prepareScene(committed, from: changed, assets: [:])
+        for (input, output) in zip(committed, candidate.outputs) {
+            var reference = input.renderer
+            XCTAssertEqual(output.bytes, try reference.render(.extract(input.target, from: changed), assets: [:]))
+        }
+        let image = HerdrShellAssetKey(source: .pane("right", 7), image_width: 1, image_height: 1,
+                                      format: 1, data_len: 4, data_fingerprint: 1)
+        var invalid = HerdrShellSurface(boot_id: "boot", projection_revision: 1, surface_revision: 2,
+            frame: changed.frame, panes: changed.panes, splits: [], popup: nil,
+            graphics: .init(assets: [], placements: [placement(image, x: 301)], retained_assets: []))
+        invalid.damage = changed.damage
+        do {
+            _ = try await HerdrClientShellRenderer.prepareScene(committed, from: invalid, assets: [image: Data()])
+            XCTFail("A later pane's invalid image must fail the whole batch")
+        } catch { }
+        let retried = try await HerdrClientShellRenderer.prepareScene(committed, from: changed, assets: [:])
+        XCTAssertEqual(retried.outputs.map(\.bytes), candidate.outputs.map(\.bytes), "Rejected preparation cannot advance any encoder")
+        let cancelled = Task { try await HerdrClientShellRenderer.prepareScene(committed, from: changed, assets: [:]) }
+        cancelled.cancel()
+        do { _ = try await cancelled.value; XCTFail("Cancelled scene was prepared") } catch is CancellationError { }
+        let cancelledReuse = Task { try await HerdrClientShellRenderer.prepareScene(committed, from: initial, assets: [:]) }
+        cancelledReuse.cancel()
+        do { _ = try await cancelledReuse.value; XCTFail("Even unchanged scenes must honor cancellation") } catch is CancellationError { }
+    }
+
+    @MainActor
+    func testSceneRequestRejectsOutputAfterItsDisplayIdentityChanges() async throws {
+        @MainActor final class Display {
+            var current = true
+            var commits = 0
+        }
+        let surface = try XCTUnwrap(patchScene().coherentSurface)
+        let display = Display()
+        let request = HerdrShellRenderRequest(input: .init(renderer: .init(), target: .pane("left")),
+            isCurrent: { display.current }, commit: { _, _ in display.commits += 1; return nil })
+        let scene = try await HerdrClientShellRenderer.prepareScene([request.input], from: surface, assets: [:])
+        let output = request.output(scene.outputs[0])
+        XCTAssertGreaterThan(output.byteCount, 0)
+        XCTAssertTrue(output.isCurrent())
+        display.current = false
+        XCTAssertFalse(output.isCurrent())
+        XCTAssertNil(output.commit())
+        XCTAssertEqual(display.commits, 0, "Encoding completion cannot authorize output into a retired display")
+    }
+
+    func testSceneBatchKeepsPopupAndPaneImageNamespacesIndependent() async throws {
+        var scene = try XCTUnwrap(patchScene().coherentSurface)
+        let paneImage = HerdrShellAssetKey(source: .pane("left", 7), image_width: 1, image_height: 1,
+                                          format: 1, data_len: 4, data_fingerprint: 1)
+        let popupImage = HerdrShellAssetKey(source: .popup("popup", 7), image_width: 1, image_height: 1,
+                                           format: 1, data_len: 4, data_fingerprint: 2)
+        scene.popup = .init(terminal_id: "popup", title: "popup", width: nil, height: nil,
+            widthIsPercent: false, heightIsPercent: false,
+            frame: .init(cells: [cell("P"), cell("Q")], width: 2, height: 1, cursor: nil, hyperlinks: [], graphics: Data()),
+            mouse_reporting: false, sgr_pixel_mouse: false, pixel_width: 16, pixel_height: 16)
+        scene = .init(boot_id: scene.boot_id, projection_revision: scene.projection_revision, surface_revision: scene.surface_revision,
+            frame: scene.frame, panes: scene.panes, splits: [], popup: scene.popup,
+            graphics: .init(assets: [], placements: [placement(paneImage), placement(popupImage, x: 0, y: 0)], retained_assets: []))
+        let inputs: [HerdrClientShellRenderer.Input] = ["left", "right"].map { .init(renderer: .init(), target: .pane($0)) }
+            + [.init(renderer: .init(), target: .popup("popup"))]
+        let assets = [paneImage: Data([255, 0, 0, 255]), popupImage: Data([0, 0, 255, 255])]
+        let batch = try await HerdrClientShellRenderer.prepareScene(inputs, from: scene, assets: assets)
+        XCTAssertEqual(batch.outputs.count, inputs.count)
+        for (input, output) in zip(inputs, batch.outputs) {
+            var reference = input.renderer
+            XCTAssertEqual(output.bytes, try reference.render(.extract(input.target, from: scene), assets: assets))
+        }
+        XCTAssertTrue(batch.outputs[0].renderer.ownsImage(1))
+        XCTAssertFalse(batch.outputs[1].renderer.ownsImage(1))
+        XCTAssertTrue(batch.outputs[2].renderer.ownsImage(1))
+    }
+
+    func testProjectionPatchBenchmark() throws {
+        func heapBytes() -> Int {
+            var statistics = malloc_statistics_t()
+            malloc_zone_statistics(nil, &statistics)
+            return Int(statistics.size_in_use)
+        }
+        for (columns, rows) in [(600, 60), (1200, 120)] {
+            var projection = try patchScene(columns: columns, rows: rows)
+            var milliseconds: [Double] = [], liveHeapBytes: [Int] = []
+            for index in 0..<1100 {
+                let current = try XCTUnwrap(projection.coherentSurface)
+                let patch = HerdrShellPatch(boot_id: "boot", projection_revision: 1,
+                    base_surface_revision: current.surface_revision, surface_revision: current.surface_revision + 1,
+                    rows: [.init(x: 0, y: UInt16(index % rows), cells: [cell(index % 2 == 0 ? "X" : "Y")])],
+                    panes: [current.panes[0]], cursor: nil)
+                let before = heapBytes()
+                let start = ProcessInfo.processInfo.systemUptime
+                try projection.receive(patch)
+                let duration = (ProcessInfo.processInfo.systemUptime - start) * 1000
+                withExtendedLifetime(current) {
+                    if index >= 100 {
+                        milliseconds.append(duration)
+                        liveHeapBytes.append(heapBytes() - before)
+                    }
+                }
+            }
+            let report = try JSONSerialization.data(withJSONObject: ["columns": columns, "rows": rows,
+                "milliseconds": milliseconds, "netLiveHeapBytes": liveHeapBytes], options: [.sortedKeys])
+            print("HERDR_PROJECTION_BENCHMARK " + String(decoding: report, as: UTF8.self))
+        }
+    }
+
+    func testPatchSharesUnchangedRowsWithoutMutatingRetainedFrames() throws {
+        var projection = try patchScene()
+        let previous = try XCTUnwrap(projection.coherentSurface)
+        try projection.receive(HerdrShellPatch(boot_id: "boot", projection_revision: 1,
+            base_surface_revision: previous.surface_revision, surface_revision: previous.surface_revision + 1,
+            rows: [.init(x: 7, y: 3, cells: [cell("X")]), .init(x: 8, y: 3, cells: [cell("Y")])],
+            panes: [previous.panes[0]], cursor: nil))
+        let next = try XCTUnwrap(projection.coherentSurface)
+        previous.frame.cells(in: 4).withUnsafeBufferPointer { old in
+            next.frame.cells(in: 4).withUnsafeBufferPointer { new in
+                XCTAssertEqual(old.baseAddress, new.baseAddress, "A single-cell patch must not copy an unchanged row")
+            }
+        }
+        XCTAssertEqual(previous.frame.cells(in: 3).map(\.symbol), Array(repeating: "A", count: 600))
+        let changed = next.frame.cells(in: 3)
+        XCTAssertEqual(changed[changed.startIndex + 7].symbol, "X")
+        XCTAssertEqual(changed[changed.startIndex + 8].symbol, "Y")
+    }
+
+    func testCoalescedPatchesKeepUncommittedRowsAndSkipOnlyUnchangedPanes() async throws {
+        var projection = try patchScene()
+        let initial = try XCTUnwrap(projection.coherentSurface)
+        let left = try await HerdrClientShellRenderer().prepare(.pane("left"), from: initial, assets: [:]).renderer
+        let right = try await HerdrClientShellRenderer().prepare(.pane("right"), from: initial, assets: [:]).renderer
+        func patch(_ rows: [HerdrShellPatch.Row], cursor: HerdrShellCursor? = nil) throws {
+            let base = try XCTUnwrap(projection.coherentSurface)
+            try projection.receive(HerdrShellPatch(boot_id: "boot", projection_revision: 1,
+                base_surface_revision: base.surface_revision, surface_revision: base.surface_revision + 1,
+                rows: rows, panes: base.panes, cursor: cursor))
+        }
+        try patch([.init(x: 0, y: 0, cells: [cell("X")])])
+        let first = try XCTUnwrap(projection.coherentSurface)
+        _ = try await left.prepare(.pane("left"), from: first, assets: [:]) // Deliberately discard the candidate.
+        try patch([.init(x: 1, y: 59, cells: [cell("界"), cell(" ")])])
+        let merged = try XCTUnwrap(projection.coherentSurface)
+        let committed = try await left.prepare(.pane("left"), from: merged, assets: [:])
+        var fullScan = merged; fullScan.damage = nil
+        let expected = try await left.prepare(.pane("left"), from: fullScan, assets: [:])
+        XCTAssertEqual(committed.bytes, expected.bytes, "Discarding a prepared frame cannot consume its dirty rows")
+        XCTAssertTrue(String(decoding: committed.bytes, as: UTF8.self).contains("X"))
+        XCTAssertTrue(String(decoding: committed.bytes, as: UTF8.self).contains("界"))
+        XCTAssertEqual(initial.frame.cells[0].symbol, "A", "Retained frame cells must remain immutable")
+        let skipped = try await right.prepare(.pane("right"), from: merged, assets: [:])
+        XCTAssertTrue(skipped.bytes.isEmpty, "A sibling patch must not emit even cursor or synchronization escapes")
+
+        try patch([], cursor: .init(x: 2, y: 0, visible: true, shape: 2))
+        let cursor = try XCTUnwrap(projection.coherentSurface)
+        XCTAssertFalse(try committed.renderer.canReuse(.pane("left"), from: cursor, assets: [:]))
+        let cursorOnly = try await committed.renderer.prepare(.pane("left"), from: cursor, assets: [:])
+        XCTAssertTrue(String(decoding: cursorOnly.bytes, as: UTF8.self).contains("\u{1b}[1;3H"))
+        XCTAssertFalse(String(decoding: cursorOnly.bytes, as: UTF8.self).contains("界"))
+        XCTAssertTrue(try right.canReuse(.pane("right"), from: cursor, assets: [:]))
+
+        try patch([.init(x: 300, y: 20, cells: [cell("Z")])], cursor: cursor.frame.cursor)
+        let sibling = try XCTUnwrap(projection.coherentSurface)
+        XCTAssertFalse(try right.canReuse(.pane("right"), from: sibling, assets: [:]))
+        XCTAssertTrue(try cursorOnly.renderer.canReuse(.pane("left"), from: sibling, assets: [:]))
+        let rightOutput = try await right.prepare(.pane("right"), from: sibling, assets: [:])
+        XCTAssertTrue(String(decoding: rightOutput.bytes, as: UTF8.self).contains("Z"))
+
+        var replacement = sibling
+        replacement.surface_revision += 1
+        replacement.frame.cells[2] = cell("N")
+        try projection.receive(replacement)
+        let full = try XCTUnwrap(projection.coherentSurface)
+        XCTAssertFalse(try cursorOnly.renderer.canReuse(.pane("left"), from: full, assets: [:]),
+            "A full surface must replace any inherited patch damage")
+        let replaced = try await cursorOnly.renderer.prepare(.pane("left"), from: full, assets: [:])
+        XCTAssertTrue(String(decoding: replaced.bytes, as: UTF8.self).contains("N"))
+        var reset = replaced.renderer; reset.reset()
+        XCTAssertFalse(try reset.canReuse(.pane("left"), from: full, assets: [:]))
+        let cancelled = Task { try await rightOutput.renderer.prepare(.pane("right"), from: sibling, assets: [:]) }
+        cancelled.cancel()
+        do { _ = try await cancelled.value; XCTFail("Even an unchanged pane must honor cancellation") }
+        catch is CancellationError { }
+    }
+
     func testDenseTabEncodingStaysWithinOutputBudget() throws {
         let width = 314, height = 41
         let cells = (0..<(width * height)).map { index in
@@ -33,6 +352,21 @@ final class HerdrClientShellRendererTests: XCTestCase {
         XCTAssertFalse(output.contains("\u{1b}[1;6H"), "Wide glyph continuation cannot be overwritten")
         XCTAssertTrue(output.contains("\u{1b}[1;7H"), "Position after Unicode remains explicit")
         XCTAssertTrue(output.contains("\u{1b}]8;;https://example.com\u{1b}\\C"))
+    }
+
+    func testSingleCellEditDoesNotRewriteTheWholeRow() throws {
+        var frame = HerdrShellFrame(cells: Array(repeating: cell("A"), count: 300 * 60), width: 300, height: 60,
+            cursor: .init(x: 42, y: 0, visible: true, shape: 2), hyperlinks: [], graphics: Data())
+        var renderer = HerdrClientShellRenderer()
+        func viewport() -> HerdrShellViewportFrame {
+            .init(frame: frame, originX: 0, originY: 0, placements: [], retained: [])
+        }
+        _ = try renderer.render(viewport(), assets: [:])
+        frame.cells[42] = cell("X")
+        let output = try renderer.render(viewport(), assets: [:])
+        print("HERDR_TYPING_BENCHMARK single_cell_bytes=\(output.count)")
+        XCTAssertLessThan(output.count, 100, "A single typed character must not rewrite a 300-column row")
+        XCTAssertFalse(String(decoding: output, as: UTF8.self).contains("AAAA"))
     }
 
     func testOutputReceiptRejectsAnUnattachedInMemorySurface() {
@@ -248,7 +582,7 @@ final class HerdrClientShellRendererTests: XCTestCase {
         XCTAssertEqual(withHandles, expected, "Handle order does not define tree order")
         let projected = try tree.projected(on: surface(panes))
         let calibrated = try projected.nativeShellLayout(panes: ids, surface: surface(panes),
-            cellSize: .init(width: 8, height: 16), padding: 8, divider: 6)
+            cellSize: .init(width: 8, height: 16), padding: 8, divider: 6).layout
         guard case .split(.horizontal, let children, let fractions) = calibrated,
               case .split(.vertical, _, let nested) = children[1] else { return XCTFail("Native chrome lost the backend tree") }
         XCTAssertEqual(fractions[0], 48.0 / 112, accuracy: 0.0001)
@@ -266,6 +600,61 @@ final class HerdrClientShellRendererTests: XCTestCase {
         XCTAssertThrowsError(try swapped.projected(on: surface(panes)))
         XCTAssertEqual(try tree.projected(on: surface([pane("b", area)])).paneIDs, ["b"], "Zoom shows only the authoritative visible pane")
         XCTAssertThrowsError(try tree.projected(on: surface([pane("unknown", area)])))
+    }
+
+    func testNativeViewportReclaimsBackendBordersAndGaps() throws {
+        func pane(_ id: String, _ rect: HerdrShellRect, inset: UInt16) -> HerdrShellPane {
+            .init(pane_id: id, content_revision: 1, rect: rect,
+                inner_rect: .init(x: rect.x + inset, y: rect.y + inset,
+                    width: rect.width - inset * 2, height: rect.height - inset * 2),
+                scrollbar_rect: nil, scroll: nil, focused: id == "a", mouse_reporting: false,
+                sgr_pixel_mouse: false, alternate_screen_active: false, pixel_width: 0, pixel_height: 0)
+        }
+        func surface(_ panes: [HerdrShellPane], width: UInt16 = 80, height: UInt16 = 24) -> HerdrShellSurface {
+            .init(boot_id: "boot", projection_revision: 1, surface_revision: 1,
+                frame: .init(cells: Array(repeating: cell(" "), count: Int(width) * Int(height)),
+                    width: width, height: height, cursor: nil, hyperlinks: [], graphics: Data()),
+                panes: panes, splits: [], popup: nil,
+                graphics: .init(assets: [], placements: [], retained_assets: []))
+        }
+        let ids = ["a": UUID(), "b": UUID(), "c": UUID()]
+        let cellSize = CGSize(width: 8, height: 16)
+        func viewport(_ tree: HerdrLayout.Node, _ surface: HerdrShellSurface, _ available: CGSize) throws -> HerdrShellSize? {
+            let geometry = try tree.nativeShellLayout(panes: ids, surface: surface,
+                cellSize: cellSize, padding: 8, divider: 6)
+            return HerdrLayout.nativeShellViewportSize(surface: surface, nativeSize: geometry.size,
+                availableSize: available, cellSize: cellSize)
+        }
+        let horizontal = HerdrLayout.Node.split(.horizontal, 0.5, .pane("a"), .pane("b"))
+        let bordered = surface([pane("a", .init(x: 0, y: 0, width: 40, height: 24), inset: 1),
+                                pane("b", .init(x: 40, y: 0, width: 40, height: 24), inset: 1)])
+        let available = CGSize(width: 678, height: 400)
+        XCTAssertEqual(try viewport(horizontal, bordered, available), .init(cols: 84, rows: 26))
+        let resized = surface([pane("a", .init(x: 0, y: 0, width: 42, height: 26), inset: 1),
+                               pane("b", .init(x: 42, y: 0, width: 42, height: 26), inset: 1)], width: 84, height: 26)
+        XCTAssertEqual(try viewport(horizontal, resized, available), .init(cols: 84, rows: 26),
+                       "Repeated scenes must not accumulate compensation")
+        let borderless = surface([pane("a", .init(x: 0, y: 0, width: 40, height: 24), inset: 0),
+                                  pane("b", .init(x: 40, y: 0, width: 40, height: 24), inset: 0)])
+        XCTAssertEqual(try viewport(horizontal, borderless, available), .init(cols: 80, rows: 24))
+        let gapped = surface([pane("a", .init(x: 0, y: 0, width: 39, height: 24), inset: 0),
+                              pane("b", .init(x: 40, y: 0, width: 40, height: 24), inset: 0)])
+        XCTAssertEqual(try viewport(horizontal, gapped, available), .init(cols: 81, rows: 24))
+        let vertical = HerdrLayout.Node.split(.vertical, 0.5, .pane("a"), .pane("b"))
+        let stacked = surface([pane("a", .init(x: 0, y: 0, width: 80, height: 12), inset: 1),
+                               pane("b", .init(x: 0, y: 12, width: 80, height: 12), inset: 1)])
+        XCTAssertEqual(try viewport(vertical, stacked, .init(width: 656, height: 422)), .init(cols: 82, rows: 28))
+        let mixed = HerdrLayout.Node.split(.horizontal, 0.5, .pane("a"),
+            .split(.vertical, 0.5, .pane("b"), .pane("c")))
+        let nested = surface([bordered.panes[0],
+            pane("b", .init(x: 40, y: 0, width: 40, height: 12), inset: 1),
+            pane("c", .init(x: 40, y: 12, width: 40, height: 12), inset: 1)])
+        XCTAssertEqual(try viewport(mixed, nested, available), .init(cols: 84, rows: 26),
+                       "Mixed splits must use the reconstructed native size, not the deepest padding count")
+        let single = surface([pane("a", .init(x: 0, y: 0, width: 80, height: 24), inset: 0)])
+        XCTAssertEqual(try viewport(.pane("a"), single, .init(width: 659, height: 407)), .init(cols: 80, rows: 24),
+                       "Sub-cell remainder stays as normal padding")
+        XCTAssertNil(try viewport(.pane("a"), single, .zero))
     }
 
     private func cell(_ text: String, fg: UInt32 = 0, modifier: UInt16 = 0, link: UInt32? = nil) -> HerdrShellCell {
@@ -295,9 +684,9 @@ final class HerdrClientShellRendererTests: XCTestCase {
 
     func testPaneExtractionAndStyleCursorWideGlyphs() throws {
         let viewport = try scene()
-        XCTAssertEqual(viewport.frame.cells.map(\.symbol), ["A", "界", " ", "B"])
-        XCTAssertEqual(viewport.frame.cursor?.x, 3)
-        XCTAssertEqual(viewport.frame.cursor?.y, 0)
+        XCTAssertEqual(viewport.cells(in: 0).map(\.symbol), ["A", "界", " ", "B"])
+        XCTAssertEqual(viewport.cursor?.x, 3)
+        XCTAssertEqual(viewport.cursor?.y, 0)
         var renderer = HerdrClientShellRenderer()
         let text = String(decoding: try renderer.render(viewport, assets: [:]), as: UTF8.self)
         XCTAssertFalse(text.contains("#"))
@@ -388,14 +777,19 @@ final class HerdrClientShellRendererTests: XCTestCase {
         let popup = HerdrShellPopup(terminal_id: "popup-1", title: "popup", width: 1, height: 1,
             widthIsPercent: false, heightIsPercent: false, frame: frame, mouse_reporting: false,
             sgr_pixel_mouse: false, pixel_width: 8, pixel_height: 16)
-        let surface = HerdrShellSurface(boot_id: "boot", projection_revision: 1, surface_revision: 1, frame: frame,
+        var surface = HerdrShellSurface(boot_id: "boot", projection_revision: 1, surface_revision: 1, frame: frame,
             panes: [], splits: [], popup: popup, graphics: .init(assets: [], placements: [placement(image, x: 0, y: 0)], retained_assets: []))
+        surface.recordCellDamage([])
         let viewport = try HerdrShellViewportFrame.extract(.popup("popup-1"), from: surface)
         XCTAssertEqual(viewport.frame, frame)
         XCTAssertEqual(viewport.originX, 0)
         var renderer = HerdrClientShellRenderer()
         let text = String(decoding: try renderer.render(viewport, assets: [image: Data([255, 0, 0, 255])]), as: UTF8.self)
         XCTAssertTrue(text.contains("\u{1b}[1;1H\u{1b}_Ga=p"))
+        surface.surface_revision += 1
+        surface.popup?.frame.replaceCells([cell("q")], x: 0, y: 0)
+        let changed = try renderer.render(.extract(.popup("popup-1"), from: surface), assets: [:])
+        XCTAssertTrue(String(decoding: changed, as: UTF8.self).contains("q"), "Main-grid damage cannot hide popup edits")
         XCTAssertThrowsError(try HerdrShellViewportFrame.extract(.popup("other"), from: surface))
     }
 
@@ -404,52 +798,70 @@ final class HerdrClientShellRendererTests: XCTestCase {
         private var data = Data()
         func append(_ bytes: Data) { lock.lock(); data.append(bytes); lock.unlock() }
         func contains(_ text: String) -> Bool { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self).contains(text) }
+        func count(_ text: String) -> Int { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self).components(separatedBy: text).count - 1 }
     }
 
     @MainActor
     func testBackendResizeRepaintsEveryRowAndCursorInRealGhostty() async throws {
-        let replies = Replies()
-        let feedback = HerdrShellDisplayFeedback()
-        let memory = InMemoryTerminalSession(write: { bytes in
-            replies.append(bytes)
-            for byte in bytes { feedback.receive(Data([byte])) }
-        }, resize: { _ in })
-        let terminal = TerminalView(frame: NSRect(x: 0, y: 0, width: 720, height: 480))
-        terminal.configuration = .init(backend: .inMemory(memory))
-        let config = TerminalConfiguration(startingFrom: TerminalDefaults.configuration) { builder in
-            builder.withCustom("window-padding-x", "0")
-            builder.withCustom("window-padding-y", "0")
-            builder.withCustom("window-padding-balance", "false")
-        }
-        terminal.controller = TerminalController(configuration: config, theme: TerminalDefaults.theme)
-        let host = TerminalPaneHostView(paneID: UUID(), terminalView: terminal)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
-                              styleMask: [], backing: .buffered, defer: false)
-        window.contentView = host; window.orderBack(nil); host.layoutSubtreeIfNeeded(); terminal.fitToSize()
-        defer { window.orderOut(nil); window.contentView = nil }
-        for _ in 0..<100 where terminal.scrollModeGrid == nil { try await Task.sleep(for: .milliseconds(10)) }
-        let grid = try XCTUnwrap(terminal.scrollModeGrid)
-        let scale = terminal.convertToBacking(NSSize(width: 1, height: 1))
-        var renderer = HerdrClientShellRenderer()
-        for (cols, rows) in [(80, 24), (40, 12), (100, 30), (25, 8), (80, 24), (80, 24)] {
-            host.setFixedTerminalSize(NSSize(width: CGFloat(cols) * CGFloat(grid.cellWidthPixels) / scale.width,
-                                            height: CGFloat(rows) * CGFloat(grid.cellHeightPixels) / scale.height))
-            terminal.fitToSize()
-            XCTAssertEqual(terminal.scrollModeGrid?.columns, UInt16(cols))
-            XCTAssertEqual(terminal.scrollModeGrid?.rows, UInt16(rows))
-            try await feedback.waitForViewport(.init(cols: UInt16(cols), rows: UInt16(rows)), in: memory)
-            let lines = (0..<rows).map { row in String(repeating: String(UnicodeScalar(65 + row % 26)!), count: cols) }
-            let cells = lines.joined().map { cell(String($0)) }
-            let frame = HerdrShellFrame(cells: cells, width: UInt16(cols), height: UInt16(rows),
-                cursor: .init(x: UInt16(cols - 1), y: UInt16(rows - 1), visible: true, shape: 2),
-                hyperlinks: [], graphics: Data())
-            let viewport = HerdrShellViewportFrame(frame: frame, originX: 0, originY: 0, placements: [], retained: [])
-            XCTAssertTrue(memory.receiveIfAttached(try renderer.render(viewport, assets: [:])))
-            await Task.detached { memory.waitForPendingOutput() }.value
-            XCTAssertEqual(memory.readViewportText(), lines.joined(separator: "\n"), "Backend grid \(cols)x\(rows)")
-            memory.receive("\u{1b}[6n")
-            await Task.detached { memory.waitForPendingOutput() }.value
-            XCTAssertTrue(replies.contains("\u{1b}[\(rows);\(cols)R"), "Cursor at \(cols)x\(rows)")
+        do {
+            let replies = Replies()
+            let feedback = HerdrShellDisplayFeedback()
+            let memory = InMemoryTerminalSession(write: { bytes in
+                replies.append(bytes)
+                for byte in bytes { feedback.receive(Data([byte])) }
+            }, resize: { _ in feedback.invalidateViewport() })
+            let terminal = TerminalView(frame: NSRect(x: 0, y: 0, width: 720, height: 480))
+            terminal.configuration = .init(backend: .inMemory(memory))
+            let config = TerminalConfiguration(startingFrom: TerminalDefaults.configuration) { builder in
+                builder.withCustom("window-padding-x", "0")
+                builder.withCustom("window-padding-y", "0")
+                builder.withCustom("window-padding-balance", "false")
+            }
+            terminal.controller = TerminalController(configuration: config, theme: TerminalDefaults.theme)
+            let host = TerminalPaneHostView(paneID: UUID(), terminalView: terminal)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 700),
+                                  styleMask: [], backing: .buffered, defer: false)
+            window.contentView = host; window.orderBack(nil); host.layoutSubtreeIfNeeded(); terminal.fitToSize()
+            defer { window.orderOut(nil); window.contentView = nil }
+            for _ in 0..<100 where terminal.scrollModeGrid == nil { try await Task.sleep(for: .milliseconds(10)) }
+            let grid = try XCTUnwrap(terminal.scrollModeGrid)
+            let scale = terminal.convertToBacking(NSSize(width: 1, height: 1))
+            var renderer = HerdrClientShellRenderer()
+            for (cols, rows) in [(80, 24), (40, 12), (100, 30), (25, 8), (80, 24), (80, 24)] {
+                host.setFixedTerminalSize(NSSize(width: CGFloat(cols) * CGFloat(grid.cellWidthPixels) / scale.width,
+                                                height: CGFloat(rows) * CGFloat(grid.cellHeightPixels) / scale.height))
+                terminal.fitToSize()
+                XCTAssertEqual(terminal.scrollModeGrid?.columns, UInt16(cols))
+                XCTAssertEqual(terminal.scrollModeGrid?.rows, UInt16(rows))
+                try await feedback.waitForViewport(.init(cols: UInt16(cols), rows: UInt16(rows)), in: memory)
+                let response = "\u{1b}[8;\(rows);\(cols)t"
+                let confirmations = replies.count(response)
+                try await feedback.waitForViewport(.init(cols: UInt16(cols), rows: UInt16(rows)), in: memory)
+                XCTAssertEqual(replies.count(response), confirmations, "Stable geometry must not query Ghostty every frame")
+                feedback.invalidateViewport()
+                try await feedback.waitForViewport(.init(cols: UInt16(cols), rows: UInt16(rows)), in: memory)
+                XCTAssertGreaterThan(replies.count(response), confirmations, "Invalidated geometry must be confirmed again")
+                let lines = (0..<rows).map { row in String(repeating: String(UnicodeScalar(65 + row % 26)!), count: cols) }
+                let cells = lines.joined().map { cell(String($0)) }
+                let frame = HerdrShellFrame(cells: cells, width: UInt16(cols), height: UInt16(rows),
+                    cursor: .init(x: UInt16(cols - 1), y: UInt16(rows - 1), visible: true, shape: 2),
+                    hyperlinks: [], graphics: Data())
+                let viewport = HerdrShellViewportFrame(frame: frame, originX: 0, originY: 0, placements: [], retained: [])
+                XCTAssertTrue(memory.receiveIfAttached(try renderer.render(viewport, assets: [:])))
+                await Task.detached { memory.waitForPendingOutput() }.value
+                XCTAssertEqual(memory.readViewportText(), lines.joined(separator: "\n"), "Backend grid \(cols)x\(rows)")
+                let cursorReply = "\u{1b}[\(rows);\(cols)R"
+                let previousReplies = replies.count(cursorReply)
+                memory.receive("\u{1b}[6n")
+                await Task.detached { memory.waitForPendingOutput() }.value
+                // Draining the write queue does not drain Ghostty's asynchronous reply callback.
+                for _ in 0..<100 where replies.count(cursorReply) == previousReplies {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                XCTAssertGreaterThan(replies.count(cursorReply), previousReplies, "Cursor at \(cols)x\(rows)")
+            }
+        } catch {
+            XCTFail("Ghostty resize synchronization: \(error)")
         }
     }
 
@@ -514,5 +926,26 @@ final class HerdrClientShellRendererTests: XCTestCase {
         terminal.keyDown(with: enter)
         XCTAssertEqual(keys, [36], "Hardware Enter is sent semantically once, without the in-memory VT shortcut")
         XCTAssertEqual(commits, ["中文"], "Key and IME commit must not duplicate each other")
+    }
+
+    @MainActor
+    func testSparseEditsRepairWideGlyphsInRealGhostty() async throws {
+        let memory = InMemoryTerminalSession(write: { _ in }, resize: { _ in })
+        let terminal = TerminalView(frame: NSRect(x: 0, y: 0, width: 720, height: 480))
+        terminal.configuration = .init(backend: .inMemory(memory))
+        terminal.controller = TerminalController(configuration: TerminalDefaults.configuration, theme: TerminalDefaults.theme)
+        let window = NSWindow(contentRect: terminal.frame, styleMask: [], backing: .buffered, defer: false)
+        window.contentView = terminal; window.orderBack(nil); terminal.fitToSize()
+        defer { window.orderOut(nil); window.contentView = nil }
+        for _ in 0..<100 where memory.readViewportText() == nil { try await Task.sleep(for: .milliseconds(10)) }
+        var renderer = HerdrClientShellRenderer()
+        for (symbol, expected) in [("界", "界Z....!"), ("A", "A Z....!"), ("😀", "😀Z....!"), ("é", "é Z....!")] {
+            let frame = HerdrShellFrame(cells: [cell(symbol), cell(" "), cell("Z"), cell("."), cell("."), cell("."), cell("."), cell("!")],
+                width: 8, height: 1, cursor: nil, hyperlinks: [], graphics: Data())
+            let output = try renderer.render(.init(frame: frame, originX: 0, originY: 0, placements: [], retained: []), assets: [:])
+            XCTAssertTrue(memory.receiveIfAttached(output))
+            await Task.detached { memory.waitForPendingOutput() }.value
+            XCTAssertEqual(memory.readViewportText()?.components(separatedBy: "\n").first, expected)
+        }
     }
 }

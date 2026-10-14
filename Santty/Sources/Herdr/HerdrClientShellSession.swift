@@ -92,6 +92,8 @@ final class HerdrClientShellSession {
     private var hasPresentedSurface = false
     private var requestLatencies = HerdrShellLatencySamples()
     private var hostCommitLatencies = HerdrShellLatencySamples()
+    private var stageLatencies: [String: HerdrShellLatencySamples] = [:]
+    private var surfaceTraffic: [String: HerdrDiagnostics.SurfaceTraffic] = [:]
     private var offeredAt: TimeInterval?
     private var navigationTiming: NavigationTiming?
     private var navigationResponseLatencies = HerdrShellLatencySamples()
@@ -160,6 +162,15 @@ final class HerdrClientShellSession {
                     for try await packet in connection.messages {
                         connection.consume(packet)
                         guard let self, self.generation == epoch else { break }
+                        self.recordStage("payloadRead", seconds: packet.payloadReadSeconds)
+                        self.recordStage("wireDecode", seconds: packet.decodeSeconds)
+                        if let codec = packet.surfaceCodec {
+                            self.recordStage("wireDecode.\(codec)", seconds: packet.decodeSeconds)
+                            self.surfaceTraffic[codec, default: .init()].packets += 1
+                            self.surfaceTraffic[codec, default: .init()].payloadBytes += packet.byteCount
+                            self.surfaceTraffic[codec, default: .init()].decodedBytes += packet.decodedByteCount
+                        }
+                        self.recordStage("mainActorQueue", seconds: self.now - packet.enqueuedAt)
                         try self.receive(packet.message)
                     }
                     if let self, self.generation == epoch { self.fail(HerdrShellConnectionLost(message: "Herdr shell disconnected")) }
@@ -187,6 +198,7 @@ final class HerdrClientShellSession {
         deferredEffects.removeAll(); deferredEffectBytes = 0
         sentHostDark = nil; sentHostColors = nil
         requestLatencies = .init(); hostCommitLatencies = .init(); offeredAt = nil
+        stageLatencies.removeAll(); surfaceTraffic.removeAll()
         navigationTiming = nil; navigationResponseLatencies = .init(); navigationSceneLatencies = .init()
         navigationCommitLatencies = .init(); navigationTotalLatencies = .init(); supersededNavigations = 0
         generation += 1
@@ -254,7 +266,7 @@ final class HerdrClientShellSession {
             }
         }
         guard releaseOnly || (state == .interactive && pending.isEmpty && navigation == nil
-            && isPresentationReady && projection.coherentSurface?.containsInputTarget(target, popup: popup) == true) else { return false }
+            && isInputReady && projection.coherentSurface?.containsInputTarget(target, popup: popup) == true) else { return false }
         do {
             var held = heldReleases
             for event in events {
@@ -305,6 +317,17 @@ final class HerdrClientShellSession {
 
     private var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
+    func recordStage(_ stage: String, seconds: TimeInterval) {
+        stageLatencies[stage, default: .init()].record(seconds: seconds)
+    }
+
+    func recordRenderTiming(_ timing: HerdrShellRenderTiming?) {
+        guard let timing else { return }
+        recordStage("encodeQueue", seconds: timing.queue)
+        recordStage("encode", seconds: timing.encode)
+        recordStage("encodeActorResume", seconds: timing.resume)
+    }
+
     private func receive(_ message: HerdrShellServerMessage) throws {
         lastReceived = now; pingSentAt = nil
         guard welcome != nil else {
@@ -315,11 +338,15 @@ final class HerdrClientShellSession {
         switch message {
         case let .control(kind, data):
             if kind == "shell.snapshot.v1" {
+                let decodedAt = now
                 let snapshot = try JSONDecoder().decode(HerdrShellSnapshot.self, from: Data(data.utf8))
+                recordStage("snapshotDecode", seconds: now - decodedAt)
                 if let previous = projection.snapshot, previous.boot_id != snapshot.boot_id {
                     throw CLIError("Herdr service restarted; reconnect to establish a new runtime identity")
                 }
+                let appliedAt = now
                 _ = try projection.receive(snapshot)
+                recordStage("snapshotApply", seconds: now - appliedAt)
                 if projection.snapshot == snapshot { onMetadata?(snapshot) }
                 if activatesWhenMetadataReady, !activationQueued { try activate(snapshot) }
                 publish()
@@ -334,8 +361,16 @@ final class HerdrClientShellSession {
             } else if kind == "endpoint.presentation.ready.v1", data == fenceToken {
                 fenceToken = nil; publish()
             }
-        case let .surface(surface): _ = try projection.receive(surface); publish()
-        case let .patch(patch): _ = try projection.receive(patch); publish()
+        case let .surface(surface):
+            let appliedAt = now
+            _ = try projection.receive(surface)
+            recordStage("surfaceApply", seconds: now - appliedAt)
+            publish()
+        case let .patch(patch):
+            let appliedAt = now
+            _ = try projection.receive(patch)
+            recordStage("patchApply", seconds: now - appliedAt)
+            publish()
         case let .response(boot, id, final, data): try response(boot: boot, id: id, final: final, data: data)
         case let .shutdown(reason): throw CLIError(reason ?? "Herdr server disconnected")
         // ClientShellError is an operation rejection notice; the upstream client keeps its connection.
@@ -456,6 +491,8 @@ final class HerdrClientShellSession {
     }
 
     private func publish() {
+        let publishedAt = now
+        defer { recordStage("publish", seconds: now - publishedAt) }
         if let navigation, navigation.acknowledged, let snapshot = projection.snapshot,
            let surface = projection.coherentSurface, projection.pendingSurface == nil,
            surface.projection_revision >= navigation.minimumRevision,
@@ -507,6 +544,16 @@ final class HerdrClientShellSession {
               frame.frame.width == size.cols, frame.frame.height == size.rows else { return false }
         if presented == Presentation(frame) { return true }
         guard presentedFromPinnedFrame, let presented, let snapshot = projection.snapshot else { return false }
+        return presented.boot == frame.boot_id && presented.projection == frame.projection_revision
+            && presentedGeometry == Geometry(snapshot, frame)
+    }
+
+    var isInputReady: Bool {
+        if isPresentationReady { return true }
+        guard transport != nil, state == .interactive, navigation == nil, fenceToken == nil,
+              let frame = projection.coherentSurface, projection.pendingSurface == nil,
+              frame.frame.width == size.cols, frame.frame.height == size.rows,
+              let presented, let snapshot = projection.snapshot else { return false }
         return presented.boot == frame.boot_id && presented.projection == frame.projection_revision
             && presentedGeometry == Geometry(snapshot, frame)
     }
@@ -665,6 +712,7 @@ final class HerdrClientShellSession {
             navigationMatchingSceneToHostCommit: navigationCommitLatencies.summary,
             navigationTotal: navigationTotalLatencies.summary,
             navigationAwaitingHostCommit: navigationTiming?.matchedAt != nil,
-            supersededNavigations: supersededNavigations, queues: transport?.queueUsage)
+            supersededNavigations: supersededNavigations, queues: transport?.queueUsage,
+            stages: stageLatencies.mapValues(\.summary), surfaceTraffic: surfaceTraffic)
     }
 }

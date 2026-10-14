@@ -43,9 +43,10 @@ final class AppMenuTests: XCTestCase {
         }
 
         let target = NSObject()
+        let workspace = WorkspaceViewController()
         AppMenu.install(
             applicationTarget: target,
-            workspaceTarget: target,
+            workspaceTarget: workspace,
             commandPaletteAction: #selector(NSObject.description),
             checkForUpdatesAction: #selector(NSObject.description),
             settingsAction: #selector(NSObject.description),
@@ -61,6 +62,18 @@ final class AppMenuTests: XCTestCase {
         XCTAssertNil(paneMenu.item(withTitle: "Herdr Connection Settings..."))
         XCTAssertNil(paneMenu.item(withTitle: "Enter Herdr Mode…"))
         XCTAssertNil(paneMenu.item(withTitle: "New Persistent Terminal"))
+        for selector in [#selector(WorkspaceViewController.disconnectPersistentTerminal(_:)),
+                         #selector(WorkspaceViewController.takeOverPersistentTerminal(_:)),
+                         #selector(WorkspaceViewController.endPersistentTerminal(_:))] {
+            XCTAssertFalse(paneMenu.items.contains { $0.action == selector })
+        }
+        let reconnect = try XCTUnwrap(paneMenu.item(withTitle: "Reconnect Herdr Window"))
+        XCTAssertEqual(reconnect.action, #selector(WorkspaceViewController.reconnectPersistentTerminal(_:)))
+        XCTAssertTrue(paneMenu.delegate === workspace)
+        XCTAssertTrue(reconnect.isHidden)
+        reconnect.isHidden = false
+        paneMenu.delegate?.menuNeedsUpdate?(paneMenu)
+        XCTAssertTrue(reconnect.isHidden, "Local workspaces have no Herdr window to reconnect")
         XCTAssertFalse(KeybindingAction.allCases.contains { $0.commandID == "terminal.herdr.new" })
         XCTAssertEqual(paneMenu.item(withTitle: "New Herdr Workspace")?.action,
             #selector(WorkspaceViewController.newHerdrWorkspace(_:)))

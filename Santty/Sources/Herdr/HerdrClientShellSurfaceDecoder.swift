@@ -10,7 +10,7 @@ struct HerdrClientShellSurfaceDecoder {
         let terminalID: String
         let width: UInt16
         let height: UInt16
-        let cells: [HerdrShellCell]
+        let frame: HerdrShellFrame
     }
     private struct Baseline {
         let boot: String
@@ -18,13 +18,15 @@ struct HerdrClientShellSurfaceDecoder {
         var revision: UInt64
         let width: UInt16
         let height: UInt16
-        var cells: [HerdrShellCell]
+        var frame: HerdrShellFrame
+        var damage: HerdrShellSurface.Damage?
+        let panes: [HerdrShellPane]
         let popup: PopupBaseline?
         init(_ surface: HerdrShellSurface) {
             boot = surface.boot_id; projection = surface.projection_revision; revision = surface.surface_revision
-            width = surface.frame.width; height = surface.frame.height; cells = surface.frame.cells
+            width = surface.frame.width; height = surface.frame.height; frame = surface.frame; damage = surface.damage; panes = surface.panes
             popup = surface.popup.map {
-                .init(terminalID: $0.terminal_id, width: $0.frame.width, height: $0.frame.height, cells: $0.frame.cells)
+                .init(terminalID: $0.terminal_id, width: $0.frame.width, height: $0.frame.height, frame: $0.frame)
             }
         }
     }
@@ -57,10 +59,13 @@ struct HerdrClientShellSurfaceDecoder {
                   base.boot == reuse.surface.boot_id, base.revision == reuse.base_surface_revision,
                   reuse.surface.surface_revision == base.revision + 1,
                   base.width == reuse.surface.frame.width, base.height == reuse.surface.frame.height,
-                  reuse.surface.frame.cells.isEmpty else { throw CLIError("Herdr surface reuse does not match its baseline") }
+                  reuse.surface.frame.cellCount == 0 else { throw CLIError("Herdr surface reuse does not match its baseline") }
             var restored = reuse.surface
-            restored.frame.cells = base.cells
-            try restored.validateWireSurface(extendedMetadata: requestedDelta)
+            restored.frame.reuseCells(from: base.frame)
+            restored.damage = base.damage
+            restored.hasRetainedCells = true
+            try restored.validateWireSurface(extendedMetadata: negotiatedDelta, sharedMainCells: true)
+            restored.recordCellDamage([], previousPanes: base.panes)
             baseline = Baseline(restored)
             return .surface(restored)
         case .control("endpoint.surface-scroll.v1", let data):
@@ -69,13 +74,15 @@ struct HerdrClientShellSurfaceDecoder {
         case .control("endpoint.surface-delta.v1", let data):
             guard negotiatedDelta else { throw CLIError("Herdr surface delta was not negotiated") }
             return try .surface(decodeDelta(data))
-        case .surface(let surface):
-            guard requestedReuse || requestedScroll || requestedDelta else { return message }
+        case .surface(var surface):
+            guard negotiatedReuse || negotiatedScroll || negotiatedDelta else { return message }
             try surface.validateWireSurface()
+            surface.damage = nil; surface.hasRetainedCells = false
+            surface.recordCellDamage([])
             baseline = Baseline(surface)
-            return message
+            return .surface(surface)
         case .patch(let patch):
-            guard requestedReuse || requestedScroll || requestedDelta, var base = baseline else { return message }
+            guard negotiatedReuse || negotiatedScroll || negotiatedDelta, var base = baseline else { return message }
             guard base.revision < UInt64.max, patch.boot_id == base.boot,
                   patch.projection_revision == base.projection,
                   patch.base_surface_revision == base.revision, patch.surface_revision == base.revision + 1 else {
@@ -88,8 +95,9 @@ struct HerdrClientShellSurfaceDecoder {
                 }
             }
             for row in patch.rows {
-                let start = Int(row.y) * Int(base.width) + Int(row.x)
-                base.cells.replaceSubrange(start..<(start + row.cells.count), with: row.cells)
+                base.frame.replaceCells(row.cells, x: Int(row.x), y: Int(row.y))
+                base.damage?.mark(.init(x: row.x, y: row.y, width: UInt16(row.cells.count), height: 1),
+                                  panes: base.panes, revision: patch.surface_revision)
             }
             base.revision = patch.surface_revision
             baseline = base
@@ -111,8 +119,10 @@ struct HerdrClientShellSurfaceDecoder {
             throw CLIError("Herdr surface delta does not match its baseline")
         }
         let rows = try Self.deltaRows(&reader, width: base.width, height: base.height)
-        surface.frame.cells = base.cells
-        Self.applyDeltaRows(rows, to: &surface.frame.cells, width: base.width)
+        surface.frame.reuseCells(from: base.frame)
+        Self.applyDeltaRows(rows, to: &surface.frame)
+        surface.damage = base.damage
+        surface.hasRetainedCells = true
         let popupUpdate = try reader.bool()
         if popupUpdate {
             guard var popup = surface.popup else { throw CLIError("Herdr popup delta has no metadata") }
@@ -123,8 +133,8 @@ struct HerdrClientShellSurfaceDecoder {
                       previous.width == popup.frame.width, previous.height == popup.frame.height else {
                     throw CLIError("Herdr popup delta does not match its baseline")
                 }
-                popup.frame.cells = previous.cells
-                Self.applyDeltaRows(rows, to: &popup.frame.cells, width: popup.frame.width)
+                popup.frame.reuseCells(from: previous.frame)
+                Self.applyDeltaRows(rows, to: &popup.frame)
             default:
                 let count = Int(popup.frame.width) * Int(popup.frame.height)
                 guard try reader.uint(maximum: UInt64(count)) == UInt64(count), count <= reader.remaining / 6 else {
@@ -137,7 +147,8 @@ struct HerdrClientShellSurfaceDecoder {
             surface.popup = popup
         } else if surface.popup != nil { throw CLIError("Herdr popup delta update is missing") }
         guard reader.remaining == 0 else { throw CLIError("Trailing Herdr surface delta bytes") }
-        try surface.validateWireSurface(extendedMetadata: true)
+        try surface.validateWireSurface(extendedMetadata: true, sharedMainCells: true)
+        surface.recordCellDamage(rows, previousPanes: base.panes)
         baseline = Baseline(surface)
         return surface
     }
@@ -164,16 +175,8 @@ struct HerdrClientShellSurfaceDecoder {
         return result
     }
 
-    private static func applyDeltaRows(_ rows: [HerdrShellPatch.Row], to cells: inout [HerdrShellCell], width: UInt16) {
-        for row in rows {
-            let start = Int(row.y) * Int(width) + Int(row.x)
-            cells.replaceSubrange(start..<(start + row.cells.count), with: row.cells)
-        }
-    }
-
-    private struct Scroll {
-        let rect: HerdrShellRect
-        let shift: Int
+    private static func applyDeltaRows(_ rows: [HerdrShellPatch.Row], to frame: inout HerdrShellFrame) {
+        for row in rows { frame.replaceCells(row.cells, x: Int(row.x), y: Int(row.y)) }
     }
 
     private mutating func decodeScroll(_ text: String) throws -> HerdrShellPatch {
@@ -186,7 +189,7 @@ struct HerdrClientShellSurfaceDecoder {
         let count = Int(countByte), header = 1 + Int(countByte) * 10
         guard bytes.count >= header + 4 else { throw CLIError("Truncated Herdr surface scroll") }
         func word(_ at: Int) -> UInt16 { UInt16(bytes[at]) | UInt16(bytes[at + 1]) << 8 }
-        let scrolls = (0..<count).map { index -> Scroll in
+        let scrolls = (0..<count).map { index -> HerdrShellPatch.Scroll in
             let at = 1 + index * 10
             return .init(rect: .init(x: word(at), y: word(at + 2), width: word(at + 4), height: word(at + 6)),
                          shift: Int(Int16(bitPattern: word(at + 8))))
@@ -199,7 +202,7 @@ struct HerdrClientShellSurfaceDecoder {
         }
         guard base.revision < UInt64.max, patch.boot_id == base.boot, patch.projection_revision == base.projection,
               patch.base_surface_revision == base.revision, patch.surface_revision == base.revision + 1,
-              base.cells.count == Int(base.width) * Int(base.height) else {
+              base.frame.cellCount == Int(base.width) * Int(base.height) else {
             throw CLIError("Herdr surface scroll does not match its baseline")
         }
         let area = HerdrShellRect(x: 0, y: 0, width: base.width, height: base.height)
@@ -221,55 +224,19 @@ struct HerdrClientShellSurfaceDecoder {
                 throw CLIError("Herdr surface scroll patch exceeds its grid")
             }
         }
-        // Match the upstream row-swap order, including the vacated rows.
-        for scroll in scrolls {
-            let rect = scroll.rect, distance = abs(scroll.shift), height = Int(scroll.rect.height)
-            let rows = scroll.shift > 0 ? Array(0..<(height - distance)) : Array(stride(from: height - 1, through: distance, by: -1))
-            for row in rows {
-                let other = row + (scroll.shift > 0 ? distance : -distance)
-                let a = (Int(rect.y) + row) * Int(base.width) + Int(rect.x)
-                let b = (Int(rect.y) + other) * Int(base.width) + Int(rect.x)
-                for column in 0..<Int(rect.width) { base.cells.swapAt(a + column, b + column) }
-            }
-        }
+        // Keep the operation compact through projection instead of expanding moved cells.
+        for scroll in scrolls { base.frame.scroll(scroll.rect, by: scroll.shift) }
+        Self.applyDeltaRows(patch.rows, to: &base.frame)
         for row in patch.rows {
-            let start = Int(row.y) * Int(base.width) + Int(row.x)
-            base.cells.replaceSubrange(start..<(start + row.cells.count), with: row.cells)
+            base.damage?.mark(.init(x: row.x, y: row.y, width: UInt16(row.cells.count), height: 1),
+                              panes: base.panes, revision: patch.surface_revision)
         }
-        var rows: [HerdrShellPatch.Row] = []
-        for row in patch.rows {
-            let start = Int(row.x), end = start + row.cells.count
-            var covered: [(Int, Int)] = []
-            for scroll in scrolls {
-                let rect = scroll.rect
-                if row.y >= rect.y && Int(row.y) < Int(rect.y) + Int(rect.height) {
-                    covered.append((Int(rect.x), Int(rect.x) + Int(rect.width)))
-                }
-            }
-            covered.sort { $0.0 < $1.0 }
-            if covered.isEmpty { rows.append(row); continue }
-            var cursor = start
-            for (left, right) in covered + [(end, end)] {
-                let stop = min(max(left, cursor), end)
-                if stop > cursor {
-                    rows.append(.init(x: UInt16(cursor), y: row.y, cells: Array(row.cells[(cursor - start)..<(stop - start)])))
-                }
-                cursor = max(cursor, min(right, end))
-            }
-        }
-        for scroll in scrolls {
-            let rect = scroll.rect
-            for y in Int(rect.y)..<(Int(rect.y) + Int(rect.height)) {
-                let start = y * Int(base.width) + Int(rect.x)
-                rows.append(.init(x: rect.x, y: UInt16(y), cells: Array(base.cells[start..<(start + Int(rect.width))])))
-            }
-        }
-        let expanded = HerdrShellPatch(boot_id: patch.boot_id, projection_revision: patch.projection_revision,
-            base_surface_revision: patch.base_surface_revision, surface_revision: patch.surface_revision,
-            rows: rows, panes: patch.panes, cursor: patch.cursor)
+        for scroll in scrolls { base.damage?.mark(scroll.rect, panes: base.panes, revision: patch.surface_revision) }
+        var compact = patch
+        compact.scrolls = scrolls
         base.revision = patch.surface_revision
         baseline = base
-        return expanded
+        return compact
     }
 
     private static func unpaddedBase64(_ text: String, maximumEncodedBytes: Int) throws -> Data {
@@ -313,10 +280,11 @@ extension HerdrShellFrame: Decodable {
             graphics: Data(try values.decode([UInt8].self, forKey: .graphics)))
     }
 
-    func validateWireFrame(extendedMetadata: Bool = false) throws {
-        guard width > 0, height > 0, cells.count == Int(width) * Int(height), cells.count <= 1_048_576,
+    func validateWireFrame(extendedMetadata: Bool = false, sharedCells: Bool = false) throws {
+        guard width > 0, height > 0, cellCount == Int(width) * Int(height), cellCount <= 1_048_576,
               hyperlinks.count <= (extendedMetadata ? 65536 : 4096), hyperlinks.allSatisfy({ $0.utf8.count <= HerdrShellWire.maximumStringBytes }),
-              cells.allSatisfy({ $0.symbol.utf8.count <= HerdrShellWire.maximumStringBytes && ($0.hyperlink.map { Int($0) < hyperlinks.count } ?? true) }),
+              maximumHyperlink.map({ Int($0) < hyperlinks.count }) ?? true,
+              sharedCells || (0..<Int(height)).allSatisfy({ cells(in: $0).allSatisfy { $0.symbol.utf8.count <= HerdrShellWire.maximumStringBytes } }),
               graphics.count <= HerdrShellWire.maximumFrameBytes,
               cursor.map({ $0.shape <= 6 && (!$0.visible || ($0.x < width && $0.y < height)) }) ?? true
         else { throw CLIError("Invalid Herdr surface grid") }
@@ -412,8 +380,8 @@ extension HerdrShellPopup: Decodable {
 }
 
 extension HerdrShellSurface {
-    func validateWireSurface(extendedMetadata: Bool = false) throws {
-        try frame.validateWireFrame(extendedMetadata: extendedMetadata)
+    func validateWireSurface(extendedMetadata: Bool = false, sharedMainCells: Bool = false) throws {
+        try frame.validateWireFrame(extendedMetadata: extendedMetadata, sharedCells: sharedMainCells)
         let area = HerdrShellRect(x: 0, y: 0, width: frame.width, height: frame.height)
         guard !boot_id.isEmpty, boot_id.utf8.count <= HerdrShellWire.maximumStringBytes,
               panes.count <= 4096, splits.count <= 4096, Set(panes.map(\.pane_id)).count == panes.count,

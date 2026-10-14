@@ -791,10 +791,12 @@ final class SanttyTests: XCTestCase {
         let editor = try XCTUnwrap(search.currentEditor() as? NSTextView)
         let picker = try XCTUnwrap(firstSubview(ofType: NSSegmentedControl.self, in: view))
         let table = try XCTUnwrap(firstSubview(ofType: NSTableView.self, in: view))
+        XCTAssertEqual((0..<picker.segmentCount).map { picker.label(forSegment: $0) },
+                       ["All", "Agents", "Workspace", "Tab", "Pane", "Command"])
         let tab = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
             windowNumber: panel.windowNumber, context: nil, characters: "\t", charactersIgnoringModifiers: "\t",
             isARepeat: false, keyCode: 48))
-        for segment in [1, 2, 3, 4, 0] {
+        for segment in Array(1..<picker.segmentCount) + [0] {
             editor.keyDown(with: tab)
             XCTAssertEqual(picker.selectedSegment, segment)
             XCTAssertEqual(table.numberOfRows, segment == 0 ? commands.count : 1)

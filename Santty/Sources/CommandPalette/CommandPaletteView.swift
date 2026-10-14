@@ -18,7 +18,7 @@ final class CommandPaletteView: NSView {
     private let tableColumn = NSTableColumn(identifier: .commandPaletteCommand)
     private let searchField = NSTextField()
     private let kindPicker = NSSegmentedControl(
-        labels: ["All", "Workspace", "Tab", "Pane", "Command"], trackingMode: .selectOne,
+        labels: ["All"] + PaletteItemKind.allCases.map(\.rawValue), trackingMode: .selectOne,
         target: nil, action: nil)
 
     let preferredContentSize = NSSize(width: 620, height: 560)
@@ -84,7 +84,7 @@ final class CommandPaletteView: NSView {
     private func configureSearchField() {
         searchField.cell = CommandPaletteSearchFieldCell(textCell: "")
         searchField.placeholderAttributedString = NSAttributedString(
-            string: "Search workspaces, tabs, panes, commands...",
+            string: "Search anything ...",
             attributes: [
                 .foregroundColor: CommandPaletteColors.placeholderText,
                 .font: NSFont.systemFont(ofSize: 22, weight: .regular),
@@ -307,7 +307,9 @@ final class CommandPaletteView: NSView {
 }
 
 extension CommandPaletteView: NSTextFieldDelegate {
-    func control(_ control: NSControl, textView _: NSTextView, doCommandBy commandSelector: Selector)
+    func control(
+        _ control: NSControl, textView _: NSTextView, doCommandBy commandSelector: Selector
+    )
         -> Bool
     {
         guard control === searchField, commandSelector == #selector(NSResponder.insertTab(_:))

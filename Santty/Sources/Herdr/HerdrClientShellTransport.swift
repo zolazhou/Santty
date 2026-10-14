@@ -3,8 +3,12 @@ import Darwin
 
 struct HerdrShellPacket: Sendable {
     let message: HerdrShellServerMessage
+    let surfaceCodec: String?
     let byteCount: Int
     let decodedByteCount: Int
+    let payloadReadSeconds: TimeInterval
+    let decodeSeconds: TimeInterval
+    let enqueuedAt: TimeInterval
 }
 
 struct HerdrShellConnectionLost: LocalizedError, Sendable {
@@ -138,8 +142,13 @@ final class HerdrClientShellTransport: @unchecked Sendable {
                 queuedReadBytes += bytes
                 peakReadBytes = max(peakReadBytes, queuedReadBytes)
                 lock.unlock()
-                let message = try surfaceDecoder.decode(HerdrShellWire.decode(readExactly(bytes, from: fd)))
-                // Charge after connection-local surface expansion when optional codecs are enabled.
+                let readAt = ProcessInfo.processInfo.systemUptime
+                let payload = try readExactly(bytes, from: fd)
+                let decodeAt = ProcessInfo.processInfo.systemUptime
+                let wireMessage = try HerdrShellWire.decode(payload)
+                let message = try surfaceDecoder.decode(wireMessage)
+                let decodedAt = ProcessInfo.processInfo.systemUptime
+                // Charge retained grids conservatively even when several messages share their rows.
                 let decodedBytes = message.estimatedDecodedBytes
                 lock.lock()
                 guard decodedBytes <= Self.decodedQueueBudget - queuedDecodedBytes else {
@@ -148,7 +157,9 @@ final class HerdrClientShellTransport: @unchecked Sendable {
                 queuedDecodedBytes += decodedBytes
                 peakDecodedBytes = max(peakDecodedBytes, queuedDecodedBytes)
                 lock.unlock()
-                switch continuation.yield(.init(message: message, byteCount: bytes, decodedByteCount: decodedBytes)) {
+                switch continuation.yield(.init(message: message, surfaceCodec: wireMessage.surfaceCodec, byteCount: bytes, decodedByteCount: decodedBytes,
+                    payloadReadSeconds: decodeAt - readAt, decodeSeconds: decodedAt - decodeAt,
+                    enqueuedAt: ProcessInfo.processInfo.systemUptime)) {
                 case .enqueued: break
                 case .dropped: throw CLIError("Herdr shell event queue is full")
                 case .terminated: stop(); return

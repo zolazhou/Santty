@@ -150,6 +150,9 @@ struct HerdrShellProjection {
             assetBytes += max(data.count, Int(pixels * components))
             guard assetBytes <= Self.maximumAssetBytes else { throw CLIError("Herdr image cache exceeds budget") }
         }
+        var next = next
+        if !next.hasRetainedCells { next.damage = nil }
+        if next.damage == nil { next.recordCellDamage([]) }
         assets = nextAssets
         if next.projection_revision == snapshot.revision { surface = next; pendingSurface = nil }
         else { pendingSurface = next }
@@ -192,10 +195,20 @@ struct HerdrShellProjection {
         if let cursor = patch.cursor, cursor.visible, cursor.x >= next.frame.width || cursor.y >= next.frame.height {
             throw CLIError("Invalid Herdr patch cursor")
         }
-        for row in patch.rows {
-            let start = Int(row.y) * width + Int(row.x)
-            next.frame.cells.replaceSubrange(start..<(start + row.cells.count), with: row.cells)
+        for scroll in patch.scrolls {
+            guard scroll.rect.width > 0, scroll.rect.height >= 2, scroll.shift != 0,
+                  abs(scroll.shift) < Int(scroll.rect.height),
+                  patch.panes.contains(where: { $0.inner_rect.contains(scroll.rect) }) else {
+                throw CLIError("Invalid Herdr scroll pane region")
+            }
         }
+        for scroll in patch.scrolls { next.frame.scroll(scroll.rect, by: scroll.shift) }
+        for row in patch.rows {
+            next.frame.replaceCells(row.cells, x: Int(row.x), y: Int(row.y))
+            next.damage?.mark(.init(x: row.x, y: row.y, width: UInt16(row.cells.count), height: 1),
+                              panes: next.panes, revision: patch.surface_revision)
+        }
+        for scroll in patch.scrolls { next.damage?.mark(scroll.rect, panes: next.panes, revision: patch.surface_revision) }
         for pane in patch.panes { next.panes[paneIndices[pane.pane_id]!] = pane }
         next.frame.cursor = patch.cursor
         next.surface_revision = patch.surface_revision

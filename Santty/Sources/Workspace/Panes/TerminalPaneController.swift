@@ -92,6 +92,14 @@ final class TerminalPaneController: NSObject, PaneControlling {
             && session.projection.coherentSurface?.containsInputTarget(binding.paneID, popup: false) == true
     }
 
+    private var canSendClientShellInput: Bool {
+        guard isLive, let binding = herdrBinding, clientShellIsPresented, clientShellSurfaceAttached,
+              terminalView.window != nil, let session = clientShellSession,
+              clientShellBootID == session.projection.snapshot?.boot_id else { return false }
+        return session.isInputReady && herdrState == .interactive
+            && session.projection.coherentSurface?.containsInputTarget(binding.paneID, popup: false) == true
+    }
+
     var foregroundProcessID: Int? {
         if herdrBinding != nil { return isLive ? herdrProcessInfo?.foreground_process_group_id : nil }
         guard isLive, let processID = foregroundProcessIDProvider() else {
@@ -129,7 +137,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
         let feedback = herdr.map { _ in HerdrShellDisplayFeedback() }
         clientShellFeedback = feedback
         let memory = herdr.map { _ in
-            InMemoryTerminalSession(write: { bytes in feedback?.receive(bytes) }, resize: { _ in })
+            InMemoryTerminalSession(write: { bytes in feedback?.receive(bytes) }, resize: { _ in feedback?.invalidateViewport() })
         }
         herdrMemorySession = memory
         currentWorkingDirectory = workingDirectory
@@ -222,7 +230,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
         init(id: PaneID, configuration: TerminalConfiguration) {
             let feedback = HerdrShellDisplayFeedback()
             self.feedback = feedback
-            memory = InMemoryTerminalSession(write: { feedback.receive($0) }, resize: { _ in })
+            memory = InMemoryTerminalSession(write: { feedback.receive($0) }, resize: { _ in feedback.invalidateViewport() })
             view = TerminalView(frame: NSRect(x: 0, y: 0, width: 720, height: 480))
             controller = TerminalController(configuration: configuration, theme: TerminalDefaults.theme)
             host = TerminalPaneHostView(paneID: id, terminalView: view)
@@ -231,8 +239,8 @@ final class TerminalPaneController: NSObject, PaneControlling {
             view.controller = controller
             view.delegate = self
         }
-        func terminalDidAttachSurface(_: TerminalSurface) { attached = true; epoch += 1; renderer.reset() }
-        func terminalDidDetachSurface() { attached = false; epoch += 1; renderer.reset() }
+        func terminalDidAttachSurface(_: TerminalSurface) { attached = true; epoch += 1; renderer.reset(); feedback.invalidateViewport() }
+        func terminalDidDetachSurface() { attached = false; epoch += 1; renderer.reset(); feedback.invalidateViewport() }
     }
 
     func stageClientShellDisplay() -> NSView {
@@ -329,15 +337,24 @@ final class TerminalPaneController: NSObject, PaneControlling {
         clientShellPressedButtons = clientShellPressedButtons.filter { button in
             clientShellSession?.hasHeldMouse(target: herdrBinding?.paneID ?? "", button: button) == true
         }
+        let previousState = herdrState, previousToolTip = terminalHostView.toolTip
         herdrState = state
         if case .failed(let message) = state { terminalHostView.toolTip = message }
         else { terminalHostView.toolTip = clientShellDisplayError }
-        onTitleChange?(id)
+        if previousState != state || previousToolTip != terminalHostView.toolTip { onTitleChange?(id) }
     }
 
-    @discardableResult
     func prepareClientShellRender(_ surface: HerdrShellSurface, assets: [HerdrShellAssetKey: Data]) async throws
         -> HerdrShellPreparedRender? {
+        guard let request = try await prepareClientShellRenderRequest(surface, assets: assets) else { return nil }
+        let scene = try await HerdrClientShellRenderer.prepareScene([request.input], from: surface, assets: assets)
+        guard request.isCurrent() else { return nil }
+        clientShellSession?.recordRenderTiming(scene.timing)
+        return request.output(scene.outputs[0])
+    }
+
+    func prepareClientShellRenderRequest(_ surface: HerdrShellSurface, assets: [HerdrShellAssetKey: Data]) async throws
+        -> HerdrShellRenderRequest? {
         guard let binding = herdrBinding, let session = clientShellSession,
               clientShellBootID == surface.boot_id, let snapshot = session.projection.snapshot,
               snapshot.boot_id == surface.boot_id, snapshot.revision == surface.projection_revision,
@@ -369,12 +386,6 @@ final class TerminalPaneController: NSObject, PaneControlling {
             return NSRect(x: CGFloat(cursor.x - rect.x) * width, y: CGFloat(cursor.y - rect.y) * height,
                           width: width, height: height)
         }
-        terminalHostView.setFixedTerminalSize(NSSize(
-            width: CGFloat(rect.width) * CGFloat(metrics.cellWidthPixels) / scale.width,
-            height: CGFloat(rect.height) * CGFloat(metrics.cellHeightPixels) / scale.height))
-        terminalView.fitToSize()
-        guard let grid = terminalView.scrollModeGrid,
-              grid.columns == rect.width, grid.rows == rect.height else { return nil }
         let generation = herdrGeneration, displayEpoch = clientShellHostColorEpoch
         let candidateEpoch = candidate?.epoch
         let isCurrent: @MainActor () -> Bool = { [self] in
@@ -391,16 +402,31 @@ final class TerminalPaneController: NSObject, PaneControlling {
                 && session.canPresent(surface)
         }
         guard let feedback = candidate?.feedback ?? clientShellFeedback else { return nil }
-        try await feedback.waitForViewport(.init(cols: rect.width, rows: rect.height), in: memory)
-        guard isCurrent() else { return nil }
-        let prepared = try await (candidate?.renderer ?? clientShellRenderer).prepare(.pane(binding.paneID), from: surface, assets: assets)
+        var renderer = candidate?.renderer ?? clientShellRenderer
+        let size = HerdrShellSize(cols: rect.width, rows: rect.height)
+        let confirmedViewport = feedback.hasConfirmedViewport(size, in: memory)
+        let reusesViewport = try confirmedViewport && renderer.canReuse(.pane(binding.paneID), from: surface, assets: assets)
+        if !reusesViewport {
+            terminalHostView.setFixedTerminalSize(NSSize(
+                width: CGFloat(rect.width) * CGFloat(metrics.cellWidthPixels) / scale.width,
+                height: CGFloat(rect.height) * CGFloat(metrics.cellHeightPixels) / scale.height))
+            terminalView.fitToSize()
+            guard let grid = terminalView.scrollModeGrid,
+                  grid.columns == rect.width, grid.rows == rect.height else { return nil }
+            // A native resize can discard cells even when the backend returns to the same grid.
+            if !confirmedViewport { renderer.reset() }
+            try await feedback.waitForViewport(size, in: memory)
+            guard isCurrent() else { return nil }
+        }
         try Task.checkCancellation()
         guard isCurrent() else { return nil }
-        let bytes = prepared.bytes, preparedRenderer = prepared.renderer
-        return .init(byteCount: bytes.count, isCurrent: isCurrent, commit: { [self] in
+        return .init(input: .init(renderer: renderer, target: .pane(binding.paneID)),
+                     isCurrent: isCurrent, commit: { [self] preparedRenderer, bytes in
             guard isCurrent() else { return nil }
-            guard memory.receiveIfAttached(bytes) else { return nil }
-            terminalHostView.setFixedTerminalCursorRect(cursorRect)
+            if !bytes.isEmpty {
+                guard memory.receiveIfAttached(bytes) else { return nil }
+                terminalHostView.setFixedTerminalCursorRect(cursorRect)
+            }
             if let candidate, clientShellCandidate === candidate {
                 candidate.renderer = preparedRenderer
                 candidate.mouseReporting = pane.mouse_reporting; candidate.pixelMouse = pane.sgr_pixel_mouse
@@ -421,7 +447,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
         let held = button.map { clientShellPressedButtons.contains($0) } == true
         if !wheel, !held, (!clientShellMouseReporting || event.modifierFlags.contains(.shift)) { return false }
         let release = [NSEvent.EventType.leftMouseUp, .rightMouseUp, .otherMouseUp].contains(event.type) && held
-        guard canAcceptInput || release, let grid = terminalView.scrollModeGrid,
+        guard canSendClientShellInput || release, let grid = terminalView.scrollModeGrid,
               grid.cellWidthPixels > 0, grid.cellHeightPixels > 0 else { return true }
         let scale = terminalView.convertToBacking(NSSize(width: 1, height: 1))
         let p = terminalView.convert(event.locationInWindow, from: nil)
@@ -504,7 +530,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
 
     @discardableResult
     func sendClientShellInput(_ events: [HerdrShellInput]) -> Bool {
-        guard canAcceptInput, let binding = herdrBinding,
+        guard canSendClientShellInput, let binding = herdrBinding,
               let session = clientShellSession, clientShellBootID == session.projection.snapshot?.boot_id else { return false }
         return session.input(target: binding.paneID, events: events)
     }
@@ -972,6 +998,7 @@ extension TerminalPaneController: TerminalSurfaceLifecycleDelegate {
 
     private func invalidateClientShellSurface() {
         guard herdrBinding != nil else { return }
+        clientShellFeedback?.invalidateViewport()
         clientShellHostColorEpoch += 1
         clientShellFeedback?.resetHostColorQueries()
         clientShellRenderer.reset()

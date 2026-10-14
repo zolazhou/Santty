@@ -12,8 +12,11 @@ final class WorkspaceViewControllerTests: XCTestCase {
             AppCommand(id: "remote", title: "Logs", shortcut: nil, isEnabled: true, kind: .pane, subtitle: "Santty › API") {},
             AppCommand(id: "local", title: "Logs", shortcut: nil, isEnabled: true, kind: .pane, subtitle: "Default › API", isInCurrentWorkspace: true) {},
             AppCommand(id: "tab", title: "API", shortcut: nil, isEnabled: true, kind: .tab, isInCurrentWorkspace: true) {},
+            AppCommand(id: "agent", title: "Codex", shortcut: nil, isEnabled: true, kind: .agent, subtitle: "API · Running · /projects/service") {},
         ]
-        XCTAssertEqual(CommandPaletteFilter.results(items, query: "", kind: nil).map(\.id), ["command", "space", "tab"])
+        XCTAssertEqual(CommandPaletteFilter.results(items, query: "", kind: nil).map(\.id), ["command", "space", "tab", "agent"])
+        XCTAssertEqual(CommandPaletteFilter.results(items, query: "", kind: .agent).map(\.id), ["agent"])
+        XCTAssertEqual(CommandPaletteFilter.results(items, query: "codex service", kind: nil).map(\.id), ["agent"])
         XCTAssertEqual(CommandPaletteFilter.results(items, query: "logs", kind: nil).map(\.id), ["local", "remote"])
         XCTAssertEqual(CommandPaletteFilter.results(items, query: "Santty logs", kind: nil).map(\.id), ["remote"])
         XCTAssertEqual(CommandPaletteFilter.results(items, query: "", kind: .pane).map(\.id), ["remote", "local"])

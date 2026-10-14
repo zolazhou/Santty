@@ -9,6 +9,16 @@ struct HerdrLayout: Decodable, Sendable {
     var serviceIdentity: HerdrServiceIdentity? = nil
     enum CodingKeys: String, CodingKey { case workspace_id, tab_id, zoomed, focused_pane_id, root }
 
+    static func nativeShellViewportSize(surface: HerdrShellSurface, nativeSize: CGSize,
+                                        availableSize: CGSize, cellSize: CGSize) -> HerdrShellSize? {
+        guard cellSize.width.isFinite, cellSize.height.isFinite, cellSize.width > 0, cellSize.height > 0 else { return nil }
+        // Resize from the authoritative frame, reclaiming chrome omitted by the native projection.
+        let columns = CGFloat(surface.frame.width) + floor((availableSize.width - nativeSize.width) / cellSize.width)
+        let rows = CGFloat(surface.frame.height) + floor((availableSize.height - nativeSize.height) / cellSize.height)
+        guard columns.isFinite, rows.isFinite, columns >= 1, rows >= 1 else { return nil }
+        return .init(cols: UInt16(min(columns, CGFloat(UInt16.max))), rows: UInt16(min(rows, CGFloat(UInt16.max))))
+    }
+
     static func matchesShellProjection(layouts: [String: HerdrLayout],
                                        shell: HerdrShellSnapshot, surface: HerdrShellSurface) -> Bool {
         guard shell.boot_id == surface.boot_id, shell.revision == surface.projection_revision,
@@ -71,7 +81,7 @@ struct HerdrLayout: Decodable, Sendable {
         }
 
         func nativeShellLayout(panes: [String: UUID], surface: HerdrShellSurface,
-                               cellSize: CGSize, padding: CGFloat, divider: CGFloat) throws -> LayoutNode {
+                               cellSize: CGSize, padding: CGFloat, divider: CGFloat) throws -> (layout: LayoutNode, size: CGSize) {
             guard Set(surface.panes.map(\.pane_id)).count == surface.panes.count else { throw CLIError("Duplicate ClientShell native pane") }
             let rectangles = Dictionary(uniqueKeysWithValues: surface.panes.map { ($0.pane_id, $0.inner_rect) })
             func build(_ node: Node) throws -> (LayoutNode, CGSize) {
@@ -96,7 +106,7 @@ struct HerdrLayout: Decodable, Sendable {
             }
             guard cellSize.width.isFinite, cellSize.height.isFinite, cellSize.width > 0, cellSize.height > 0,
                   padding.isFinite, padding >= 0, divider.isFinite, divider >= 0 else { throw CLIError("Invalid ClientShell native cell metrics") }
-            return try build(self).0
+            return try build(self)
         }
 
         // Surface splits are drag handles, not a complete tree when borders/gaps are disabled.

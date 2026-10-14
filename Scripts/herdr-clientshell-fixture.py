@@ -57,6 +57,9 @@ def take_string(data, i):
 
 def send(s, payload):
     frame = struct.pack('<I', len(payload)) + payload
+    if scenario.startswith('window-typing'):
+        s.sendall(frame)
+        return
     for begin in range(0, len(frame), 17):
         s.sendall(frame[begin:begin + 17])
 
@@ -67,7 +70,7 @@ def control(s, kind, value):
 
 root = Path(__file__).resolve().parent.parent
 api_path, scenario = sys.argv[1:3]
-window_scenario = scenario in ('window-agents', 'window', 'window-popup', 'window-drop', 'window-no-runtime', 'window-floating-cursor', 'window-workspace-create') or scenario.startswith(('window-tabs', 'window-split'))
+window_scenario = scenario in ('window-agents', 'window', 'window-borders', 'window-popup', 'window-drop', 'window-no-runtime', 'window-floating-cursor', 'window-workspace-create') or scenario.startswith(('window-tabs', 'window-split', 'window-typing'))
 popup_live = scenario == 'window-popup'
 client_path = str(Path(api_path).with_name(Path(api_path).stem + '-client.sock'))
 golden = json.loads((root / 'Santty/Tests/Fixtures/herdr-clientshell-wire-v1.json').read_text())['payloads']
@@ -88,7 +91,7 @@ if scenario == 'window-tabs-palette':
     snapshot['tabs'].append(dict(snapshot['tabs'][0], workspace_id='w6', tab_id='w6:t1', number=1, label='Other tab', focused=False))
     snapshot['panes'].append(dict(snapshot['panes'][0], workspace_id='w6', tab_id='w6:t1', pane_id='w6:pC', label='Remote logs', focused=False))
     snapshot['agents'].append(dict(snapshot['agents'][0], workspace_id='w6', tab_id='w6:t1', pane_id='w6:pC', agent='opencode', display_agent='OpenCode', focused=False))
-if scenario == 'mouse-focus':
+if scenario in ('mouse-focus', 'window-typing-split', 'window-borders'):
     snapshot['panes'].append(dict(snapshot['panes'][0], pane_id='w5:pB', focused=False))
 trace = []
 connection_number = 0
@@ -134,7 +137,12 @@ def window_frame():
     window_serial += 1
     pane = snapshot['focused_pane_id']
     text = 'ClientShell native image' if pane == 'w5:pA' else 'ClientShell second tab image'
-    cells = b''.join(string(text[i] if i < min(cols, len(text)) else ' ') + b'\x00' * 5 for i in range(cols * rows))
+    symbols = [text[i] if i < min(cols, len(text)) else ' ' for i in range(cols * rows)]
+    if scenario == 'window-typing-split':
+        start = max(1, min(cols - 2, int((cols - 1) * window_split_ratio))) + 1
+        label = 'Unchanged sibling'[:cols - start]
+        symbols[start:start + len(label)] = label
+    cells = b''.join(string(symbol) + b'\x00' * 5 for symbol in symbols)
     rect = b'\x00\x00' + integer(cols) + integer(rows)
     cursor_x, cursor_y = 0, 0
     if scenario == 'window-floating-cursor' and snapshot['panes'][0]['label'] != 'cursor-home':
@@ -148,8 +156,10 @@ def window_frame():
         x = 0 if index == 0 else left + 1
         width = cols if len(visible) == 1 else left if index == 0 else cols - left - 1
         pane_rect = integer(x) + b'\x00' + integer(width) + integer(rows)
-        metadata += (string(item['pane_id']) + integer(9) + pane_rect + pane_rect + b'\x00\x00'
-                     + bytes([item['pane_id'] == pane, 1, 0, 0]) + integer(width * cw) + integer(rows * ch))
+        inset = 1 if scenario == 'window-borders' else 0
+        inner_rect = integer(x + inset) + integer(inset) + integer(width - inset * 2) + integer(rows - inset * 2)
+        metadata += (string(item['pane_id']) + integer(9) + pane_rect + inner_rect + b'\x00\x00'
+                     + bytes([item['pane_id'] == pane, 1, 0, 0]) + integer((width - inset * 2) * cw) + integer((rows - inset * 2) * ch))
     key = b'\x00\x00' + string(pane) + integer(7) + b'\x01\x01\x01\x04' + integer(1234)
     assets = [(key, b'\xff\x00\x00\xff')]
     placement = key + integer(3) + integer(min(1, cols - 1)) + integer(min(1, rows - 1)) + b'\x01\x01\x00\x00\x01\x01\x00\x00\x01\x00'
@@ -166,23 +176,26 @@ def window_frame():
         placements.append(pk + integer(3) + b'\x00\x00\x01\x01\x00\x00\x01\x01\x00\x00\x01\x00')
     delivered = b'\x00' if window_assets_sent else integer(len(assets)) + b''.join(k + integer(len(data)) + data for k, data in assets)
     scene = delivered + integer(len(placements)) + b''.join(placements) + integer(len(assets)) + b''.join(k for k, _ in assets)
-    if scenario == 'window-tabs-patch-content':
+    if scenario == 'window-tabs-patch-content' or scenario.startswith('window-typing'):
         scene = b'\x00\x00\x00'
     window_assets_sent = True
     return b'\x0d' + string('boot') + integer(snapshot['revision']) + integer(window_serial) + frame + metadata + b'\x00' + popup + scene
 
 
-def stable_content_patch():
+def stable_content_patch(symbol=None):
     global window_serial
     cols, rows = window_size
     cw, ch = window_cells
+    if scenario == 'window-typing-split':
+        cols = max(1, min(cols - 2, int((cols - 1) * window_split_ratio)))
     rect = b'\x00\x00' + integer(cols) + integer(rows)
     pane = (string(snapshot['focused_pane_id']) + integer(8) + rect + rect + b'\x00\x00'
             + b'\x01\x01\x00\x00' + integer(cols * cw) + integer(rows * ch))
     base = window_serial
     window_serial += 1
+    changed = b'\x00' if symbol is None else b'\x01\x00\x00\x01' + string(symbol) + b'\x00' * 5
     return (b'\x13' + string('boot') + integer(snapshot['revision']) + integer(base) + integer(window_serial)
-            + b'\x00\x01' + pane + b'\x01\x00\x00\x01\x02')
+            + changed + b'\x01' + pane + b'\x01' + integer(1 if symbol else 0) + b'\x00\x01\x02')
 
 
 
@@ -313,7 +326,22 @@ def serve_client(connection, hello=None):
             trace.append(dict(tag=tag))
             if tag in (13, 14, 17):
                 trace[-1]['payload'] = message.hex()
-            record_trace()
+            if not (tag == 13 and scenario.startswith('window-typing')):
+                record_trace()
+            if tag == 13 and scenario.startswith('window-typing'):
+                target, i = take_string(message, 1)
+                # Background AppKit windows can still receive incidental pointer motion.
+                if message[i:i + 3] == b'\x01\x02\x03':
+                    assert any(p['pane_id'] == target and p['tab_id'] == snapshot['focused_tab_id'] for p in snapshot['panes']), message.hex()
+                    record_trace()
+                    continue
+                assert target == snapshot['focused_pane_id'], message.hex()
+                assert message[i:i + 2] == b'\x01\x01', message.hex()
+                symbol, i = take_string(message, i + 2)
+                assert i == len(message) and len(symbol) == 1
+                trace[-1]['text_input'] = True
+                record_trace()
+                send(connection, stable_content_patch(symbol))
             if tag == 13 and scenario == 'snapshot-gap' and snapshot['revision'] == 251:
                 snapshot['revision'] += 1
                 control(connection, 'shell.snapshot.v1', snapshot)

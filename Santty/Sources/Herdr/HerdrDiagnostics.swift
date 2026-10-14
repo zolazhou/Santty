@@ -37,6 +37,12 @@ struct HerdrDiagnostics: Encodable, Sendable {
         let lastMilliseconds: Double?
         let p50Milliseconds: Double?
         let p95Milliseconds: Double?
+        let p99Milliseconds: Double?
+    }
+    struct SurfaceTraffic: Encodable, Sendable {
+        var packets = 0
+        var payloadBytes = 0
+        var decodedBytes = 0
     }
     struct ClientShell: Encodable, Sendable {
         var state: String
@@ -72,6 +78,8 @@ struct HerdrDiagnostics: Encodable, Sendable {
         let navigationAwaitingHostCommit: Bool
         let supersededNavigations: Int
         let queues: HerdrClientShellTransport.QueueUsage?
+        var stages: [String: Latency] = [:]
+        var surfaceTraffic: [String: SurfaceTraffic] = [:]
         var recoveryAttempts = 0
         var popupLastError: String? = nil
         var capturedAtFailure = false
@@ -80,7 +88,7 @@ struct HerdrDiagnostics: Encodable, Sendable {
         let requestedSurfaceReuse = HerdrShellHello.requestSurfaceReuse
         let requestedSurfaceDelta = HerdrShellHello.requestSurfaceDelta
         let requestedSurfaceScroll = HerdrShellHello.requestSurfaceScroll
-        let timingScope = "last 128 samples in this connection; request starts at worker enqueue; matching scene requires response and selection evidence; host commit is C parsing, not GPU visibility; superseded navigation has no total sample"
+        let timingScope = "last 1024 samples per stage in this connection; stages have independent populations and overlapping scopes, do not add percentiles; encode/queue/resume sample one scene worker, scenePrepare includes viewport and encoding, paneViewport/popupViewport sample each host; payloadRead includes socket waiting; ghosttyBarrier includes worker scheduling and parsing wait, not GPU visibility; request starts at worker enqueue; superseded navigation has no total sample"
     }
     struct Pane: Encodable, Sendable {
         let id: UUID
@@ -132,12 +140,14 @@ struct HerdrDiagnostics: Encodable, Sendable {
 
 struct HerdrShellLatencySamples: Sendable {
     private var values: [Double] = []
+    private var next = 0
 
     mutating func record(seconds: TimeInterval) {
         let value = seconds * 1000
         guard value.isFinite, value >= 0 else { return }
-        if values.count == 128 { values.removeFirst() }
-        values.append(value)
+        if values.count < 1024 { values.append(value) }
+        else { values[next] = value }
+        next = (next + 1) % 1024
     }
 
     var summary: HerdrDiagnostics.Latency {
@@ -146,7 +156,8 @@ struct HerdrShellLatencySamples: Sendable {
             guard !sorted.isEmpty else { return nil }
             return sorted[max(0, Int(ceil(Double(sorted.count) * p)) - 1)]
         }
-        return .init(sampleCount: values.count, lastMilliseconds: values.last,
-                     p50Milliseconds: percentile(0.5), p95Milliseconds: percentile(0.95))
+        return .init(sampleCount: values.count,
+                     lastMilliseconds: values.isEmpty ? nil : values[(next + values.count - 1) % values.count],
+                     p50Milliseconds: percentile(0.5), p95Milliseconds: percentile(0.95), p99Milliseconds: percentile(0.99))
     }
 }

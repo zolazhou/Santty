@@ -97,6 +97,44 @@ final class HerdrClientShellStateTests: XCTestCase {
         XCTAssertTrue(try state.receive(surface(1, serial: 1, boot: "new-boot")))
     }
 
+    func testCompactScrollMovesSharedRowsAndRejectsInvalidChangesAtomically() throws {
+        for width in [UInt16(1), 2] {
+            for shift in [1, -1] {
+                var state = HerdrShellProjection()
+                _ = try state.receive(snapshot())
+                var base = try surface()
+                let rect = HerdrShellRect(x: 0, y: 0, width: 2, height: 3)
+                base.frame = .init(cells: ["a", "b", "c", "d", "e", "f"].map {
+                    .init(symbol: $0, fg: 0, bg: 0, modifier: 0, skip: false, hyperlink: nil)
+                }, width: 2, height: 3, cursor: nil, hyperlinks: [], graphics: Data())
+                base.panes = [.init(pane_id: "w5:pA", content_revision: 1, rect: rect, inner_rect: rect,
+                    scrollbar_rect: nil, scroll: nil, focused: true, mouse_reporting: false, sgr_pixel_mouse: false,
+                    alternate_screen_active: false, pixel_width: 16, pixel_height: 48)]
+                _ = try state.receive(base)
+                let original = try XCTUnwrap(state.coherentSurface)
+                var patch = HerdrShellPatch(boot_id: "boot", projection_revision: 251,
+                    base_surface_revision: 65536, surface_revision: 65537,
+                    rows: [.init(x: 0, y: shift > 0 ? 2 : 0, cells: (width == 2 ? ["x", "y"] : ["x"]).map {
+                        .init(symbol: $0, fg: 0, bg: 0, modifier: 0, skip: false, hyperlink: nil)
+                    })], panes: base.panes, cursor: nil)
+                patch.scrolls = [.init(rect: .init(x: 1, y: 0, width: 2, height: 3), shift: shift)]
+                XCTAssertThrowsError(try state.receive(patch))
+                XCTAssertEqual(state.coherentSurface, original)
+                patch.scrolls = [.init(rect: .init(x: 0, y: 0, width: width, height: 3), shift: shift)]
+                XCTAssertTrue(try state.receive(patch))
+                let next = try XCTUnwrap(state.coherentSurface)
+                let expected = width == 2 ? (shift > 0 ? ["c", "d", "e", "f", "x", "y"] : ["x", "y", "a", "b", "c", "d"])
+                    : (shift > 0 ? ["c", "b", "e", "d", "x", "f"] : ["x", "b", "a", "d", "c", "f"])
+                XCTAssertEqual(next.frame.cells.map(\.symbol), expected)
+                XCTAssertEqual(original.frame.cells.map(\.symbol), ["a", "b", "c", "d", "e", "f"])
+                if width == 2 {
+                    XCTAssertEqual(original.frame.cells(in: shift > 0 ? 1 : 0).withUnsafeBufferPointer { $0.baseAddress },
+                        next.frame.cells(in: shift > 0 ? 0 : 1).withUnsafeBufferPointer { $0.baseAddress })
+                }
+            }
+        }
+    }
+
     func testPatchValidationIsAtomicAndRequiresItsNextBaseline() throws {
         var state = HerdrShellProjection()
         _ = try state.receive(snapshot()); _ = try state.receive(surface())
