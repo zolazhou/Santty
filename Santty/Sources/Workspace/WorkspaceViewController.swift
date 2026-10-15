@@ -4941,7 +4941,8 @@ extension WorkspaceViewController {
                 tab.activeFloatingPaneState = .init(paneID: record.paneID, size: record.size)
                 if let size = record.size { tab.floatingPaneSizes[record.paneID] = size }
             }
-            let retainedFocus = tab.focusedPaneID.flatMap { controllers[$0] == nil ? nil : $0 }
+            // A restored floating pane owns focus even when the backend focuses its sibling.
+            let retainedFocus = (tab.activeFloatingPaneState?.paneID ?? tab.focusedPaneID).flatMap { controllers[$0] == nil ? nil : $0 }
             let localFocus = retainedFocus.map { native.path(to: $0) == nil || tab.isPaneDetached($0) || tab.activeFloatingPaneState?.paneID == $0 } == true
             tab.focusedPaneID = localFocus || optimisticHerdrFocus != nil
                 ? retainedFocus : focusedNativeID
@@ -5875,6 +5876,8 @@ extension WorkspaceViewController {
                 paneIDs[placeholder.paneID] = pane.id
             } else if let binding = pane.herdrBinding { paneIDs[binding.paneID] = pane.id }
         }
+        // A floating transfer can replace pane bindings while an earlier scene is awaiting layout.
+        guard tree.paneIDs.allSatisfy({ paneIDs[$0] != nil }) else { return false }
         let references = (Array(tab.paneControllers.values) + previousPanes + herdrShellRetainedPresentation)
             .compactMap { $0 as? TerminalPaneController }
         guard let reference = references.first(where: { $0.herdrBinding != nil && $0.clientShellGridMetrics != nil }),
@@ -6160,7 +6163,7 @@ extension WorkspaceViewController {
             updatePanePresentation(in: tab); updateTabStrip(); updateWindowTitle()
             if let popup = herdrShellPopup {
                 if !keepCurrentLocalFocus { view.window?.makeFirstResponder(popup.terminalView) }
-            } else if !keepCurrentLocalFocus || previousTab?.id != tab.id { applyFocusedPaneResponder() }
+            } else if !keepCurrentLocalFocus || previousTab?.id != tab.id || stagedFloating != nil { applyFocusedPaneResponder() }
         }
         applyingHerdrLayout = false
         guard preparedOutputs.allSatisfy({ $0.isCurrent() }), session.acknowledgePresentation(surface) else { return false }

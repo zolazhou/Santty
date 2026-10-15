@@ -1265,6 +1265,10 @@ final class HerdrClientShellSessionTests: XCTestCase {
         try await exerciseRealHerdrService(scenarios: ["floating"], typingCount: 0)
     }
 
+    func testRealHerdrFloatingPaneStaysCurrentAcrossWorkspaceSwitches() async throws {
+        try await exerciseRealHerdrService(scenarios: ["floating-workspace"], typingCount: 0)
+    }
+
     func testRealHerdrAlternateScreenKeepsInactivePaneSurface() async throws {
         try await exerciseRealHerdrService(scenarios: ["split"], typingCount: 4)
     }
@@ -1331,10 +1335,15 @@ final class HerdrClientShellSessionTests: XCTestCase {
             for scenario in scenarios {
                 if scenario == "large" || scenario == "split" { window.setContentSize(NSSize(width: 2400, height: 1200)) }
                 let created = try await client.create(cwd: directory.path)
+                if scenario == "floating-workspace" {
+                    let split = try await client.create(split: HerdrPaneBinding(endpoint: endpoint, pane: created))
+                    _ = try await client.request("pane.focus", params: .init(pane_id: split.pane_id))
+                }
                 try await workspace.enterHerdrWorkspace(try XCTUnwrap(created.workspace_id))
                 if scenario == "split" { workspace.debugPerformCommand(withID: "pane.split.horizontal") }
                 for _ in 0..<500 where workspace.debugFocusedHerdrPane?.canAcceptInput != true || workspace.debugHerdrOperationPending
-                    || (scenario == "split" && workspace.debugPaneIDsInTraversalOrder.count != 2) {
+                    || workspace.debugHerdrShellSession?.isPresentationReady != true
+                    || (["split", "floating-workspace"].contains(scenario) && workspace.debugPaneIDsInTraversalOrder.count != 2) {
                     try await Task.sleep(for: .milliseconds(10))
                 }
                 if focusFirstPane {
@@ -1343,13 +1352,43 @@ final class HerdrClientShellSessionTests: XCTestCase {
                         try await Task.sleep(for: .milliseconds(10))
                     }
                 }
-                if scenario == "floating" {
+                if scenario == "floating" || scenario == "floating-workspace" {
                     let tabID = try XCTUnwrap(workspace.debugSelectedTabID)
                     workspace.debugToggleFloatingPane(animated: false)
                     await workspace.waitForHerdrFloatingTransitionForTesting()
                     let floating = try XCTUnwrap(workspace.debugFocusedHerdrPane)
                     XCTAssertEqual(workspace.debugActiveFloatingPaneState?.paneID, floating.id)
                     XCTAssertTrue(floating.canAcceptInput, workspace.herdrLastError ?? "Floating input unavailable")
+                    guard workspace.debugActiveFloatingPaneState?.paneID == floating.id, floating.canAcceptInput else { return }
+                    if scenario == "floating-workspace" {
+                        let selected = workspace.debugSelectedWorkspace
+                        let other = try await client.create(cwd: directory.path)
+                        let targets = [try XCTUnwrap(workspace.debugWorkspaceEntries.first { $0.kind == .local }?.reference),
+                            WorkspaceReference(source: .herdr(endpoint: endpoint, workspaceID: try XCTUnwrap(other.workspace_id)))]
+                        for target in targets {
+                            workspace.selectWorkspace(target); await workspace.waitForWorkspaceSelection()
+                            for _ in 0..<1000 where workspace.debugSelectedWorkspace != target || workspace.debugHerdrOperationPending
+                                || (target.kind != .local && workspace.debugFocusedHerdrPane?.canAcceptInput != true) {
+                                try await Task.sleep(for: .milliseconds(10))
+                            }
+                            XCTAssertEqual(workspace.debugSelectedWorkspace, target, "Leaving floating workspace: \(workspace.herdrLastError ?? "no error")")
+                            workspace.selectWorkspace(selected); await workspace.waitForWorkspaceSelection()
+                            for _ in 0..<1000 where workspace.debugSelectedWorkspace != selected || workspace.debugHerdrOperationPending
+                                || workspace.debugHerdrShellSession?.isPresentationReady != true || !floating.canAcceptInput {
+                                try await Task.sleep(for: .milliseconds(10))
+                            }
+                            XCTAssertEqual(workspace.debugSelectedWorkspace, selected, "Returning floating workspace: \(workspace.herdrLastError ?? "no error")")
+                            XCTAssertEqual(workspace.debugActiveFloatingPaneState?.paneID, floating.id)
+                            XCTAssertEqual(workspace.debugFocusedPaneID, floating.id, "The visible floating pane must remain current")
+                            XCTAssertTrue(window.firstResponder === floating.focusTargetView,
+                                "Return from \(target.kind) must restore floating keyboard focus; responder=\(String(describing: window.firstResponder)), expected=\(floating.focusTargetView)")
+                            workspace.debugHandlePaneFocusRequest(withID: floating.id)
+                            await workspace.waitForHerdrFloatingTransitionForTesting()
+                            XCTAssertEqual(workspace.debugActiveFloatingPaneState?.paneID, floating.id, "Clicking the floating pane must keep it floating")
+                            XCTAssertEqual(workspace.debugFocusedPaneID, floating.id)
+                        }
+                        continue
+                    }
                     workspace.newTab(nil)
                     for _ in 0..<1000 where workspace.debugTabIDs.count != 2 || workspace.debugSelectedTabID == tabID
                         || workspace.debugHerdrOperationPending || workspace.debugFocusedHerdrPane?.canAcceptInput != true {
