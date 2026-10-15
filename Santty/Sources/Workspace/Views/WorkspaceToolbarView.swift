@@ -85,6 +85,8 @@ final class WorkspaceToolbarView: NSView {
             $0.id == $1.representedObject as? String && $0.title == $1.title && $0.isAvailable == $1.isEnabled
                 && $1.toolTip == [$0.kind.title, $0.status].compactMap { $0 }.joined(separator: " · ")
         }
+        // Re-selecting during popup tracking can replace the user's choice before its action arrives.
+        guard changed || selectedWorkspaceID != selectedID else { return }
         if changed {
             workspaceSwitcher.removeAllItems()
             for entry in entries {

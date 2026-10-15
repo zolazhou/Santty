@@ -132,6 +132,27 @@ final class RemoteHerdrTests: XCTestCase {
         XCTAssertFalse(toolbar.workspaceSwitcher.itemArray[2].isEnabled)
     }
 
+    func testUnifiedPickerPreservesRemoteChoiceDuringMetadataRefresh() {
+        let local = WorkspaceEntry(reference: .init(source: .local(UUID())), name: "Default")
+        let remote = WorkspaceEntry(reference: .init(source: .herdr(endpoint: endpoint(), workspaceID: "w1")), name: "Backend")
+        let toolbar = WorkspaceToolbarView()
+        let entries = [local, remote]
+        toolbar.updateWorkspaceEntries(entries, selectedID: local.id)
+        let items = toolbar.workspaceSwitcher.itemArray
+        var chosen: String?
+        toolbar.onSelectWorkspace = { chosen = $0 }
+        toolbar.workspaceSwitcher.selectItem(at: 1)
+        // Metadata can refresh while the popup tracks a choice, before its action is delivered.
+        toolbar.updateWorkspaceEntries(entries, selectedID: local.id)
+        _ = toolbar.workspaceSwitcher.sendAction(toolbar.workspaceSwitcher.action, to: toolbar.workspaceSwitcher.target)
+        XCTAssertEqual(chosen, remote.id)
+        XCTAssertEqual(toolbar.workspaceSwitcher.selectedItem?.representedObject as? String, local.id,
+            "The label waits for backend confirmation")
+        toolbar.updateWorkspaceEntries(entries, selectedID: remote.id)
+        XCTAssertEqual(toolbar.workspaceSwitcher.selectedItem?.representedObject as? String, remote.id)
+        for (before, after) in zip(items, toolbar.workspaceSwitcher.itemArray) { XCTAssertTrue(before === after) }
+    }
+
     func testUnifiedWorkspaceDirectoryRoundTripsAndRejectsUnknownSelection() throws {
         let remote = WorkspaceEntry(reference: .init(source: .herdr(endpoint: endpoint(), workspaceID: "w1")), name: "Backend")
         var saved = SavedWorkspace(tabs: [], workspaces: [remote], selectedWorkspace: remote.reference)
