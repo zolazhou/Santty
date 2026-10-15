@@ -1261,6 +1261,10 @@ final class HerdrClientShellSessionTests: XCTestCase {
         try await exerciseRealHerdrService(scenarios: ["single", "large", "split"], typingCount: 1100)
     }
 
+    func testRealHerdrFloatingPaneRestoresInputAfterTabSwitch() async throws {
+        try await exerciseRealHerdrService(scenarios: ["floating"], typingCount: 0)
+    }
+
     func testRealHerdrAlternateScreenKeepsInactivePaneSurface() async throws {
         try await exerciseRealHerdrService(scenarios: ["split"], typingCount: 4)
     }
@@ -1338,6 +1342,35 @@ final class HerdrClientShellSessionTests: XCTestCase {
                     for _ in 0..<500 where workspace.debugHerdrOperationPending || workspace.debugFocusedHerdrPane?.canAcceptInput != true {
                         try await Task.sleep(for: .milliseconds(10))
                     }
+                }
+                if scenario == "floating" {
+                    let tabID = try XCTUnwrap(workspace.debugSelectedTabID)
+                    workspace.debugToggleFloatingPane(animated: false)
+                    await workspace.waitForHerdrFloatingTransitionForTesting()
+                    let floating = try XCTUnwrap(workspace.debugFocusedHerdrPane)
+                    XCTAssertEqual(workspace.debugActiveFloatingPaneState?.paneID, floating.id)
+                    XCTAssertTrue(floating.canAcceptInput, workspace.herdrLastError ?? "Floating input unavailable")
+                    workspace.newTab(nil)
+                    for _ in 0..<1000 where workspace.debugTabIDs.count != 2 || workspace.debugSelectedTabID == tabID
+                        || workspace.debugHerdrOperationPending || workspace.debugFocusedHerdrPane?.canAcceptInput != true {
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                    XCTAssertEqual(workspace.debugTabIDs.count, 2)
+                    XCTAssertNotEqual(workspace.debugSelectedTabID, tabID)
+                    workspace.debugSelectTab(withID: tabID)
+                    for _ in 0..<1000 where workspace.debugFocusedHerdrPane?.id != floating.id
+                        || workspace.debugHerdrOperationPending || !floating.canAcceptInput {
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                    XCTAssertTrue(floating.canAcceptInput, workspace.herdrLastError ?? "Floating input did not resume")
+                    XCTAssertTrue(window.firstResponder === floating.focusTargetView, "Tab return must restore keyboard focus without a click")
+                    (window.firstResponder as? TerminalView)?.insertText("X", replacementRange: NSRange(location: NSNotFound, length: 0))
+                    for _ in 0..<500 where terminal(in: floating.hostView)?.readScreenText()?.hasPrefix("X") != true {
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                    XCTAssertTrue(terminal(in: floating.hostView)?.readScreenText()?.hasPrefix("X") == true,
+                                  "Typing through the restored first responder must reach the floating PTY")
+                    continue
                 }
                 let pane = try XCTUnwrap(workspace.debugFocusedHerdrPane)
                 let display = try XCTUnwrap(terminal(in: pane.hostView))

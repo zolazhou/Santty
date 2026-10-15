@@ -1934,7 +1934,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
         if herdrWindowWorkspaceID != nil, !applyingHerdrLayout,
            let tab = tabs.first(where: { $0.id == tabID }),
-           let binding = (tab.herdrFocusedPaneID ?? tab.focusedPaneID).flatMap({ tab.terminalPaneController(for: $0)?.herdrBinding }) ?? tab.herdrTabBinding {
+           let binding = (tab.herdrFocusedPaneID ?? tab.focusedPaneID).flatMap({
+               floatingRecord(for: $0)?.placeholder ?? tab.terminalPaneController(for: $0)?.herdrBinding
+           }) ?? tab.herdrTabBinding {
             cancelPaneNameReveal()
             if tabID != selectedTabID {
                 (selectedTabState?.focusedPaneController as? TerminalPaneController)?.exitScrollMode()
@@ -6146,7 +6148,7 @@ extension WorkspaceViewController {
             updatePanePresentation(in: tab); updateTabStrip(); updateWindowTitle()
             if let popup = herdrShellPopup {
                 if !keepCurrentLocalFocus { view.window?.makeFirstResponder(popup.terminalView) }
-            } else if !keepCurrentLocalFocus { applyFocusedPaneResponder() }
+            } else if !keepCurrentLocalFocus || previousTab?.id != tab.id { applyFocusedPaneResponder() }
         }
         applyingHerdrLayout = false
         guard preparedOutputs.allSatisfy({ $0.isCurrent() }), session.acknowledgePresentation(surface) else { return false }
