@@ -778,8 +778,8 @@ final class HerdrClientShellSessionTests: XCTestCase {
     }
 
     func testFutureEffectsStayQueuedAcrossPinnedAckAndAreDiscardedOnResize() async throws {
-        for resize in [false, true] {
-            let (process, endpoint, path) = try await fixture("effects-in-flight")
+        for (resize, metadata) in [(false, false), (true, false), (false, true)] {
+            let (process, endpoint, path) = try await fixture(metadata ? "effects-in-flight-metadata" : "effects-in-flight")
             defer { cleanup(process, path) }
             let session = HerdrClientShellSession(endpoint: endpoint)
             defer { session.disconnect() }
@@ -863,6 +863,44 @@ final class HerdrClientShellSessionTests: XCTestCase {
         XCTAssertFalse(session.acknowledgePresentation(next))
         XCTAssertFalse(session.isPresentationReady)
         session.endPresentation(next)
+    }
+
+    func testContinuousAgentMetadataDoesNotStarveNativePresentation() async throws {
+        let (process, endpoint, path) = try await fixture("presentation-metadata")
+        defer { cleanup(process, path) }
+        let session = HerdrClientShellSession(endpoint: endpoint)
+        defer { session.disconnect() }
+        var commits = 0
+        var renderTask: Task<Void, Never>?
+        defer { renderTask?.cancel() }
+        var pending: HerdrShellSurface?
+        session.onProjection = { [weak session] _, frame, _ in
+            guard let session else { return }
+            pending = frame
+            guard renderTask == nil else { return }
+            renderTask = Task { @MainActor in
+                defer { renderTask = nil }
+                while let frame = pending, !Task.isCancelled {
+                    pending = nil
+                    guard session.beginPresentation(frame) else { continue }
+                    defer { session.endPresentation(frame) }
+                    // Agent metadata can arrive while the native output barrier is pending.
+                    do { try await Task.sleep(for: .milliseconds(80)) } catch { return }
+                    if session.acknowledgePresentation(frame) {
+                        commits += 1
+                        XCTAssertTrue(session.isPresentationReady)
+                        XCTAssertTrue(session.isInputReady)
+                    }
+                }
+            }
+        }
+        try await session.start(size: .init(cols: 2, rows: 1), cellWidth: 8, cellHeight: 16, focused: false)
+        let deadline = ProcessInfo.processInfo.systemUptime + 12
+        while session.failure == nil, ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNil(session.failure, session.failure?.localizedDescription ?? "")
+        XCTAssertGreaterThan(commits, 20, "Unchanged geometry must keep committing during Agent metadata updates")
     }
 
     func testMetadataOnlyStartupWaitsForMeasuredNativeViewportBeforeActivation() async throws {
@@ -2476,6 +2514,94 @@ final class HerdrClientShellSessionTests: XCTestCase {
         observer.stop()
         XCTAssertEqual(store.messages.count, 1)
         XCTAssertFalse(try XCTUnwrap(store.snapshots.first).backendStatusAvailable)
+    }
+
+    func testTransportBackpressuresBurstWithoutDroppingEvents() async throws {
+        let (process, endpoint, path) = try await fixture("queue-burst")
+        defer { cleanup(process, path) }
+        let transport = try burstTransport(endpoint)
+        defer { transport.stop() }
+        // Leave the main actor's consumer idle while the socket reader fills the queue.
+        try await Task.sleep(for: .milliseconds(300))
+        var received = 0
+        for try await packet in transport.messages {
+            transport.consume(packet)
+            if case let .control(kind, value) = packet.message, kind == "fixture.queue.v1" {
+                XCTAssertEqual(value, String(received), "Backpressure must preserve every event in order")
+                received += 1
+                if received == 1024 { break }
+                if received.isMultiple(of: 64) { try await Task.sleep(for: .milliseconds(10)) }
+            }
+        }
+        XCTAssertEqual(received, 1024)
+        XCTAssertLessThanOrEqual(transport.queueUsage.peakReadPayloadBytes, HerdrClientShellTransport.queueBudget)
+        XCTAssertLessThanOrEqual(transport.queueUsage.peakDecodedBytes, HerdrClientShellTransport.decodedQueueBudget)
+    }
+
+    func testTransportBackpressuresByteAndDecodedBudgets() async throws {
+        for decoded in [false, true] {
+            let (process, endpoint, path) = try await fixture(decoded ? "queue-burst-decoded" : "queue-burst-bytes")
+            defer { cleanup(process, path) }
+            let transport = try burstTransport(endpoint)
+            defer { transport.stop() }
+            let threshold = (decoded ? 240 : 60) * 1024 * 1024
+            for _ in 0..<1000 {
+                let usage = transport.queueUsage
+                if (decoded ? usage.queuedDecodedBytes : usage.queuedReadPayloadBytes) > threshold { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let usage = transport.queueUsage
+            XCTAssertGreaterThan(decoded ? usage.queuedDecodedBytes : usage.queuedReadPayloadBytes, threshold)
+            var received = 0
+            let expected = decoded ? 80 : 128
+            for try await packet in transport.messages {
+                transport.consume(packet)
+                switch packet.message {
+                case let .control(kind, value) where kind == "fixture.queue.v1":
+                    XCTAssertTrue(value.hasPrefix("\(received):"))
+                    received += 1
+                case let .surface(surface):
+                    XCTAssertEqual(surface.surface_revision, UInt64(65536 + received))
+                    received += 1
+                default: break
+                }
+                if received == expected { break }
+            }
+            XCTAssertEqual(received, expected)
+            XCTAssertLessThanOrEqual(transport.queueUsage.peakReadPayloadBytes, HerdrClientShellTransport.queueBudget)
+            XCTAssertLessThanOrEqual(transport.queueUsage.peakDecodedBytes, HerdrClientShellTransport.decodedQueueBudget)
+        }
+    }
+
+    func testTransportStopAndStreamCancellationWakeBlockedReader() async throws {
+        for cancelStream in [false, true] {
+            let (process, endpoint, path) = try await fixture("queue-burst")
+            defer { cleanup(process, path) }
+            var transport: HerdrClientShellTransport? = try burstTransport(endpoint)
+            weak var reader = transport
+            try await Task.sleep(for: .milliseconds(300))
+            if cancelStream {
+                let messages = try XCTUnwrap(transport).messages
+                let consumer = Task {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                    var iterator = messages.makeAsyncIterator()
+                    return try await iterator.next()
+                }
+                if let packet = try await consumer.value { transport?.consume(packet) }
+            } else { transport?.stop() }
+            transport = nil
+            for _ in 0..<100 where reader != nil { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertNil(reader, "Stopping or cancelling a full queue must release the socket reader")
+        }
+    }
+
+    private func burstTransport(_ endpoint: HerdrEndpoint) throws -> HerdrClientShellTransport {
+        let transport = try HerdrClientShellTransport(socketPath: endpoint.clientSocketPath, endpoint: endpoint)
+        let hello = HerdrShellHello(cell_width_px: 8, cell_height_px: 16,
+            surface_size: .init(cols: 2, rows: 1), pixel_mouse: true)
+        let json = String(decoding: try JSONEncoder().encode(hello), as: UTF8.self)
+        try transport.send(.control("endpoint.hello.v1", json))
+        return transport
     }
 
     private func fixture(_ scenario: String) async throws -> (Process, HerdrEndpoint, String) {

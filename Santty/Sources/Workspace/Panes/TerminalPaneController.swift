@@ -392,7 +392,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
         -> HerdrShellRenderRequest? {
         guard let binding = herdrBinding, let session = clientShellSession,
               clientShellBootID == surface.boot_id, let snapshot = session.projection.snapshot,
-              snapshot.boot_id == surface.boot_id, snapshot.revision == surface.projection_revision,
+              snapshot.boot_id == surface.boot_id,
               session.canPresent(surface),
               snapshot.panes.contains(where: { $0.pane_id == binding.paneID && $0.tab_id == binding.tabID
                   && $0.workspace_id == binding.workspaceID }), isLive else {

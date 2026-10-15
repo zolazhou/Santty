@@ -570,10 +570,12 @@ final class HerdrClientShellSession {
                     && presentedGeometry?.hasSameViewport(as: geometry) == true ? focusMouseTarget : nil
                 do { try releaseHeldInput(keepingMouseIn: keep) } catch { fail(error); return }
                 updateState(.connecting)
+            } else {
+                updateState(.interactive)
             }
         }
         if let pin = pinnedPresentation {
-            if pin.stamp.boot == stamp.boot, pin.stamp.projection == stamp.projection,
+            if pin.stamp.boot == stamp.boot,
                pin.geometry == Geometry(snapshot, surface) { return }
             pinnedPresentation = nil
         }
@@ -594,7 +596,7 @@ final class HerdrClientShellSession {
               frame.frame.width == size.cols, frame.frame.height == size.rows else { return false }
         if presented == Presentation(frame) { return true }
         guard presentedFromPinnedFrame, let presented, let snapshot = projection.snapshot else { return false }
-        return presented.boot == frame.boot_id && presented.projection == frame.projection_revision
+        return presented.boot == frame.boot_id && presented.projection <= frame.projection_revision
             && presentedGeometry == Geometry(snapshot, frame)
     }
 
@@ -604,7 +606,7 @@ final class HerdrClientShellSession {
               let frame = projection.coherentSurface, projection.pendingSurface == nil,
               frame.frame.width == size.cols, frame.frame.height == size.rows,
               let presented, let snapshot = projection.snapshot else { return false }
-        return presented.boot == frame.boot_id && presented.projection == frame.projection_revision
+        return presented.boot == frame.boot_id && presented.projection <= frame.projection_revision
             && presentedGeometry == Geometry(snapshot, frame)
     }
 
@@ -623,12 +625,13 @@ final class HerdrClientShellSession {
     func canPresent(_ frame: HerdrShellSurface) -> Bool {
         guard transport != nil, navigation == nil, fenceToken == nil, projection.pendingSurface == nil,
               let snapshot = projection.snapshot, let current = projection.coherentSurface,
-              snapshot.boot_id == frame.boot_id, snapshot.revision == frame.projection_revision,
+              snapshot.boot_id == frame.boot_id,
               frame.frame.width == size.cols, frame.frame.height == size.rows,
               current.frame.width == size.cols, current.frame.height == size.rows else { return false }
         if Presentation(current) == Presentation(frame) { return true }
         guard let pin = pinnedPresentation, pin.stamp == Presentation(frame),
-              current.boot_id == frame.boot_id, current.projection_revision == frame.projection_revision else { return false }
+              current.boot_id == frame.boot_id, current.projection_revision >= frame.projection_revision else { return false }
+        // Agent metadata may advance the projection while an unchanged viewport is committing.
         return pin.geometry == Geometry(snapshot, current)
     }
 
@@ -684,8 +687,8 @@ final class HerdrClientShellSession {
         let effects = deferredEffects
         deferredEffects.removeAll(); deferredEffectBytes = 0
         for (message, expected) in effects {
-            guard isPresentationReady, expected.boot == stamp.boot, expected.projection == stamp.projection else { continue }
-            if expected.surface > stamp.surface {
+            guard isPresentationReady, expected.boot == stamp.boot, expected.projection >= stamp.projection else { continue }
+            if expected.projection > stamp.projection || expected.surface > stamp.surface {
                 deferredEffects.append((message, expected))
                 deferredEffectBytes += message.presentationEffectBytes ?? 0
                 continue

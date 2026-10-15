@@ -28,10 +28,11 @@ final class HerdrClientShellTransport: @unchecked Sendable {
     }
     static let queueBudget = 64 * 1024 * 1024
     static let decodedQueueBudget = 256 * 1024 * 1024
+    private static let maximumQueuedPackets = 256
     let serviceIdentity: HerdrServiceIdentity
     let messages: AsyncThrowingStream<HerdrShellPacket, Error>
     private let continuation: AsyncThrowingStream<HerdrShellPacket, Error>.Continuation
-    private let lock = NSLock()
+    private let lock = NSCondition()
     private let writer = DispatchQueue(label: "Santty.Herdr.shell.writer")
     private var readFD: CInt
     private let writeFD: CInt
@@ -40,6 +41,7 @@ final class HerdrClientShellTransport: @unchecked Sendable {
     private var stopped = false
     private var queuedWriteBytes = 0
     private var queuedReadBytes = 0
+    private var queuedReadPackets = 0
     private var peakReadBytes = 0
     private var peakWriteBytes = 0
     private var queuedDecodedBytes = 0
@@ -79,15 +81,18 @@ final class HerdrClientShellTransport: @unchecked Sendable {
         var timeout = timeval(tv_sec: 1, tv_usec: 0)
         _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout.size(ofValue: timeout)))
         _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout.size(ofValue: timeout)))
-        let stream = AsyncThrowingStream<HerdrShellPacket, Error>.makeStream(bufferingPolicy: .bufferingOldest(256))
+        let stream = AsyncThrowingStream<HerdrShellPacket, Error>.makeStream(bufferingPolicy: .bufferingOldest(Self.maximumQueuedPackets))
         messages = stream.stream; continuation = stream.continuation
+        continuation.onTermination = { [weak self] _ in self?.stop() }
         DispatchQueue.global(qos: .userInitiated).async { [self] in readLoop(fd, requestedReuse: requestedReuse, requestedScroll: requestedScroll, requestedDelta: requestedDelta) }
     }
 
     func consume(_ packet: HerdrShellPacket) {
         lock.lock()
         queuedReadBytes -= packet.byteCount; queuedDecodedBytes -= packet.decodedByteCount
-        assert(queuedReadBytes >= 0 && queuedDecodedBytes >= 0)
+        queuedReadPackets -= 1
+        assert(queuedReadBytes >= 0 && queuedDecodedBytes >= 0 && queuedReadPackets >= 0)
+        lock.signal()
         lock.unlock()
     }
 
@@ -130,6 +135,7 @@ final class HerdrClientShellTransport: @unchecked Sendable {
         lock.lock()
         guard !stopped else { lock.unlock(); return }
         stopped = true
+        lock.broadcast()
         if error != nil, let endpoint, bridge != nil { HerdrSSHBridge.invalidate(endpoint) }
         if readFD >= 0 { _ = shutdown(readFD, SHUT_RDWR) }
         bridge?.stop()
@@ -147,13 +153,20 @@ final class HerdrClientShellTransport: @unchecked Sendable {
         do {
             var surfaceDecoder = HerdrClientShellSurfaceDecoder(requestedReuse: requestedReuse, requestedScroll: requestedScroll, requestedDelta: requestedDelta)
             while isActive {
+                // Pause the socket reader so bursts remain bounded without dropping ordered events.
+                lock.lock()
+                while !stopped && queuedReadPackets >= Self.maximumQueuedPackets { lock.wait() }
+                guard !stopped else { lock.unlock(); return }
+                queuedReadPackets += 1
+                lock.unlock()
                 let prefix = try readExactly(4, from: fd)
                 var length: UInt32 = 0
                 for i in 0..<4 { length |= UInt32(prefix[i]) << (i * 8) }
                 guard length > 0, length <= HerdrShellWire.maximumFrameBytes else { throw CLIError("Invalid Herdr shell frame length") }
                 let bytes = Int(length)
                 lock.lock()
-                guard bytes <= Self.queueBudget - queuedReadBytes else { lock.unlock(); throw CLIError("Herdr shell receive queue is full") }
+                while !stopped && bytes > Self.queueBudget - queuedReadBytes { lock.wait() }
+                guard !stopped else { lock.unlock(); return }
                 queuedReadBytes += bytes
                 peakReadBytes = max(peakReadBytes, queuedReadBytes)
                 lock.unlock()
@@ -165,10 +178,12 @@ final class HerdrClientShellTransport: @unchecked Sendable {
                 let decodedAt = ProcessInfo.processInfo.systemUptime
                 // Charge retained grids conservatively even when several messages share their rows.
                 let decodedBytes = message.estimatedDecodedBytes
-                lock.lock()
-                guard decodedBytes <= Self.decodedQueueBudget - queuedDecodedBytes else {
-                    lock.unlock(); throw CLIError("Herdr shell decoded receive queue exceeds budget")
+                guard decodedBytes <= Self.decodedQueueBudget else {
+                    throw CLIError("Herdr shell decoded receive queue exceeds budget")
                 }
+                lock.lock()
+                while !stopped && decodedBytes > Self.decodedQueueBudget - queuedDecodedBytes { lock.wait() }
+                guard !stopped else { lock.unlock(); return }
                 queuedDecodedBytes += decodedBytes
                 peakDecodedBytes = max(peakDecodedBytes, queuedDecodedBytes)
                 lock.unlock()

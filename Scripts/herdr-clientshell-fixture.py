@@ -57,7 +57,7 @@ def take_string(data, i):
 
 def send(s, payload):
     frame = struct.pack('<I', len(payload)) + payload
-    if scenario.startswith('window-typing'):
+    if scenario.startswith(('window-typing', 'queue-burst')):
         s.sendall(frame)
         return
     for begin in range(0, len(frame), 17):
@@ -332,6 +332,16 @@ def serve_client(connection, hello=None, handshaken=False, first_message=None):
     else:
         if not handshaken:
             control(connection, 'shell.snapshot.v1', snapshot)
+        if scenario == 'queue-burst':
+            for index in range(1024):
+                control(connection, 'fixture.queue.v1', str(index))
+        elif scenario == 'queue-burst-bytes':
+            for index in range(128):
+                control(connection, 'fixture.queue.v1', f'{index}:' + 'x' * (1024 * 1024))
+        elif scenario == 'queue-burst-decoded':
+            window_size = (800, 125)
+            for _ in range(80):
+                send(connection, window_frame())
         while True:
             message = first_message or read_message(connection)
             first_message = None
@@ -543,21 +553,40 @@ def serve_client(connection, hello=None, handshaken=False, first_message=None):
                 value, i = take_string(message, i)
                 if kind == 'endpoint.presentation.sync.v1':
                     control(connection, 'endpoint.presentation.ready.v1', value)
+                    if scenario == 'presentation-metadata':
+                        time.sleep(0.4)
+                        for index in range(600):
+                            snapshot['revision'] += 1
+                            snapshot['agents'][0]['terminal_title'] = f'Agent output {index}'
+                            control(connection, 'shell.snapshot.v1', snapshot)
+                            payload = bytes.fromhex(golden['surface_image']).replace(
+                                integer(251) + integer(65536),
+                                integer(snapshot['revision']) + integer(65537 + index), 1)
+                            send(connection, payload)
+                            time.sleep(0.02)
                     if scenario == 'window-drop' and connection_number == 1:
                         time.sleep(0.4)
                         return  # Lose only this client; the same service keeps accepting connections.
-                    if scenario in ('presentation', 'effects', 'effects-in-flight'):
+                    if scenario in ('presentation', 'effects', 'effects-in-flight', 'effects-in-flight-metadata'):
                         time.sleep(0.4)
                         payload = bytes.fromhex(golden['surface_image']).replace(
                             b'\xfc\x00\x00\x01\x00', b'\xfc\x01\x00\x01\x00', 1)
+                        if scenario == 'effects-in-flight-metadata':
+                            snapshot['revision'] += 1
+                            control(connection, 'shell.snapshot.v1', snapshot)
+                            payload = payload.replace(integer(251), integer(snapshot['revision']), 1)
                         send(connection, payload)
                     if scenario == 'effects':
                         send(connection, b'\x05' + string('fixture clipboard'))
                         send(connection, b'\x09' + integer(1))
-                    if scenario == 'effects-in-flight':
+                    if scenario in ('effects-in-flight', 'effects-in-flight-metadata'):
                         time.sleep(0.25)
                         payload = bytes.fromhex(golden['surface_image']).replace(
                             b'\xfc\x00\x00\x01\x00', b'\xfc\x02\x00\x01\x00', 1)
+                        if scenario == 'effects-in-flight-metadata':
+                            snapshot['revision'] += 1
+                            control(connection, 'shell.snapshot.v1', snapshot)
+                            payload = payload.replace(integer(251), integer(snapshot['revision']), 1)
                         send(connection, payload)
                         send(connection, b'\x05' + string('future clipboard'))
                         send(connection, b'\x09' + integer(1))
