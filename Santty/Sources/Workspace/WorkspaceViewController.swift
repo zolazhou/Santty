@@ -337,6 +337,17 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         focusedPaneController as? TerminalPaneController
     }
 
+    var inputSourceTarget: PaneInputSourceCoordinator.Target? {
+        guard !paletteNavigationInProgress, !herdrOperationPending,
+              let pane = focusedTerminalPaneController, let target = pane.inputSourceTargetView,
+              let window = target.window, window.isKeyWindow, window.attachedSheet == nil,
+              window.firstResponder === target else { return nil }
+        return .init(paneID: pane.id, view: target, foreground: { [weak pane] in
+            guard let pane else { throw CLIError("The terminal pane was closed") }
+            return try await pane.inputSourceForeground()
+        })
+    }
+
     private var focusedBrowserPaneController: BrowserPaneController? {
         focusedPaneController as? BrowserPaneController
     }
@@ -3455,6 +3466,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         } else {
             window.makeFirstResponder(rootView)
         }
+        PaneInputSourceCoordinator.shared.refresh()
     }
 
     func restoreFocusAfterCommandPalette() {

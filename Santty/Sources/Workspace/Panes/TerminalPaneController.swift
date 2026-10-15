@@ -109,6 +109,30 @@ final class TerminalPaneController: NSObject, PaneControlling {
         return Int(processID)
     }
 
+    func inputSourceForeground() async throws -> InputSourceForeground {
+        if herdrBinding != nil {
+            try await refreshHerdrProcessInfo()
+            guard let info = herdrProcessInfo else { throw CLIError("Foreground process information is unavailable") }
+            return InputSourceForeground(groupID: info.foreground_process_group_id,
+                processes: (info.foreground_processes ?? []).map {
+                    .init(id: $0.pid, name: $0.name, command: $0.cmdline)
+                })
+        }
+        guard let groupID = foregroundProcessID else { throw CLIError("Foreground process information is unavailable") }
+        let processes = await Task.detached(priority: .utility) {
+            TerminalProcessInspector.currentProcessTable().filter { $0.processGroupID == groupID }
+                .map { InputSourceForeground.Process(id: $0.processID, name: $0.executableName ?? "", command: $0.command) }
+        }.value
+        try Task.checkCancellation()
+        guard foregroundProcessID == groupID else { throw CLIError("Foreground process changed during lookup") }
+        return InputSourceForeground(groupID: groupID, processes: processes)
+    }
+
+    var inputSourceTargetView: NSView? {
+        guard canAcceptInput, !isScrollModeActive, persistentHistory == nil else { return nil }
+        return clientShellCandidate?.view ?? terminalView
+    }
+
     var workingDirectoryForNewPane: String? {
         if herdrBinding != nil { return currentWorkingDirectory }
         guard

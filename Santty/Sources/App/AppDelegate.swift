@@ -108,6 +108,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !restorationTest { NSApp.activate(ignoringOtherApps: true) }
         self.window = window
         self.workspaceViewController = workspaceViewController
+        if !restorationTest {
+            PaneInputSourceCoordinator.shared.targetProvider = { [weak workspaceViewController] in
+                workspaceViewController?.inputSourceTarget
+            }
+            PaneInputSourceCoordinator.shared.start()
+        }
         if let target = pendingAgentTarget {
             pendingAgentTarget = nil
             workspaceViewController.navigateToHerdrAgent(target)
@@ -156,6 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_: Notification) {
+        PaneInputSourceCoordinator.shared.stop()
         KeyboardShortcuts.disable(KeybindingAction.toggleNotes.shortcutName)
         if let menuKeyEquivalentMonitor {
             NSEvent.removeMonitor(menuKeyEquivalentMonitor)

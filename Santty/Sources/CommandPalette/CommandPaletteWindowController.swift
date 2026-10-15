@@ -56,8 +56,12 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
         panel.contentMaxSize = commandPaletteView.preferredContentSize
         panel.setContentSize(commandPaletteView.preferredContentSize)
         positionPanel(panel, over: parentWindow)
+        PaneInputSourceCoordinator.shared.paletteWillOpen()
         panel.makeKeyAndOrderFront(nil)
         commandPaletteView.focusSearchField()
+        if let editor = panel.firstResponder as? NSView {
+            PaneInputSourceCoordinator.shared.paletteDidFocus(editor)
+        }
     }
 
     func dismiss() {
@@ -77,10 +81,12 @@ final class CommandPaletteWindowController: NSWindowController, NSWindowDelegate
     }
 
     private func dismiss(notify: Bool) {
+        guard window?.isVisible == true else { return }
         refreshTimer?.invalidate()
         refreshTimer = nil
         isOrderingOut = true
         window?.orderOut(nil)
+        PaneInputSourceCoordinator.shared.paletteDidClose()
         DispatchQueue.main.async { [weak self] in
             self?.isOrderingOut = false
         }

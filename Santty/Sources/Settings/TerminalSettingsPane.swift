@@ -11,6 +11,7 @@ struct TerminalSettingsPane: View {
 
     var body: some View {
         Form {
+            InputSourceSettingsSections()
             Section {
                 LabeledContent("Theme") {
                     HStack {
