@@ -91,7 +91,7 @@ if scenario == 'window-tabs-palette':
     snapshot['tabs'].append(dict(snapshot['tabs'][0], workspace_id='w6', tab_id='w6:t1', number=1, label='Other tab', focused=False))
     snapshot['panes'].append(dict(snapshot['panes'][0], workspace_id='w6', tab_id='w6:t1', pane_id='w6:pC', label='Remote logs', focused=False))
     snapshot['agents'].append(dict(snapshot['agents'][0], workspace_id='w6', tab_id='w6:t1', pane_id='w6:pC', agent='opencode', display_agent='OpenCode', focused=False))
-if scenario in ('mouse-focus', 'window-typing-split', 'window-borders'):
+if scenario in ('mouse-focus', 'window-typing-split', 'window-typing-full-split', 'window-borders'):
     snapshot['panes'].append(dict(snapshot['panes'][0], pane_id='w5:pB', focused=False))
 trace = []
 connection_number = 0
@@ -101,6 +101,7 @@ window_serial = 65535
 window_active = False
 window_assets_sent = False
 window_split_ratio = 0.5
+window_typing_symbol = None
 api_listener = None
 api_subscribers = []
 
@@ -138,10 +139,12 @@ def window_frame():
     pane = snapshot['focused_pane_id']
     text = 'ClientShell native image' if pane == 'w5:pA' else 'ClientShell second tab image'
     symbols = [text[i] if i < min(cols, len(text)) else ' ' for i in range(cols * rows)]
-    if scenario == 'window-typing-split':
+    if scenario in ('window-typing-split', 'window-typing-full-split'):
         start = max(1, min(cols - 2, int((cols - 1) * window_split_ratio))) + 1
         label = 'Unchanged sibling'[:cols - start]
         symbols[start:start + len(label)] = label
+    if window_typing_symbol is not None:
+        symbols[0] = window_typing_symbol
     cells = b''.join(string(symbol) + b'\x00' * 5 for symbol in symbols)
     rect = b'\x00\x00' + integer(cols) + integer(rows)
     cursor_x, cursor_y = 0, 0
@@ -309,7 +312,7 @@ def client_welcome():
 
 
 def serve_client(connection, hello=None, handshaken=False, first_message=None):
-    global window_active, window_assets_sent, window_cells, window_size, connection_number, popup_live
+    global window_active, window_assets_sent, window_cells, window_size, connection_number, popup_live, window_typing_symbol
     window_active = False
     window_assets_sent = False  # Delivery cache belongs to this connection, not the service.
     connection_number += 1
@@ -351,7 +354,11 @@ def serve_client(connection, hello=None, handshaken=False, first_message=None):
                 assert i == len(message) and len(symbol) == 1
                 trace[-1]['text_input'] = True
                 record_trace()
-                send(connection, stable_content_patch(symbol))
+                if scenario == 'window-typing-full-split':
+                    window_typing_symbol = symbol
+                    send(connection, window_frame())
+                else:
+                    send(connection, stable_content_patch(symbol))
             if tag == 13 and scenario == 'snapshot-gap' and snapshot['revision'] == 251:
                 snapshot['revision'] += 1
                 control(connection, 'shell.snapshot.v1', snapshot)
@@ -426,6 +433,8 @@ def serve_client(connection, hello=None, handshaken=False, first_message=None):
                     time.sleep(0.6)
                     if scenario == 'window-tabs-reorder-rejected':
                         response_value = dict(id=request['id'], error=dict(code='reorder_denied', message='Fixture rejected reordering'))
+                if window_scenario and not window_active and request['method'] != 'client_shell.surface.set':
+                    response_value = dict(id=request['id'], error=dict(code='surface_inactive', message='Surface is inactive'))
                 response = json.dumps(response_value).encode()
                 half = len(response) // 2
                 for final, data in [(False, response[:half]), (True, response[half:])]:
@@ -442,6 +451,8 @@ def serve_client(connection, hello=None, handshaken=False, first_message=None):
                     else:
                         send(connection, bytes.fromhex(golden['surface_image']))
                 elif window_scenario:
+                    if not window_active:
+                        continue
                     if not snapshot['panes']:
                         snapshot['revision'] += 1
                         control(connection, 'shell.snapshot.v1', snapshot)
@@ -500,8 +511,9 @@ def serve_client(connection, hello=None, handshaken=False, first_message=None):
                         target['label'] = request['params']['label']
                     snapshot['revision'] += 1
                     control(connection, 'shell.snapshot.v1', snapshot)
-                    send(connection, window_frame())
-                    if scenario == 'window-tabs-patch-content':
+                    if window_active:
+                        send(connection, window_frame())
+                    if window_active and scenario == 'window-tabs-patch-content':
                         send(connection, stable_content_patch())
                 elif scenario == 'mouse-focus' and request['method'] == 'pane.focus':
                     target = request['params']['pane_id']
@@ -578,7 +590,7 @@ def serve_metadata(connection, hello):
             send(connection, notice)  # Duplicate delivery must not duplicate unread messages.
         while True:
             message = read_message(connection)
-            if message[0] in (0, 12, 17):
+            if message[0] in (0, 12, 15, 17):
                 serve_client(connection, hello, handshaken=True, first_message=message)
                 return
             if message[0] == 4:

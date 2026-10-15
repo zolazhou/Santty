@@ -305,7 +305,21 @@ final class HerdrClientShellSession {
     }
 
     func request(_ method: String, params: HerdrConnection.Request.Params = .init()) async throws -> Data {
-        guard welcome?.methods?.contains(method) == true, state == .interactive, pending.count < 64,
+        try await request(method, params: params, initialNavigation: false)
+    }
+
+    func selectInitialTab(_ tabID: String) async throws {
+        guard activationQueued, !hasPresentedSurface, transport != nil, failure == nil,
+              projection.snapshot?.tabs.contains(where: { $0.tab_id == tabID }) == true else {
+            throw CLIError("Herdr floating tab metadata is unavailable")
+        }
+        _ = try await request("tab.focus", params: .init(tab_id: tabID), initialNavigation: true)
+    }
+
+    private func request(_ method: String, params: HerdrConnection.Request.Params,
+                         initialNavigation: Bool) async throws -> Data {
+        guard welcome?.methods?.contains(method) == true,
+              state == .interactive || (initialNavigation && activationQueued && !hasPresentedSurface && method == "tab.focus"), pending.count < 64,
               let snapshot = projection.snapshot else { throw CLIError("Herdr endpoint operation is unavailable: \(method)") }
         let id = UUID().uuidString
         let json = String(decoding: try JSONEncoder().encode(Request(id: id, method: method, params: params)), as: UTF8.self)
@@ -413,6 +427,17 @@ final class HerdrClientShellSession {
         try transport.send(.focus(false))
         updateState(.subscribed)
         try sendNext()
+    }
+
+    func deactivateAndWait() async throws {
+        try deactivate()
+        let deadline = now + (endpoint.machine == nil ? 12 : 40)
+        while pending.contains(where: { $0.deactivation }) {
+            try Task.checkCancellation()
+            if let failure { throw failure }
+            guard transport != nil, now < deadline else { throw CLIError("Herdr surface deactivation timed out") }
+            try await Task.sleep(for: .milliseconds(20))
+        }
     }
 
     private func activate(_ snapshot: HerdrShellSnapshot) throws {

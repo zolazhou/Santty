@@ -11,7 +11,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
         terminalHostView
     }
 
-    let herdrBinding: HerdrPaneBinding?
+    private(set) var herdrBinding: HerdrPaneBinding?
     private var clientShellQueryBinding: HerdrPaneBinding?
     private var clientShellQueryEpoch = 0
     var herdrQueryBinding: HerdrPaneBinding? {
@@ -207,6 +207,15 @@ final class TerminalPaneController: NSObject, PaneControlling {
         herdrState = .disconnected
         terminalHostView.toolTip = nil
         onTitleChange?(id)
+    }
+
+    func applyHerdrMove(_ binding: HerdrPaneBinding) throws {
+        guard let current = herdrBinding, current.endpoint == binding.endpoint,
+              current.serviceIdentity == binding.serviceIdentity, current.workspaceID == binding.workspaceID,
+              current.paneID == binding.paneID else { throw CLIError("Herdr moved pane identity changed") }
+        disconnectHerdr()
+        herdrBinding = binding
+        setClientShellPresented(false)
     }
 
 
@@ -598,13 +607,22 @@ final class TerminalPaneController: NSObject, PaneControlling {
         onTitleChange?(id)
     }
 
-    func resolveHerdrQueryBinding() async throws -> HerdrPaneBinding {
+    func resolveHerdrQueryBinding(using client: HerdrWorkspaceClient? = nil) async throws -> HerdrPaneBinding {
         try Task.checkCancellation()
         guard isLive, let binding = herdrBinding else { throw CLIError("Herdr query target is unavailable") }
         if let query = herdrQueryBinding { return query }
         guard herdrBinding != nil else { throw CLIError("Herdr runtime identity is unavailable") }
         let generation = herdrGeneration, epoch = clientShellQueryEpoch
-        let metadata = try await HerdrWorkspaceClient(endpoint: binding.endpoint, identity: binding.serviceIdentity).verify(binding, requireRuntime: false)
+        let metadata: HerdrSnapshot.Pane
+        if let client {
+            guard client.endpoint == binding.endpoint else { throw CLIError("Herdr query endpoint changed") }
+            guard let pane = try await client.snapshot().panes.first(where: { binding.matches($0, requireRuntime: false) }) else {
+                throw CLIError("Herdr query target changed")
+            }
+            metadata = pane
+        } else {
+            metadata = try await HerdrWorkspaceClient(endpoint: binding.endpoint, identity: binding.serviceIdentity).verify(binding, requireRuntime: false)
+        }
         try Task.checkCancellation()
         guard let runtime = metadata.terminal_id, !runtime.isEmpty else {
             throw CLIError("Herdr runtime identity is unavailable for this pane")

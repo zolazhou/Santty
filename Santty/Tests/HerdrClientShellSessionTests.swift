@@ -6,6 +6,34 @@ import XCTest
 
 @MainActor
 final class HerdrClientShellSessionTests: XCTestCase {
+    func testInitialTabSelectionRequiresActivationAndFreshPresentation() async throws {
+        let (process, endpoint, path) = try await fixture("window-tabs-palette")
+        defer { cleanup(process, path) }
+        let session = HerdrClientShellSession(endpoint: endpoint)
+        defer { session.disconnect() }
+        var offered = 0
+        session.onProjection = { _, _, _ in offered += 1 }
+        try await session.start(size: .init(cols: 1, rows: 1), cellWidth: 0, cellHeight: 0,
+            focused: false, activateWhenMetadataReady: false)
+        for _ in 0..<200 where session.projection.snapshot == nil { try await Task.sleep(for: .milliseconds(10)) }
+        let snapshot = try XCTUnwrap(session.projection.snapshot)
+        let target = try XCTUnwrap(snapshot.tabs.first { $0.tab_id != snapshot.focused_tab_id })
+        do { try await session.selectInitialTab(target.tab_id); XCTFail("Inactive navigation must be rejected") } catch { }
+        try session.activate(size: .init(cols: 100, rows: 30), cellWidth: 8, cellHeight: 16)
+        try await session.selectInitialTab(target.tab_id)
+        for _ in 0..<200 where session.projection.snapshot?.focused_tab_id != target.tab_id { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(session.projection.snapshot?.focused_tab_id, target.tab_id)
+        XCTAssertFalse(session.isPresentationReady)
+        XCTAssertGreaterThan(offered, 0)
+        let surface = try XCTUnwrap(session.projection.coherentSurface)
+        XCTAssertTrue(session.acknowledgePresentation(surface))
+        do { try await session.selectInitialTab(snapshot.focused_tab_id!); XCTFail("Initial navigation must end after presentation") } catch { }
+        try await session.deactivateAndWait()
+        XCTAssertFalse(session.isPresentationReady)
+        let trace = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path + ".trace"))) as? [[String: Any]])
+        XCTAssertTrue(trace.contains { $0["method"] as? String == "client_shell.surface.set" })
+    }
+
     func testSinglePaneRoundtripAvoidsAPILayoutQueriesButSplitFetchesTopology() async throws {
         let (process, endpoint, path) = try await fixture("window-split-queries")
         defer { cleanup(process, path); try? FileManager.default.removeItem(atPath: path) }
@@ -1230,6 +1258,24 @@ final class HerdrClientShellSessionTests: XCTestCase {
     }
 
     func testRealHerdrServiceTypingAndScrollBenchmark() async throws {
+        try await exerciseRealHerdrService(scenarios: ["single", "large", "split"], typingCount: 1100)
+    }
+
+    func testRealHerdrAlternateScreenKeepsInactivePaneSurface() async throws {
+        try await exerciseRealHerdrService(scenarios: ["split"], typingCount: 4)
+    }
+
+    func testRealHerdrSharedBordersKeepInactivePaneSurface() async throws {
+        try await exerciseRealHerdrService(scenarios: ["split"], typingCount: 4,
+            uiConfig: "[ui]\npane_gaps = false\npane_outer_borders = false\n")
+    }
+
+    func testRealHerdrDisabledScrollbarsKeepInactivePaneSurface() async throws {
+        try await exerciseRealHerdrService(scenarios: ["split"], typingCount: 4,
+            uiConfig: "[ui]\npane_borders = \"always\"\npane_gaps = true\npane_outer_borders = false\npane_scrollbars = false\n", focusFirstPane: true)
+    }
+
+    private func exerciseRealHerdrService(scenarios: [String], typingCount: Int, uiConfig: String = "", focusFirstPane: Bool = false) async throws {
         guard let binary = ProcessInfo.processInfo.environment["SANTTY_HERDR_PERF_BINARY"] else {
             throw XCTSkip("Set TEST_RUNNER_SANTTY_HERDR_PERF_BINARY to an installed Herdr binary")
         }
@@ -1241,7 +1287,7 @@ final class HerdrClientShellSessionTests: XCTestCase {
         let config = directory.appendingPathComponent("config.toml")
         let configEncoder = JSONEncoder(); configEncoder.outputFormatting = [.withoutEscapingSlashes]
         let shell = String(decoding: try configEncoder.encode(workload.path), as: UTF8.self)
-        try "[terminal]\ndefault_shell = \(shell)\nshell_mode = \"non_login\"\n[update]\nversion_check = false\nmanifest_check = false\n".write(to: config, atomically: true, encoding: .utf8)
+        try ("[terminal]\ndefault_shell = \(shell)\nshell_mode = \"non_login\"\n[update]\nversion_check = false\nmanifest_check = false\n" + uiConfig).write(to: config, atomically: true, encoding: .utf8)
         let socket = directory.appendingPathComponent("herdr.sock").path
         let endpoint = HerdrEndpoint(binary: URL(fileURLWithPath: binary), session: "benchmark", socketPath: socket)
         let process = Process()
@@ -1278,8 +1324,8 @@ final class HerdrClientShellSessionTests: XCTestCase {
                 if let terminal = view as? TerminalView { return terminal }
                 return view.subviews.lazy.compactMap { terminal(in: $0) }.first
             }
-            for scenario in ["single", "large", "split"] {
-                if scenario == "large" { window.setContentSize(NSSize(width: 2400, height: 1200)) }
+            for scenario in scenarios {
+                if scenario == "large" || scenario == "split" { window.setContentSize(NSSize(width: 2400, height: 1200)) }
                 let created = try await client.create(cwd: directory.path)
                 try await workspace.enterHerdrWorkspace(try XCTUnwrap(created.workspace_id))
                 if scenario == "split" { workspace.debugPerformCommand(withID: "pane.split.horizontal") }
@@ -1287,10 +1333,27 @@ final class HerdrClientShellSessionTests: XCTestCase {
                     || (scenario == "split" && workspace.debugPaneIDsInTraversalOrder.count != 2) {
                     try await Task.sleep(for: .milliseconds(10))
                 }
+                if focusFirstPane {
+                    workspace.debugHandlePaneFocusRequest(withID: try XCTUnwrap(workspace.debugPaneIDsInTraversalOrder.first))
+                    for _ in 0..<500 where workspace.debugHerdrOperationPending || workspace.debugFocusedHerdrPane?.canAcceptInput != true {
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                }
                 let pane = try XCTUnwrap(workspace.debugFocusedHerdrPane)
                 let display = try XCTUnwrap(terminal(in: pane.hostView))
+                let rootView = try XCTUnwrap(workspace.view as? WorkspaceRootView)
+                let tiling = try XCTUnwrap(rootView.contentContainerView.subviews.compactMap { $0 as? WorkspaceTilingView }.first)
+                let sibling = tiling.paneViews.values.compactMap { terminal(in: $0) }.first { $0 !== display }
+                for _ in 0..<500 where display.readScreenText()?.hasPrefix("READY") != true || (sibling != nil && sibling?.readScreenText()?.hasPrefix("READY") != true) {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                let siblingText = sibling?.readScreenText()
+                let logs = RenderOutputLog()
+                let oldSink = TerminalDebugLog.sink, oldCategories = TerminalDebugLog.categories, oldEnabled = TerminalDebugLog.isEnabled
+                TerminalDebugLog.sink = { logs.append($0) }; TerminalDebugLog.enable(.output)
+                defer { TerminalDebugLog.sink = oldSink; TerminalDebugLog.categories = oldCategories; TerminalDebugLog.isEnabled = oldEnabled }
                 var milliseconds: [Double] = []
-                for index in 0..<1100 {
+                for index in 0..<typingCount {
                     let text = index % 2 == 0 ? "X" : "Y"
                     let start = ProcessInfo.processInfo.systemUptime
                     guard pane.sendClientShellInput([.text(text)]) else { throw CLIError("Real service input rejected") }
@@ -1299,6 +1362,10 @@ final class HerdrClientShellSessionTests: XCTestCase {
                     }
                     guard display.readScreenText()?.hasPrefix(text) == true else {
                         throw CLIError(workspace.herdrLastError ?? "Real service echo missing: \(String((display.readScreenText() ?? "nil").prefix(300)))")
+                    }
+                    if let sibling {
+                        XCTAssertTrue(sibling.window === window, "Typing must preserve the inactive surface")
+                        XCTAssertEqual(sibling.readScreenText(), siblingText)
                     }
                     if index >= 100 { milliseconds.append((ProcessInfo.processInfo.systemUptime - start) * 1000) }
                 }
@@ -1310,6 +1377,36 @@ final class HerdrClientShellSessionTests: XCTestCase {
                     try await Task.sleep(for: .milliseconds(1))
                 }
                 XCTAssertTrue(display.readScreenText()?.contains("SCROLL_DONE") == true, "Continuous output must reach its final frame")
+                XCTAssertTrue(logs.clears.isEmpty, "Real Herdr content updates cleared Ghostty: \(logs.clears.prefix(3))")
+                if let sibling {
+                    XCTAssertTrue(sibling.window === window, "Scroll output must preserve the inactive surface")
+                    XCTAssertEqual(sibling.readScreenText(), siblingText)
+                    for kind: UInt32 in [4, 5, 4, 5] {
+                        XCTAssertTrue(pane.sendClientShellInput([.mouse(.init(kind: kind, column: 0, row: 0, lines: 5))]))
+                        try await Task.sleep(for: .milliseconds(50))
+                        XCTAssertTrue(sibling.window === window, "Wheel input must preserve the inactive surface")
+                        XCTAssertEqual(sibling.readScreenText(), siblingText)
+                    }
+                    let normalSurface = try XCTUnwrap(workspace.debugHerdrShellSession?.projection.coherentSurface)
+                    let nativeSibling = try XCTUnwrap(normalSurface.panes.first { $0.pane_id != pane.herdrBinding?.paneID })
+                    XCTAssertTrue(pane.sendClientShellInput([.text("A")]))
+                    for _ in 0..<500 where terminal(in: pane.hostView)?.readScreenText()?.hasPrefix("ALTERNATE") != true || !pane.canAcceptInput {
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                    XCTAssertTrue(terminal(in: pane.hostView)?.readScreenText()?.hasPrefix("ALTERNATE") == true)
+                    XCTAssertEqual(workspace.debugHerdrShellSession?.projection.coherentSurface?.frame.width, normalSurface.frame.width)
+                    XCTAssertEqual(workspace.debugHerdrShellSession?.projection.coherentSurface?.panes.first { $0.pane_id == nativeSibling.pane_id }?.inner_rect,
+                                   nativeSibling.inner_rect, "Alternate screen must not resize the inactive PTY")
+                    XCTAssertTrue(sibling.window === window, "Entering an alternate screen in one pane must preserve the inactive surface")
+                    XCTAssertEqual(sibling.readScreenText(), siblingText)
+                    XCTAssertTrue(pane.sendClientShellInput([.text("N")]))
+                    for _ in 0..<500 where terminal(in: pane.hostView)?.readScreenText()?.contains("SCROLL_DONE") != true || !pane.canAcceptInput {
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                    XCTAssertTrue(sibling.window === window, "Leaving an alternate screen in one pane must preserve the inactive surface")
+                    XCTAssertEqual(workspace.debugHerdrShellSession?.projection.coherentSurface?.frame.width, normalSurface.frame.width)
+                    XCTAssertEqual(workspace.debugHerdrShellSession?.projection.coherentSurface?.panes.first { $0.pane_id == nativeSibling.pane_id }?.inner_rect, nativeSibling.inner_rect)
+                }
                 let report = await workspace.collectHerdrDiagnostics()
                 print("HERDR_REAL_DIAGNOSTICS scenario=\(scenario) " + String(decoding: try encoder.encode(report.clientShell), as: UTF8.self))
                 print("HERDR_REAL_SCROLL scenario=\(scenario) milliseconds=\((ProcessInfo.processInfo.systemUptime - scrollAt) * 1000)")
@@ -1323,6 +1420,10 @@ final class HerdrClientShellSessionTests: XCTestCase {
     func testTypingPatchesKeepTheUnchangedSplitPanePresented() async throws {
         do { try await exerciseTypingPatches("window-typing-split") }
         catch { XCTFail("Native split typing benchmark: \(error)") }
+    }
+
+    func testTypingFullFramesDoNotClearTheUnchangedSplitPane() async throws {
+        try await exerciseTypingPatches("window-typing-full-split")
     }
 
     private func exerciseTypingPatches(_ scenario: String) async throws {
@@ -1343,16 +1444,22 @@ final class HerdrClientShellSessionTests: XCTestCase {
         }
         let display = try XCTUnwrap(terminal(in: pane.hostView))
         var sibling: TerminalView?
-        if scenario == "window-typing-split" {
+        if scenario.hasSuffix("split") {
             let root = try XCTUnwrap(workspace.view as? WorkspaceRootView)
             let tiling = try XCTUnwrap(root.contentContainerView.subviews.compactMap { $0 as? WorkspaceTilingView }.first)
             sibling = try XCTUnwrap(tiling.paneViews.values.compactMap { terminal(in: $0) }.first { $0 !== display })
             XCTAssertTrue(sibling?.readScreenText()?.contains("Unchanged sibling") == true)
         }
         let siblingText = sibling?.readScreenText()
+        let logs = RenderOutputLog()
+        let oldSink = TerminalDebugLog.sink, oldCategories = TerminalDebugLog.categories, oldEnabled = TerminalDebugLog.isEnabled
+        TerminalDebugLog.sink = { logs.append($0) }
+        TerminalDebugLog.enable(.output)
+        defer { TerminalDebugLog.sink = oldSink; TerminalDebugLog.categories = oldCategories; TerminalDebugLog.isEnabled = oldEnabled }
         var samples = HerdrShellLatencySamples()
         var echoMilliseconds: [Double] = []
-        for index in 0..<1100 {
+        let count = scenario == "window-typing-full-split" ? 180 : 1100
+        for index in 0..<count {
             let text = index % 2 == 0 ? "X" : "Y"
             let start = ProcessInfo.processInfo.systemUptime
             guard pane.sendClientShellInput([.text(text)]) else { throw CLIError("Input \(index) was rejected") }
@@ -1361,6 +1468,10 @@ final class HerdrClientShellSessionTests: XCTestCase {
             }
             guard display.readScreenText()?.hasPrefix(text) == true else {
                 throw CLIError(workspace.herdrLastError ?? "Missing echo \(index)")
+            }
+            if let sibling {
+                XCTAssertTrue(sibling.window === window, "Content updates must retain the sibling surface")
+                XCTAssertEqual(sibling.readScreenText(), siblingText)
             }
             if index >= 100 {
                 let duration = ProcessInfo.processInfo.systemUptime - start
@@ -1375,6 +1486,7 @@ final class HerdrClientShellSessionTests: XCTestCase {
         print("HERDR_STAGE_BENCHMARK scenario=\(scenario) " + String(decoding: try encoder.encode(report.clientShell?.stages), as: UTF8.self))
         let stages = try XCTUnwrap(report.clientShell?.stages)
         for stage in ["payloadRead", "wireDecode", "mainActorQueue", "patchApply", "publish", "encodeQueue", "encode", "encodeActorResume", "paneViewport", "scenePrepare", "ghosttyBarrier", "hostFinalize"] {
+            if stage == "patchApply", scenario == "window-typing-full-split" { continue }
             let timing = try XCTUnwrap(stages[stage], stage)
             XCTAssertGreaterThan(timing.sampleCount, 0, stage)
             XCTAssertGreaterThanOrEqual(try XCTUnwrap(timing.p99Milliseconds), try XCTUnwrap(timing.p95Milliseconds), stage)
@@ -1390,12 +1502,24 @@ final class HerdrClientShellSessionTests: XCTestCase {
         }
         XCTAssertTrue(display.readScreenText()?.hasPrefix("Z") == true, "Burst input must reach the latest echo")
         let trace = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path + ".trace"))) as? [[String: Any]])
-        XCTAssertEqual(trace.filter { $0["text_input"] as? Bool == true }.count, 1200, "Every text commit must reach Herdr during rendering")
+        XCTAssertEqual(trace.filter { $0["text_input"] as? Bool == true }.count, count + 100, "Every text commit must reach Herdr during rendering")
+        XCTAssertTrue(logs.clears.isEmpty, "Content-only updates cleared Ghostty: \(logs.clears.prefix(3))")
         if let sibling {
             XCTAssertTrue(sibling.window === window)
             XCTAssertEqual(sibling.readScreenText(), siblingText, "Unchanged pane must retain its displayed content")
         }
         XCTAssertNil(workspace.herdrLastError)
+    }
+
+    private final class RenderOutputLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var messages: [String] = []
+        func append(_ message: String) {
+            if message.contains("terminal <- host"), message.contains("[2J") {
+                lock.withLock { messages.append(message) }
+            }
+        }
+        var clears: [String] { lock.withLock { messages } }
     }
 
     func testRapidNativeTabSwitchesWhileEndpointIsPendingRemainResponsive() async throws {
@@ -1431,50 +1555,46 @@ final class HerdrClientShellSessionTests: XCTestCase {
         XCTAssertTrue(process.isRunning)
     }
 
-    func testHerdrFloatingPaneShrinkFollowsBackendCursorAndRestoresItsOrigin() async throws {
-        let (process, endpoint, path) = try await fixture("window-floating-cursor")
-        defer { cleanup(process, path); try? FileManager.default.removeItem(atPath: path) }
+    func testFloatingSizeSurvivesWorkspaceRoundtripAfterTransferEnds() async throws {
+        let (process, endpoint, path) = try await fixture("window-tabs")
+        defer { cleanup(process, path) }
         let workspace = WorkspaceViewController(); workspace.debugLoadForTesting()
         workspace.herdrErrorHandler = { _ in }
+        let local = workspace.debugSelectedWorkspace
         try workspace.configureHerdrWorkspace(endpoint)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 650),
-                              styleMask: [], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 650), styleMask: [], backing: .buffered, defer: false)
         window.contentView = workspace.view; window.orderBack(nil)
         defer { workspace.releaseHerdrConnections(); window.orderOut(nil); window.contentView = nil }
         try await workspace.enterHerdrWorkspace("w5")
-        let pane = try XCTUnwrap(workspace.debugFocusedHerdrPane)
-        let grid = try XCTUnwrap(pane.clientShellGridMetrics)
-        let terminalSize = pane.debugTerminalFrame.size
+        let selected = workspace.debugSelectedWorkspace
         workspace.debugToggleFloatingPane(animated: false)
-        for _ in 0..<15 {
-            workspace.debugPerformCommand(withID: "pane.resize.left")
-            workspace.debugPerformCommand(withID: "pane.resize.down")
-        }
-        workspace.view.layoutSubtreeIfNeeded()
-        let frame = pane.debugTerminalFrame
-        let cursor = NSRect(x: frame.minX + CGFloat(grid.columns - 2) * frame.width / CGFloat(grid.columns),
-                            y: frame.minY, width: frame.width / CGFloat(grid.columns),
-                            height: frame.height / CGFloat(grid.rows))
-        XCTAssertTrue(pane.debugPaneBounds.insetBy(dx: TerminalSettings.padding, dy: TerminalSettings.padding).contains(cursor))
-        XCTAssertEqual(frame.size, terminalSize)
-        XCTAssertEqual(pane.clientShellGridMetrics?.columns, grid.columns)
-        XCTAssertEqual(pane.clientShellGridMetrics?.rows, grid.rows)
-        XCTAssertTrue(pane.canAcceptInput)
-        workspace.debugSetFocusedPaneName("cursor-home")
-        for _ in 0..<200 {
-            if pane.debugTerminalFrame.minX == TerminalSettings.padding,
-               pane.debugTerminalFrame.maxY == pane.debugPaneBounds.maxY - TerminalSettings.padding,
-               pane.canAcceptInput { break }
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        XCTAssertEqual(pane.debugTerminalFrame.minX, TerminalSettings.padding)
-        XCTAssertEqual(pane.debugTerminalFrame.maxY, pane.debugPaneBounds.maxY - TerminalSettings.padding)
-        XCTAssertTrue(pane.canAcceptInput)
+        workspace.debugPerformCommand(withID: "pane.resize.left")
+        let size = try XCTUnwrap(workspace.debugActiveFloatingPaneState?.size)
+        // The fixture rejects the transfer, exercising the same record cleanup as a completed return.
+        await workspace.waitForHerdrFloatingTransitionForTesting()
+        XCTAssertNil(workspace.debugActiveFloatingPaneState)
+        let saved = workspace.savedWorkspace()
+        try saved.validate()
+        let decoded = try JSONDecoder().decode(SavedWorkspace.self, from: JSONEncoder().encode(saved))
+        XCTAssertEqual(decoded, saved)
+        XCTAssertEqual(saved.herdrFloatingPanes?.first?.size, size)
+        XCTAssertNil(saved.herdrFloatingPanes?.first?.placeholder)
+        XCTAssertNil(saved.herdrFloatingPanes?.first?.floating)
+        try workspace.restoreWorkspace(decoded)
+        try await workspace.enterHerdrWorkspace("w5")
+        workspace.selectWorkspace(local)
+        workspace.selectWorkspace(selected); await workspace.waitForWorkspaceSelection()
+        workspace.debugToggleFloatingPane(animated: false)
+        XCTAssertEqual(workspace.debugActiveFloatingPaneState?.size, size)
+        let frame = try XCTUnwrap(workspace.debugFloatingPaneFrame)
+        XCTAssertEqual(frame.width, size.width, accuracy: 0.0001)
+        XCTAssertEqual(frame.height, size.height, accuracy: 0.0001)
+        await workspace.waitForHerdrFloatingTransitionForTesting()
     }
 
-    func testBackendFloatingPaneSurvivesClientShellTabRoundTrip() async throws {
+    func testRejectedFloatingTransferPreservesOriginalPane() async throws {
         let (process, endpoint, path) = try await fixture("window-tabs")
-        defer { cleanup(process, path); try? FileManager.default.removeItem(atPath: path) }
+        defer { cleanup(process, path) }
         let workspace = WorkspaceViewController(); workspace.debugLoadForTesting()
         workspace.herdrErrorHandler = { _ in }
         try workspace.configureHerdrWorkspace(endpoint)
@@ -1482,27 +1602,22 @@ final class HerdrClientShellSessionTests: XCTestCase {
         window.contentView = workspace.view; window.orderBack(nil)
         defer { workspace.releaseHerdrConnections(); window.orderOut(nil); window.contentView = nil }
         try await workspace.enterHerdrWorkspace("w5")
-        let first = try XCTUnwrap(workspace.debugSelectedTabID)
         let pane = try XCTUnwrap(workspace.debugFocusedHerdrPane)
-        let second = try XCTUnwrap(workspace.debugTabIDs.first { $0 != first })
+        let tabs = workspace.debugTabIDs
         workspace.debugToggleFloatingPane(animated: false)
-        for _ in 0..<200 where !pane.canAcceptInput { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertTrue(pane.canAcceptInput)
         XCTAssertEqual(workspace.debugActiveFloatingPaneState?.paneID, pane.id)
-        workspace.debugSelectTab(withID: second)
-        for _ in 0..<300 where workspace.debugSelectedTabID != second {
-            try await Task.sleep(for: .milliseconds(10))
+        for _ in 0..<10 {
+            workspace.debugToggleFloatingPane(animated: false)
+            workspace.toggleFloatingPane(nil)
+            XCTAssertEqual(workspace.debugActiveFloatingPaneState?.paneID, pane.id,
+                           "An unfinished native transfer owns the floating preview")
         }
-        XCTAssertEqual(workspace.debugSelectedTabID, second, workspace.herdrLastError ?? "")
-        workspace.debugSelectTab(withID: first)
-        for _ in 0..<300 where workspace.debugSelectedTabID != first || !pane.canAcceptInput {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        XCTAssertEqual(workspace.debugSelectedTabID, first, workspace.herdrLastError ?? "")
-        XCTAssertEqual(workspace.debugActiveFloatingPaneState?.paneID, pane.id)
-        XCTAssertNotNil(workspace.debugFloatingPaneFrame)
-        XCTAssertTrue(pane.canAcceptInput)
+        await workspace.waitForHerdrFloatingTransitionForTesting()
+        XCTAssertNil(workspace.debugActiveFloatingPaneState)
+        XCTAssertEqual(workspace.debugTabIDs, tabs)
         XCTAssertTrue(workspace.debugFocusedHerdrPane === pane)
+        XCTAssertTrue(pane.canAcceptInput)
+        XCTAssertNotNil(workspace.herdrLastError)
         XCTAssertTrue(process.isRunning)
     }
 

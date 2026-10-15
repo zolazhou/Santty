@@ -1,7 +1,7 @@
 import Foundation
 
 struct SavedWorkspace: Codable, Sendable, Equatable {
-    static let currentVersion = 6
+    static let currentVersion = 7
     var version = Self.currentVersion
     var selectedTabID: UUID?
     var tabs: [Tab]
@@ -16,6 +16,7 @@ struct SavedWorkspace: Codable, Sendable, Equatable {
     var otherLocalWorkspaces: [LocalWorkspace]? = nil
     var workspaces: [WorkspaceEntry]? = nil
     var selectedWorkspace: WorkspaceReference? = nil
+    var herdrFloatingPanes: [HerdrFloatingPaneRecord]? = nil
 
     struct LocalWorkspace: Codable, Sendable, Equatable {
         let id: UUID
@@ -66,6 +67,29 @@ struct SavedWorkspace: Codable, Sendable, Equatable {
 
     private func validate(allowMissingRuntime: Bool) throws {
         guard (1...Self.currentVersion).contains(version) else { throw CLIError("Unsupported workspace version \(version); the file will not be overwritten") }
+        if let records = herdrFloatingPanes {
+            guard version >= 7, records.count <= 4096,
+                  records.filter({ $0.placeholder != nil || $0.floating != nil }).count <= 64,
+                  Set(records.map(\.paneID)).count == records.count else {
+                throw CLIError("Invalid saved Herdr floating panes")
+            }
+            for record in records {
+                guard record.source.terminalID?.isEmpty == false, record.source.serviceIdentity != nil,
+                      record.sourceViewport.map({ $0.cols > 0 && $0.rows > 0 }) != false,
+                      record.size.map({ $0.width.isFinite && $0.height.isFinite && $0.width > 0 && $0.height > 0 && $0.width <= 100_000 && $0.height <= 100_000 }) != false else { throw CLIError("Missing floating runtime identity or invalid size") }
+                for binding in [record.source] + [record.placeholder, record.floating].compactMap({ $0 }) {
+                    try validateBinding(binding)
+                    guard binding.endpoint == record.source.endpoint, binding.workspaceID == record.source.workspaceID,
+                          binding.serviceIdentity == record.source.serviceIdentity,
+                          binding.terminalID?.isEmpty == false,
+                          [binding.paneID, binding.tabID, binding.workspaceID, binding.terminalID!].allSatisfy({ !$0.isEmpty && $0.utf8.count <= 1024 }) else {
+                        throw CLIError("Invalid floating pane transfer identity")
+                    }
+                }
+                guard record.placeholder.map({ $0.tabID == record.source.tabID && $0.paneID != record.source.paneID && $0.terminalID != record.source.terminalID }) != false,
+                      record.floating.map({ $0.terminalID == record.source.terminalID && $0.paneID == record.source.paneID }) != false else { throw CLIError("Invalid floating placeholder") }
+            }
+        }
         if let workspaces {
             guard version >= 6, workspaces.count <= 4096, Set(workspaces.map(\.id)).count == workspaces.count,
                   selectedWorkspace.map({ selected in workspaces.contains { $0.reference == selected } }) != false else {

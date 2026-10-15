@@ -89,6 +89,7 @@ final class HerdrWorkspaceClient: @unchecked Sendable {
     private weak var commandSession: HerdrClientShellSession?
     private var commandBootID: String?
     private var remoteIdentity: HerdrServiceIdentity?
+    private var preflightIdentity: HerdrServiceIdentity? // Accessed only on requests.
     private var commandRetired = false
     private var endpointCommand: (@MainActor @Sendable (String, HerdrConnection.Request.Params) async throws -> HerdrAPIEnvelope.Result)?
     init(endpoint: HerdrEndpoint, identity: HerdrServiceIdentity? = nil) {
@@ -191,11 +192,48 @@ final class HerdrWorkspaceClient: @unchecked Sendable {
         if endpoint.machine != nil, !["ping", "session.snapshot", "layout.export", "pane.read", "pane.process_info", "agent.list"].contains(method) {
             throw CLIError("Select a Remote Herdr Workspace before modifying it; no API fallback was used")
         }
+        return try await requestManagement(method, params: params)
+    }
+
+    // pane.move is a native management operation, absent from the ClientShell command whitelist.
+    @MainActor
+    func requestPaneTransfer(_ method: String, binding: HerdrPaneBinding,
+                             params: HerdrConnection.Request.Params,
+                             session: HerdrClientShellSession) async throws -> HerdrAPIEnvelope.Result {
+        guard ["pane.split", "pane.move", "pane.close"].contains(method), !commandsAreRetired,
+              binding.endpoint == endpoint, binding.terminalID != nil, binding.serviceIdentity != nil,
+              (method == "pane.split" ? params.target_pane_id : params.pane_id) == binding.paneID,
+              session.endpoint == endpoint, session.serviceIdentity == binding.serviceIdentity,
+              let boot = session.projection.snapshot?.boot_id, session.failure == nil,
+              session.state != .disconnected else { throw CLIError("Herdr pane transfer identity is unavailable") }
+        let before = try await snapshot()
+        guard before.panes.contains(where: { binding.matches($0) }), !commandsAreRetired,
+              session.projection.snapshot?.boot_id == boot, session.serviceIdentity == binding.serviceIdentity else {
+            throw CLIError("Herdr pane changed before transfer; no operation was sent")
+        }
+        try Task.checkCancellation()
+        let result = try await requestManagement(method, params: params)
+        guard !commandsAreRetired, session.projection.snapshot?.boot_id == boot,
+              session.serviceIdentity == binding.serviceIdentity, session.failure == nil else {
+            throw CLIError("Herdr connection changed during transfer; refresh before retrying")
+        }
+        return result
+    }
+
+    private func requestManagement(_ method: String, params: HerdrConnection.Request.Params) async throws -> HerdrAPIEnvelope.Result {
         return try await withCheckedThrowingContinuation { continuation in
             requests.async { [self] in
                 do {
+                    if ["pane.split", "pane.move", "pane.close"].contains(method), commandsAreRetired {
+                        throw CLIError("Herdr pane transfer was retired before sending")
+                    }
                     try endpoint.validate()
-                    _ = try HerdrConnection.preflight(socketPath: endpoint.socketPath, endpoint: endpoint)
+                    commandLock.lock(); let queryIdentity = remoteIdentity; commandLock.unlock()
+                    // A new endpoint or server boot always negotiates again.
+                    if queryIdentity?.bootID?.isEmpty != false || queryIdentity != preflightIdentity {
+                        _ = try HerdrConnection.preflight(socketPath: endpoint.socketPath, endpoint: endpoint)
+                        preflightIdentity = queryIdentity
+                    }
                     var result: HerdrAPIEnvelope.Result
                     do {
                         result = try HerdrConnection.request(.init(id: UUID().uuidString, method: method, params: params), socketPath: endpoint.socketPath, endpoint: endpoint)
@@ -212,7 +250,7 @@ final class HerdrWorkspaceClient: @unchecked Sendable {
                     commandLock.lock(); let identity = remoteIdentity; commandLock.unlock()
                     if let identity { result.assignServiceIdentity(identity) }
                     continuation.resume(returning: result)
-                } catch { continuation.resume(throwing: error) }
+                } catch { preflightIdentity = nil; continuation.resume(throwing: error) }
             }
         }
     }

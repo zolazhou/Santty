@@ -66,6 +66,14 @@ struct HerdrRemoteError: LocalizedError {
 struct HerdrAPIEnvelope: Decodable {
     struct Failure: Decodable { let code: String; let message: String }
     struct Result: Decodable, Sendable {
+        struct Move: Decodable, Sendable {
+            let changed: Bool
+            let reason: String?
+            let previous_pane_id: String
+            let previous_workspace_id: String
+            let previous_tab_id: String
+            var pane: HerdrSnapshot.Pane
+        }
         let type: String
         let version: String?
         let `protocol`: Int?
@@ -75,10 +83,12 @@ struct HerdrAPIEnvelope: Decodable {
         var read: HerdrReadResult?
         var process_info: HerdrProcessInfo?
         var layout: HerdrLayout?
+        var move_result: Move?
 
         mutating func assignServiceIdentity(_ identity: HerdrServiceIdentity) {
             layout?.serviceIdentity = identity; pane?.serviceIdentity = identity; root_pane?.serviceIdentity = identity
             process_info?.serviceIdentity = identity; read?.serviceIdentity = identity
+            move_result?.pane.serviceIdentity = identity
             if var snapshot {
                 for index in snapshot.panes.indices { snapshot.panes[index].serviceIdentity = identity }
                 self.snapshot = snapshot
@@ -122,6 +132,15 @@ struct HerdrLineDecoder {
 final class HerdrConnection: @unchecked Sendable {
     struct Request: Encodable, Sendable {
         struct Params: Encodable, Sendable {
+            struct MoveDestination: Encodable, Sendable {
+                let type: String
+                var workspace_id: String? = nil
+                var label: String? = nil
+                var tab_id: String? = nil
+                var target_pane_id: String? = nil
+                var split: String? = nil
+                var ratio: Double? = nil
+            }
             struct Subscription: Encodable, Sendable { let type: String }
             var subscriptions: [Subscription]? = nil
             var workspace_id: String? = nil
@@ -139,6 +158,7 @@ final class HerdrConnection: @unchecked Sendable {
             var strip_ansi: Bool? = nil
             var path: [Bool]? = nil
             var ratio: Double? = nil
+            var destination: MoveDestination? = nil
         }
         let id: String
         let method: String

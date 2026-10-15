@@ -83,12 +83,22 @@ struct HerdrLayout: Decodable, Sendable {
         func nativeShellLayout(panes: [String: UUID], surface: HerdrShellSurface,
                                cellSize: CGSize, padding: CGFloat, divider: CGFloat) throws -> (layout: LayoutNode, size: CGSize) {
             guard Set(surface.panes.map(\.pane_id)).count == surface.panes.count else { throw CLIError("Duplicate ClientShell native pane") }
-            let rectangles = Dictionary(uniqueKeysWithValues: surface.panes.map { ($0.pane_id, $0.inner_rect) })
+            let nativePanes = Dictionary(uniqueKeysWithValues: surface.panes.map { ($0.pane_id, $0) })
+            let hasLeftBorders = surface.panes.contains { $0.inner_rect.x > $0.rect.x }
+            let hasScrollbarGutter = surface.panes.contains { pane in
+                let rightInset = Int(pane.rect.x) + Int(pane.rect.width) - Int(pane.inner_rect.x) - Int(pane.inner_rect.width)
+                return pane.scrollbar_rect != nil || !pane.alternate_screen_active
+                    && (rightInset >= 2 || !hasLeftBorders && rightInset == 1)
+            }
             func build(_ node: Node) throws -> (LayoutNode, CGSize) {
                 switch node {
                 case .pane(let key):
-                    guard let id = panes[key], let rect = rectangles[key] else { throw CLIError("Missing ClientShell native pane") }
-                    return (.panel(id), CGSize(width: CGFloat(rect.width) * cellSize.width + padding * 2,
+                    guard let id = panes[key], let pane = nativePanes[key] else { throw CLIError("Missing ClientShell native pane") }
+                    let rect = pane.inner_rect
+                    let rightInset = Int(pane.rect.x) + Int(pane.rect.width) - Int(rect.x) - Int(rect.width)
+                    // Herdr's normal-mode right gutter disappears in alternate screen; it is not a window resize.
+                    let gutter: CGFloat = hasScrollbarGutter && !pane.alternate_screen_active && rect.width >= 4 && rightInset > 0 ? 1 : 0
+                    return (.panel(id), CGSize(width: (CGFloat(rect.width) + gutter) * cellSize.width + padding * 2,
                                               height: CGFloat(rect.height) * cellSize.height + padding * 2))
                 case .split(let axis, _, let first, let second):
                     let (a, sizeA) = try build(first), (b, sizeB) = try build(second)

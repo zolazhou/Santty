@@ -37,6 +37,46 @@ final class RemoteHerdrTests: XCTestCase {
         XCTAssertThrowsError(try HerdrMachineProfile(id: "not-an-id", label: "x", target: "host", session: "default", enabled: true).validate())
     }
 
+    func testFloatingTransferPersistenceRejectsForeignRuntimeAndInvalidSize() throws {
+        let remote = endpoint()
+        let identity = HerdrServiceIdentity.remote(endpoint: remote, bootID: "boot")
+        func binding(_ pane: String, _ tab: String, _ runtime: String) throws -> HerdrPaneBinding {
+            try .init(endpoint: remote, pane: .init(pane_id: pane, terminal_id: runtime, workspace_id: "w1", tab_id: tab, serviceIdentity: identity), includeRuntime: true)
+        }
+        let source = try binding("w1:p1", "w1:t1", "runtime")
+        var record = HerdrFloatingPaneRecord(paneID: UUID(), source: source, size: CGSize(width: 640, height: 400),
+            placeholder: try binding("w1:p2", "w1:t1", "placeholder"), floating: try binding("w1:p1", "w1:t2", "runtime"))
+        var document = SavedWorkspace(selectedTabID: nil, tabs: [])
+        document.herdrFloatingPanes = [record]
+        try document.validate()
+        let decoded = try JSONDecoder().decode(SavedWorkspace.self, from: JSONEncoder().encode(document))
+        XCTAssertEqual(decoded, document); try decoded.validate()
+        record.sourceViewport = .init(cols: 0, rows: 24)
+        document.herdrFloatingPanes = [record]
+        XCTAssertThrowsError(try document.validate())
+        record.sourceViewport = .init(cols: 100, rows: 30)
+        record.floating = try binding("w1:p1", "w1:t2", "replacement")
+        document.herdrFloatingPanes = [record]
+        XCTAssertThrowsError(try document.validate())
+        record.floating = try binding("w1:p1", "w1:t2", "runtime")
+        record.size = CGSize(width: CGFloat.infinity, height: 400)
+        document.herdrFloatingPanes = [record]
+        XCTAssertThrowsError(try document.validate())
+        record.size = nil; record.placeholder = source
+        document.herdrFloatingPanes = [record]
+        XCTAssertThrowsError(try document.validate())
+        document.herdrFloatingPanes = (0..<65).map { _ in
+            .init(paneID: UUID(), source: source, size: CGSize(width: 640, height: 400))
+        }
+        try document.validate()
+        let active = try XCTUnwrap(decoded.herdrFloatingPanes?.first)
+        document.herdrFloatingPanes = (0..<65).map { _ in
+            .init(paneID: UUID(), source: active.source, size: active.size,
+                  placeholder: active.placeholder, floating: active.floating)
+        }
+        XCTAssertThrowsError(try document.validate())
+    }
+
     func testNativeSSHCommandsAndConfigurationPreserveBoundaries() throws {
         for path in ["1:\\herdr.exe", "C:herdr.exe", "relative.exe"] {
             XCTAssertThrowsError(try HerdrSSHBridge.Executable(os: "windows", executable: path).validate())
@@ -266,7 +306,15 @@ final class RemoteHerdrTests: XCTestCase {
         XCTAssertTrue(service.isRunning, "Detaching must leave server-owned processes running")
     }
 
-    func testAuthorizedSSHHostRendersInputAndPreservesLocalWorkspace() async throws {
+    private struct AuthorizedSSHHost {
+        let remote: HerdrEndpoint
+        let root: URL
+        let native: URL
+        let target: String
+        let sessionName: String
+    }
+
+    private func withAuthorizedSSHHost(_ body: @MainActor (AuthorizedSSHHost) async throws -> Void) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard let target = environment["SANTTY_HERDR_SSH_TARGET"],
               let remoteBinary = environment["SANTTY_HERDR_REMOTE_BINARY"] else {
@@ -303,80 +351,312 @@ final class RemoteHerdrTests: XCTestCase {
             }
         }
         print("AUTHORIZED_SSH_TEST target=\(target) session=\(sessionName)")
-        let observer = HerdrClientShellSession(endpoint: remote)
-        defer { observer.disconnect() }
-        try await observer.start(size: .init(cols: 1, rows: 1), cellWidth: 0, cellHeight: 0, focused: false, activateWhenMetadataReady: false)
-        for _ in 0..<4000 where observer.projection.snapshot == nil && observer.failure == nil { try await Task.sleep(for: .milliseconds(10)) }
-        if let failure = observer.failure { throw failure }
-        let workspaceID = try XCTUnwrap(observer.projection.snapshot?.workspaces.first?.workspace_id)
-        let identity = try XCTUnwrap(observer.serviceIdentity)
-        XCTAssertEqual(identity.endpointID, remote.id)
-        XCTAssertFalse(observer.isPresentationReady)
-        observer.disconnect()
-        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let localPath = root.appendingPathComponent("local.sock").path
-        let localService = Process(); localService.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        localService.arguments = [repository.appendingPathComponent("Scripts/herdr-clientshell-fixture.py").path, localPath, "window"]
-        try localService.run()
-        defer { if localService.isRunning { localService.terminate(); localService.waitUntilExit() } }
-        for _ in 0..<200 where !FileManager.default.fileExists(atPath: root.appendingPathComponent("local-client.sock").path) { try await Task.sleep(for: .milliseconds(10)) }
-        let catalogBinary = root.appendingPathComponent("catalog-herdr")
-        let catalogJSON = String(decoding: try JSONEncoder().encode([try XCTUnwrap(remote.machine)]), as: UTF8.self)
-        try Data(("#!/bin/sh\nif [ \"$1\" = machine ] && [ \"$2\" = list ]; then printf '%s\\n' \(HerdrSSHBridge.quote(catalogJSON)); else exec \(HerdrSSHBridge.quote(native.path)) \"$@\"; fi\n").utf8).write(to: catalogBinary)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: catalogBinary.path)
-        let localEndpoint = HerdrEndpoint(binary: catalogBinary, session: "fixture", socketPath: localPath)
-        let workspace = WorkspaceViewController(); workspace.debugLoadForTesting()
-        var errors: [String] = []; workspace.herdrErrorHandler = { errors.append($0) }
-        let local = workspace.debugSelectedWorkspace, tabs = workspace.debugTabIDs
-        try workspace.configureHerdrWorkspace(localEndpoint)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 650), styleMask: [], backing: .buffered, defer: false)
-        window.contentView = workspace.view; window.orderBack(nil)
-        defer { workspace.releaseHerdrConnections(); window.orderOut(nil); window.contentView = nil; AgentSessionStore.shared.reset() }
-        workspace.startHerdrAgentMonitoring(localEndpoint)
-        for _ in 0..<4000 where !workspace.debugWorkspaceEntries.contains(where: { $0.kind == .remoteHerdr && $0.isAvailable }) { try await Task.sleep(for: .milliseconds(10)) }
-        let entry = try XCTUnwrap(workspace.debugWorkspaceEntries.first { $0.kind == .remoteHerdr && $0.isAvailable })
-        XCTAssertEqual(entry.reference, WorkspaceReference(source: .herdr(endpoint: HerdrEndpoint(binary: catalogBinary, session: sessionName, socketPath: localPath, machine: remote.machine), workspaceID: workspaceID)))
-        let firstSwitchStarted = ProcessInfo.processInfo.systemUptime
-        workspace.selectWorkspace(entry.reference); await workspace.waitForWorkspaceSelection()
-        print("REMOTE_SWITCH_BENCH first_ms=\((ProcessInfo.processInfo.systemUptime - firstSwitchStarted) * 1000)")
-        let pane = try XCTUnwrap(workspace.debugFocusedHerdrPane)
-        let display = try XCTUnwrap(pane.hostView.subviews.compactMap { $0 as? TerminalView }.first)
-        XCTAssertTrue(pane.canAcceptInput)
-        XCTAssertEqual(pane.herdrBinding?.serviceIdentity, identity)
-        XCTAssertEqual(workspace.debugSelectedWorkspace.kind, .remoteHerdr)
-        let suffix = String(sessionName.dropFirst("santty-verify-".count))
-        let marker = "SANTTY_DELLPC_" + suffix
-        XCTAssertTrue(pane.sendClientShellInput([.paste("printf 'SANTTY_%s\\n' " + HerdrSSHBridge.quote("DELLPC_" + suffix)), .key(.init(code: 1))]))
-        for _ in 0..<1000 where display.readScreenText()?.contains(marker) != true { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertTrue(display.readScreenText()?.contains(marker) == true, "Remote command output did not reach the native display")
-        let read = try await workspace.handleCLIRequestAsync(.init(command: "read", paneID: pane.id))
-        XCTAssertTrue(read.text?.contains(marker) == true)
-        workspace.newTab(nil)
-        for _ in 0..<1000 where workspace.debugHerdrOperationPending || workspace.debugTabIDs.count != 2 || workspace.debugFocusedHerdrPane?.canAcceptInput != true { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertEqual(workspace.debugTabIDs.count, 2)
-        workspace.debugPerformCommand(withID: "pane.notes.new")
-        let notes = workspace.savedWorkspace().tabs.flatMap(\.panes).filter { $0.kind == .notes }.map(\.id)
-        XCTAssertEqual(notes.count, 1)
-        let selected = workspace.debugSelectedWorkspace
-        workspace.selectWorkspace(local)
-        XCTAssertEqual(workspace.debugTabIDs, tabs)
-        XCTAssertFalse(pane.canAcceptInput)
-        let warmSwitchStarted = ProcessInfo.processInfo.systemUptime
-        workspace.selectWorkspace(selected); await workspace.waitForWorkspaceSelection()
-        print("REMOTE_SWITCH_BENCH warm_ms=\((ProcessInfo.processInfo.systemUptime - warmSwitchStarted) * 1000)")
-        XCTAssertEqual(workspace.debugSelectedWorkspace, selected)
-        XCTAssertEqual(workspace.savedWorkspace().tabs.flatMap(\.panes).filter { $0.kind == .notes }.map(\.id), notes)
-        XCTAssertTrue(errors.isEmpty, errors.joined(separator: "; "))
-        try workspace.savedWorkspace().validate()
-        for sample in 1...3 {
-            workspace.selectWorkspace(local)
-            let started = ProcessInfo.processInfo.systemUptime
-            workspace.selectWorkspace(selected); await workspace.waitForWorkspaceSelection()
-            print("REMOTE_SWITCH_BENCH warm_sample=\(sample) tabs=2 ms=\((ProcessInfo.processInfo.systemUptime - started) * 1000)")
-            XCTAssertEqual(workspace.debugSelectedWorkspace, selected)
+        try await body(.init(remote: remote, root: root, native: native, target: target, sessionName: sessionName))
+    }
+
+    func testAuthorizedSSHHostRendersInputAndPreservesLocalWorkspace() async throws {
+        guard !NSScreen.screens.isEmpty else { throw XCTSkip("A connected display is required for the real Ghostty viewport") }
+        try await withAuthorizedSSHHost { host in
+            let remote = host.remote, root = host.root, native = host.native
+            let target = host.target, sessionName = host.sessionName
+            let observer = HerdrClientShellSession(endpoint: remote)
+            defer { observer.disconnect() }
+            try await observer.start(size: .init(cols: 1, rows: 1), cellWidth: 0, cellHeight: 0, focused: false, activateWhenMetadataReady: false)
+            for _ in 0..<4000 where observer.projection.snapshot == nil && observer.failure == nil { try await Task.sleep(for: .milliseconds(10)) }
+            if let failure = observer.failure { throw failure }
+            let workspaceID = try XCTUnwrap(observer.projection.snapshot?.workspaces.first?.workspace_id)
+            let identity = try XCTUnwrap(observer.serviceIdentity)
+            XCTAssertEqual(identity.endpointID, remote.id)
+            XCTAssertFalse(observer.isPresentationReady)
+            observer.disconnect()
+            let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            let localPath = root.appendingPathComponent("local.sock").path
+            let localService = Process(); localService.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            localService.arguments = [repository.appendingPathComponent("Scripts/herdr-clientshell-fixture.py").path, localPath, "window"]
+            try localService.run()
+            defer { if localService.isRunning { localService.terminate(); localService.waitUntilExit() } }
+            for _ in 0..<200 where !FileManager.default.fileExists(atPath: root.appendingPathComponent("local-client.sock").path) { try await Task.sleep(for: .milliseconds(10)) }
+            let catalogBinary = root.appendingPathComponent("catalog-herdr")
+            let catalogJSON = String(decoding: try JSONEncoder().encode([try XCTUnwrap(remote.machine)]), as: UTF8.self)
+            try Data(("#!/bin/sh\nif [ \"$1\" = machine ] && [ \"$2\" = list ]; then printf '%s\\n' \(HerdrSSHBridge.quote(catalogJSON)); else exec \(HerdrSSHBridge.quote(native.path)) \"$@\"; fi\n").utf8).write(to: catalogBinary)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: catalogBinary.path)
+            let localEndpoint = HerdrEndpoint(binary: catalogBinary, session: "fixture", socketPath: localPath)
+            let workspace = WorkspaceViewController(); workspace.debugLoadForTesting()
+            var errors: [String] = []; workspace.herdrErrorHandler = { errors.append($0) }
+            let local = workspace.debugSelectedWorkspace, tabs = workspace.debugTabIDs
+            try workspace.configureHerdrWorkspace(localEndpoint)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 650), styleMask: [], backing: .buffered, defer: false)
+            window.contentView = workspace.view; window.orderBack(nil)
+            defer { workspace.releaseHerdrConnections(); window.orderOut(nil); window.contentView = nil; AgentSessionStore.shared.reset() }
+            workspace.startHerdrAgentMonitoring(localEndpoint)
+            for _ in 0..<4000 where !workspace.debugWorkspaceEntries.contains(where: { $0.kind == .remoteHerdr && $0.isAvailable }) { try await Task.sleep(for: .milliseconds(10)) }
+            let entry = try XCTUnwrap(workspace.debugWorkspaceEntries.first { $0.kind == .remoteHerdr && $0.isAvailable })
+            XCTAssertEqual(entry.reference, WorkspaceReference(source: .herdr(endpoint: HerdrEndpoint(binary: catalogBinary, session: sessionName, socketPath: localPath, machine: remote.machine), workspaceID: workspaceID)))
+            let firstSwitchStarted = ProcessInfo.processInfo.systemUptime
+            workspace.selectWorkspace(entry.reference); await workspace.waitForWorkspaceSelection()
+            print("REMOTE_SWITCH_BENCH first_ms=\((ProcessInfo.processInfo.systemUptime - firstSwitchStarted) * 1000)")
             XCTAssertTrue(errors.isEmpty, errors.joined(separator: "; "))
+            let pane = try XCTUnwrap(workspace.debugFocusedHerdrPane)
+            let display = try XCTUnwrap(pane.hostView.subviews.compactMap { $0 as? TerminalView }.first)
+            XCTAssertTrue(pane.canAcceptInput)
+            XCTAssertEqual(pane.herdrBinding?.serviceIdentity, identity)
+            XCTAssertEqual(workspace.debugSelectedWorkspace.kind, .remoteHerdr)
+            let suffix = String(sessionName.dropFirst("santty-verify-".count))
+            let marker = "SANTTY_DELLPC_" + suffix
+            XCTAssertTrue(pane.sendClientShellInput([.paste("printf 'SANTTY_%s\\n' " + HerdrSSHBridge.quote("DELLPC_" + suffix)), .key(.init(code: 1))]))
+            for _ in 0..<1000 where display.readScreenText()?.contains(marker) != true { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertTrue(display.readScreenText()?.contains(marker) == true, "Remote command output did not reach the native display")
+            let read = try await workspace.handleCLIRequestAsync(.init(command: "read", paneID: pane.id))
+            XCTAssertTrue(read.text?.contains(marker) == true)
+            workspace.newTab(nil)
+            for _ in 0..<1000 where workspace.debugHerdrOperationPending || workspace.debugTabIDs.count != 2 || workspace.debugFocusedHerdrPane?.canAcceptInput != true { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(workspace.debugTabIDs.count, 2)
+            workspace.debugPerformCommand(withID: "pane.notes.new")
+            let notes = workspace.savedWorkspace().tabs.flatMap(\.panes).filter { $0.kind == .notes }.map(\.id)
+            XCTAssertEqual(notes.count, 1)
+            let selected = workspace.debugSelectedWorkspace
+            workspace.selectWorkspace(local)
+            XCTAssertEqual(workspace.debugTabIDs, tabs)
+            XCTAssertFalse(pane.canAcceptInput)
+            let warmSwitchStarted = ProcessInfo.processInfo.systemUptime
+            workspace.selectWorkspace(selected); await workspace.waitForWorkspaceSelection()
+            print("REMOTE_SWITCH_BENCH warm_ms=\((ProcessInfo.processInfo.systemUptime - warmSwitchStarted) * 1000)")
+            XCTAssertEqual(workspace.debugSelectedWorkspace, selected)
+            XCTAssertEqual(workspace.savedWorkspace().tabs.flatMap(\.panes).filter { $0.kind == .notes }.map(\.id), notes)
+            XCTAssertTrue(errors.isEmpty, errors.joined(separator: "; "))
+            try workspace.savedWorkspace().validate()
+            for sample in 1...3 {
+                workspace.selectWorkspace(local)
+                let started = ProcessInfo.processInfo.systemUptime
+                workspace.selectWorkspace(selected); await workspace.waitForWorkspaceSelection()
+                print("REMOTE_SWITCH_BENCH warm_sample=\(sample) tabs=2 ms=\((ProcessInfo.processInfo.systemUptime - started) * 1000)")
+                XCTAssertEqual(workspace.debugSelectedWorkspace, selected)
+                XCTAssertTrue(errors.isEmpty, errors.joined(separator: "; "))
+            }
+            print("AUTHORIZED_SSH_TEST passed metadata=true rendered_command=true api_read=true local_roundtrip=true")
         }
-        print("AUTHORIZED_SSH_TEST passed metadata=true rendered_command=true api_read=true local_roundtrip=true")
+    }
+
+    func testAuthorizedSSHHostFloatingDisplayResizesAndReturns() async throws {
+        guard !NSScreen.screens.isEmpty else { throw XCTSkip("A display is required for Ghostty") }
+        try await withAuthorizedSSHHost { host in
+            let observer = HerdrClientShellSession(endpoint: host.remote)
+            try await observer.start(size: .init(cols: 1, rows: 1), cellWidth: 0, cellHeight: 0, focused: false, activateWhenMetadataReady: false)
+            defer { observer.disconnect() }
+            for _ in 0..<4000 where observer.projection.snapshot == nil { try await Task.sleep(for: .milliseconds(10)) }
+            let workspaceID = try XCTUnwrap(observer.projection.snapshot?.workspaces.first?.workspace_id)
+            observer.disconnect()
+            var workspace = WorkspaceViewController(); workspace.debugLoadForTesting()
+            var errors: [String] = []; workspace.herdrErrorHandler = { errors.append($0) }
+            let local = workspace.debugSelectedWorkspace
+            try workspace.configureHerdrWorkspace(host.remote)
+            let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 1000, height: 650), styleMask: [], backing: .buffered, defer: false)
+            window.contentView = workspace.view; window.orderBack(nil)
+            defer { workspace.releaseHerdrConnections(); window.orderOut(nil); window.contentView = nil }
+            try await workspace.enterHerdrWorkspace(workspaceID)
+            let first = try XCTUnwrap(workspace.debugFocusedHerdrPane)
+            workspace.debugSplitFocusedPane(along: .horizontal)
+            for _ in 0..<2000 where workspace.debugHerdrOperationPending || workspace.debugPaneIDsInTraversalOrder.count != 2 || workspace.debugFocusedHerdrPane?.canAcceptInput != true { try await Task.sleep(for: .milliseconds(10)) }
+            let target = try XCTUnwrap(workspace.debugFocusedHerdrPane)
+            XCTAssertNotEqual(target.id, first.id)
+            let metadata = try await XCTUnwrap(workspace.debugHerdrWorkspaceClient).snapshot()
+            let source = try HerdrPaneBinding(endpoint: host.remote,
+                pane: XCTUnwrap(metadata.panes.first { $0.pane_id == target.herdrBinding?.paneID }), includeRuntime: true)
+            let main = try XCTUnwrap(workspace.debugHerdrShellSession)
+            let rect = try XCTUnwrap(main.projection.coherentSurface?.panes.first { $0.pane_id == first.herdrBinding?.paneID }?.inner_rect)
+            let bounds = workspace.debugPaneBounds(for: first.id)
+            let sibling = try await first.resolveHerdrQueryBinding()
+            let watch = "import os,signal,time; report=lambda *_: print('PTY_SIZE_%d_%d' % tuple(os.get_terminal_size()), flush=True); signal.signal(signal.SIGWINCH,report); report(); time.sleep(120)"
+            XCTAssertTrue(first.sendClientShellInput([.paste("python3 -u -c " + HerdrSSHBridge.quote(watch)), .key(.init(code: 1))]))
+            let expectedSize = "PTY_SIZE_\(rect.width)_\(rect.height)"
+            @MainActor func assertSiblingSize(_ stage: String) async throws {
+                let text = try await XCTUnwrap(workspace.debugHerdrWorkspaceClient).read(sibling).text
+                let pattern = try NSRegularExpression(pattern: "(?m)^PTY_SIZE_[0-9]+_[0-9]+")
+                let values = pattern.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { Range($0.range, in: text).map { String(text[$0]) } }
+                XCTAssertEqual(Set(values), [expectedSize], "Sibling PTY changed during \(stage)")
+            }
+            for _ in 0..<300 {
+                if try await XCTUnwrap(workspace.debugHerdrWorkspaceClient).read(sibling).text.contains(expectedSize) { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            try await assertSiblingSize("before")
+            let pressed = ProcessInfo.processInfo.systemUptime
+            workspace.debugToggleFloatingPane(animated: true)
+            XCTAssertNotNil(workspace.debugLastFloatingPaneInitialFrame, "Shortcut must begin moving the existing scene synchronously")
+            XCTAssertTrue(workspace.debugIsFloatingPaneAnimating)
+            print("FLOATING_RESPONSE_BENCH visible_ms=\((ProcessInfo.processInfo.systemUptime - pressed) * 1000)")
+            for _ in 0..<12 {
+                workspace.toggleFloatingPane(nil)
+                try await Task.sleep(for: .milliseconds(25))
+                XCTAssertEqual(workspace.debugActiveFloatingPaneState?.paneID, target.id, "Repeated shortcuts must not interrupt an unfinished transfer")
+            }
+            for _ in 0..<2000 where workspace.debugFloatingPaneFrame == nil { try await Task.sleep(for: .milliseconds(10)) }
+            await workspace.waitForHerdrFloatingTransitionForTesting()
+            print("FLOATING_RESPONSE_BENCH interactive_ms=\((ProcessInfo.processInfo.systemUptime - pressed) * 1000)")
+            XCTAssertTrue(errors.isEmpty, errors.joined(separator: "; "))
+            XCTAssertEqual(workspace.debugActiveFloatingPaneState?.paneID, target.id)
+            try await assertSiblingSize("entered")
+            let floating = try XCTUnwrap(workspace.debugFocusedHerdrPane)
+            XCTAssertTrue(floating.canAcceptInput, workspace.herdrLastError ?? "Floating input is disabled")
+            let before = try XCTUnwrap(floating.clientShellGridMetrics)
+            for _ in 0..<3 { workspace.debugPerformCommand(withID: "pane.resize.left"); workspace.debugPerformCommand(withID: "pane.resize.down") }
+            for _ in 0..<1000 where floating.clientShellGridMetrics?.columns == before.columns || !floating.canAcceptInput { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertLessThan(floating.clientShellGridMetrics?.columns ?? before.columns, before.columns)
+            XCTAssertEqual(main.projection.coherentSurface?.panes.first { $0.pane_id == first.herdrBinding?.paneID }?.inner_rect, rect)
+            XCTAssertEqual(workspace.debugPaneBounds(for: first.id), bounds)
+            try await assertSiblingSize("resized")
+            let marker = "FLOATING_" + host.sessionName
+            XCTAssertTrue(floating.sendClientShellInput([.paste("printf '%s\\n' " + HerdrSSHBridge.quote(marker)), .key(.init(code: 1))]))
+            for _ in 0..<1000 {
+                if try await workspace.handleCLIRequestAsync(.init(command: "read", paneID: floating.id)).text?.contains(marker) == true { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let output = try await workspace.handleCLIRequestAsync(.init(command: "read", paneID: floating.id))
+            XCTAssertTrue(output.text?.contains(marker) == true)
+            XCTAssertEqual(workspace.debugTabIDs.count, 1)
+            let search = workspace.paletteNavigationItems
+            XCTAssertEqual(search.filter { $0.kind == .tab && $0.isInCurrentWorkspace }.count, 1)
+            XCTAssertEqual(search.filter { $0.kind == .pane && $0.isInCurrentWorkspace }.count, 2)
+            let floatingResult = try XCTUnwrap(search.first { $0.kind == .pane && $0.subtitle?.contains("Floating") == true })
+            floatingResult.perform(); await workspace.waitForPaletteNavigationForTesting()
+            XCTAssertEqual(workspace.debugFocusedHerdrPane?.id, target.id)
+            XCTAssertEqual(workspace.debugTabIDs.count, 1)
+            workspace.debugHandlePaneFocusRequest(withID: first.id)
+            await workspace.waitForHerdrFloatingTransitionForTesting()
+            for _ in 0..<1000 where workspace.debugHerdrOperationPending || workspace.debugFocusedHerdrPane?.canAcceptInput != true { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertNil(workspace.debugActiveFloatingPaneState)
+            XCTAssertEqual(workspace.debugFocusedPaneID, first.id, "Returning must preserve a newer explicit click on another pane")
+            workspace.debugHandlePaneFocusRequest(withID: target.id)
+            for _ in 0..<1000 where workspace.debugHerdrOperationPending || workspace.debugHerdrShellSession?.projection.snapshot?.focused_pane_id != source.paneID || workspace.debugFocusedHerdrPane?.canAcceptInput != true { try await Task.sleep(for: .milliseconds(10)) }
+            workspace.debugToggleFloatingPane(animated: true)
+            await workspace.waitForHerdrFloatingTransitionForTesting()
+            XCTAssertEqual(workspace.debugActiveFloatingPaneState?.paneID, target.id)
+            let saved = workspace.savedWorkspace(); try saved.validate()
+            XCTAssertEqual(saved.herdrFloatingPanes?.count, 1)
+            let selected = workspace.debugSelectedWorkspace
+            workspace.selectWorkspace(local)
+            workspace.selectWorkspace(selected); await workspace.waitForWorkspaceSelection()
+            XCTAssertEqual(workspace.debugActiveFloatingPaneState?.paneID, target.id)
+            XCTAssertTrue(workspace.debugFocusedHerdrPane?.canAcceptInput == true, errors.joined(separator: "; "))
+            try await assertSiblingSize("local_roundtrip")
+            await workspace.finishHerdrShutdown()
+            workspace = WorkspaceViewController(); workspace.debugLoadForTesting()
+            workspace.herdrErrorHandler = { errors.append($0) }
+            try workspace.restoreWorkspace(try JSONDecoder().decode(SavedWorkspace.self, from: JSONEncoder().encode(saved)))
+            try workspace.configureHerdrWorkspace(host.remote)
+            window.contentView = workspace.view
+            try await workspace.enterHerdrWorkspace(workspaceID)
+            XCTAssertEqual(workspace.debugActiveFloatingPaneState?.paneID, target.id)
+            XCTAssertTrue(workspace.debugFocusedHerdrPane?.canAcceptInput == true, errors.joined(separator: "; "))
+            workspace.debugToggleFloatingPane(animated: true)
+            XCTAssertTrue(workspace.debugIsFloatingPaneAnimating)
+            for _ in 0..<12 {
+                workspace.toggleFloatingPane(nil)
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            await workspace.waitForHerdrFloatingTransitionForTesting()
+            for _ in 0..<1000 where workspace.debugHerdrOperationPending || workspace.debugHerdrShellSession?.projection.snapshot?.focused_pane_id != source.paneID || workspace.debugFocusedHerdrPane?.canAcceptInput != true { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(workspace.debugHerdrShellSession?.projection.snapshot?.focused_pane_id, source.paneID)
+            XCTAssertTrue(workspace.debugFocusedHerdrPane?.canAcceptInput == true)
+            try await assertSiblingSize("returned")
+            XCTAssertNil(workspace.debugActiveFloatingPaneState)
+            XCTAssertEqual(workspace.debugFocusedPaneID, target.id, "Returning a floating pane must preserve selection")
+            for _ in 0..<6 {
+                workspace.toggleFloatingPane(nil)
+                for _ in 0..<12 {
+                    workspace.toggleFloatingPane(nil)
+                    try await Task.sleep(for: .milliseconds(25))
+                }
+                await workspace.waitForHerdrFloatingTransitionForTesting()
+                for _ in 0..<1000 where workspace.debugHerdrOperationPending || workspace.debugFocusedHerdrPane?.canAcceptInput != true { try await Task.sleep(for: .milliseconds(10)) }
+                XCTAssertTrue(errors.isEmpty, errors.joined(separator: "; "))
+                XCTAssertTrue(workspace.debugFocusedHerdrPane?.canAcceptInput == true, workspace.herdrLastError ?? "Focus acknowledgement did not complete")
+            }
+            for _ in 0..<200 {
+                workspace.toggleFloatingPane(nil)
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            await workspace.waitForHerdrFloatingTransitionForTesting()
+            if workspace.debugActiveFloatingPaneState != nil {
+                workspace.toggleFloatingPane(nil)
+                await workspace.waitForHerdrFloatingTransitionForTesting()
+            }
+            for _ in 0..<1000 where workspace.debugHerdrOperationPending || workspace.debugFocusedHerdrPane?.canAcceptInput != true { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertNil(workspace.debugActiveFloatingPaneState)
+            XCTAssertEqual(workspace.debugFocusedPaneID, target.id)
+            XCTAssertTrue(workspace.debugFocusedHerdrPane?.canAcceptInput == true)
+            XCTAssertTrue(errors.isEmpty, errors.joined(separator: "; "))
+            try await assertSiblingSize("rapid toggles")
+            let restored = try await XCTUnwrap(workspace.debugHerdrWorkspaceClient).snapshot()
+            XCTAssertEqual(restored.tabs?.count, 1); XCTAssertEqual(restored.panes.count, 2)
+            XCTAssertEqual(restored.panes.first { $0.pane_id == source.paneID }?.terminal_id, source.terminalID)
+            XCTAssertEqual(workspace.debugHerdrShellSession?.projection.coherentSurface?.panes.first { $0.pane_id == first.herdrBinding?.paneID }?.inner_rect, rect)
+            print("AUTHORIZED_SSH_FLOATING_DISPLAY passed resize=true sibling_unchanged=true input=true workspace_roundtrip=true restored=true")
+        }
+    }
+
+    func testAuthorizedSSHHostFloatingTransferPreservesPTYGeometry() async throws {
+        try await withAuthorizedSSHHost { host in
+            let main = HerdrClientShellSession(endpoint: host.remote)
+            defer { main.disconnect() }
+            main.onProjection = { [weak main] _, surface, _ in _ = main?.acknowledgePresentation(surface) }
+            @MainActor func wait(_ session: HerdrClientShellSession, until condition: @MainActor () -> Bool) async throws {
+                let deadline = ProcessInfo.processInfo.systemUptime + 30
+                while !condition() {
+                    if let failure = session.failure { throw failure }
+                    guard ProcessInfo.processInfo.systemUptime < deadline else { throw CLIError("Authorized floating protocol test timed out") }
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+            }
+            try await main.start(size: .init(cols: 100, rows: 30), cellWidth: 8, cellHeight: 16, focused: false)
+            try await wait(main) { main.isPresentationReady }
+            let client = HerdrWorkspaceClient(endpoint: host.remote)
+            try client.establishQueryIdentity(main)
+            let snapshot = try await client.snapshot()
+            let first = try XCTUnwrap(snapshot.panes.first)
+            let preserved = try HerdrPaneBinding(endpoint: host.remote, pane: first, includeRuntime: true)
+            let split = try await client.requestPaneTransfer("pane.split", binding: preserved,
+                params: .init(target_pane_id: preserved.paneID, direction: "right", focus: false, ratio: 0.5), session: main)
+            let target = try HerdrPaneBinding(endpoint: host.remote, pane: XCTUnwrap(split.pane), includeRuntime: true)
+            try await wait(main) { main.isPresentationReady && main.projection.coherentSurface?.panes.count == 2 }
+            let rect = try XCTUnwrap(main.projection.coherentSurface?.panes.first { $0.pane_id == preserved.paneID }?.inner_rect)
+            let transfer = HerdrFloatingPaneTransfer(record: .init(paneID: UUID(), source: target), client: client, session: main)
+            transfer.onChange = { _ in
+                if let surface = main.projection.coherentSurface {
+                    XCTAssertEqual(surface.panes.first { $0.pane_id == preserved.paneID }?.inner_rect, rect)
+                }
+            }
+            try await transfer.enter()
+            let floating = try XCTUnwrap(transfer.record.floating)
+            XCTAssertEqual(floating.terminalID, target.terminalID)
+            XCTAssertEqual(try JSONDecoder().decode(HerdrFloatingPaneRecord.self, from: JSONEncoder().encode(transfer.record)), transfer.record)
+            let child = HerdrClientShellSession(endpoint: host.remote)
+            defer { child.disconnect() }
+            child.onProjection = { [weak child] _, surface, _ in _ = child?.acknowledgePresentation(surface) }
+            try await child.start(size: .init(cols: 1, rows: 1), cellWidth: 0, cellHeight: 0, focused: false, activateWhenMetadataReady: false)
+            try await wait(child) { child.projection.snapshot != nil }
+            try child.activate(size: .init(cols: 100, rows: 30), cellWidth: 8, cellHeight: 16)
+            try await child.selectInitialTab(floating.tabID)
+            try await wait(child) { child.projection.snapshot?.focused_tab_id == floating.tabID }
+            try child.resize(.init(cols: 70, rows: 20), cellWidth: 8, cellHeight: 16)
+            try await wait(child) { child.isPresentationReady }
+            XCTAssertEqual(main.projection.coherentSurface?.panes.first { $0.pane_id == preserved.paneID }?.inner_rect, rect)
+            let before = child.projection.coherentSurface?.panes.first?.inner_rect
+            try child.resize(.init(cols: 50, rows: 12), cellWidth: 8, cellHeight: 16)
+            try await wait(child) { child.isPresentationReady && child.projection.coherentSurface?.frame.width == 50 }
+            XCTAssertNotEqual(child.projection.coherentSurface?.panes.first?.inner_rect, before)
+            XCTAssertEqual(main.projection.coherentSurface?.panes.first { $0.pane_id == preserved.paneID }?.inner_rect, rect)
+            try await child.deactivateAndWait()
+            try await transfer.leave()
+            child.disconnect()
+            try await wait(main) { main.isPresentationReady && main.projection.coherentSurface?.panes.contains(where: { $0.pane_id == target.paneID }) == true }
+            XCTAssertEqual(main.projection.coherentSurface?.panes.first { $0.pane_id == preserved.paneID }?.inner_rect, rect)
+            XCTAssertNil(transfer.record.placeholder); XCTAssertNil(transfer.record.floating)
+            let restored = try await client.snapshot()
+            XCTAssertEqual(restored.tabs?.count, 1)
+            XCTAssertEqual(restored.panes.first { $0.pane_id == target.paneID }?.terminal_id, target.terminalID)
+            print("AUTHORIZED_SSH_FLOATING passed process_preserved=true sibling_geometry_unchanged=true independent_resize=true restored=true")
+        }
     }
 
     func testRealNativeSSHWorkspacesSwitchAcrossDuplicateIDsAndPreserveLocalContent() async throws {

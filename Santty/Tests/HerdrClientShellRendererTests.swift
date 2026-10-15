@@ -324,6 +324,38 @@ final class HerdrClientShellRendererTests: XCTestCase {
         catch is CancellationError { }
     }
 
+    func testAnotherPanesHyperlinkTableChangeDoesNotRewriteIdleContent() async throws {
+        var initial = try XCTUnwrap(patchScene(columns: 40, rows: 4).coherentSurface)
+        var cells = initial.frame.cells
+        cells[20] = .init(symbol: "R", fg: 0, bg: 0, modifier: 0, skip: false, hyperlink: 0)
+        initial.frame = .init(cells: cells, width: 40, height: 4, cursor: nil,
+                              hyperlinks: ["https://example.com/static"], graphics: Data())
+        let idle = try await HerdrClientShellRenderer().prepare(.pane("right"), from: initial, assets: [:]).renderer
+        var changed = initial
+        changed.surface_revision += 1
+        cells[0] = .init(symbol: "X", fg: 0, bg: 0, modifier: 0, skip: false, hyperlink: 1)
+        changed.frame = .init(cells: cells, width: 40, height: 4, cursor: nil,
+                              hyperlinks: ["https://example.com/static", "https://example.com/new"], graphics: Data())
+        let unchanged = try await idle.prepare(.pane("right"), from: changed, assets: [:])
+        XCTAssertTrue(unchanged.bytes.isEmpty, "A sibling's new link must not cause any output to the idle surface")
+
+        changed.surface_revision += 1
+        cells[0] = .init(symbol: "X", fg: 0, bg: 0, modifier: 0, skip: false, hyperlink: 0)
+        cells[20] = .init(symbol: "R", fg: 0, bg: 0, modifier: 0, skip: false, hyperlink: 1)
+        changed.frame = .init(cells: cells, width: 40, height: 4, cursor: nil,
+                              hyperlinks: ["https://example.com/new", "https://example.com/static"], graphics: Data())
+        let renumbered = try await unchanged.renderer.prepare(.pane("right"), from: changed, assets: [:])
+        XCTAssertTrue(renumbered.bytes.isEmpty, "Native frame link renumbering is not a visible pane change")
+
+        changed.surface_revision += 1
+        changed.frame = .init(cells: cells, width: 40, height: 4, cursor: nil,
+                              hyperlinks: ["https://example.com/new", "https://example.com/replaced"], graphics: Data())
+        let ownLink = try await renumbered.renderer.prepare(.pane("right"), from: changed, assets: [:])
+        XCTAssertTrue(String(decoding: ownLink.bytes, as: UTF8.self).contains("https://example.com/replaced"),
+                      "Changing a link used by this pane must still update Ghostty")
+        XCTAssertFalse(String(decoding: ownLink.bytes, as: UTF8.self).contains("A"), "A changed link must not rewrite unlinked cells")
+    }
+
     func testDenseTabEncodingStaysWithinOutputBudget() throws {
         let width = 314, height = 41
         let cells = (0..<(width * height)).map { index in
@@ -655,6 +687,37 @@ final class HerdrClientShellRendererTests: XCTestCase {
         XCTAssertEqual(try viewport(.pane("a"), single, .init(width: 659, height: 407)), .init(cols: 80, rows: 24),
                        "Sub-cell remainder stays as normal padding")
         XCTAssertNil(try viewport(.pane("a"), single, .zero))
+    }
+
+    func testAlternateScreenGutterDoesNotResizeTheTabOrSiblingLayout() throws {
+        for border: UInt16 in [0, 1] {
+            func pane(_ id: String, x: UInt16, alternate: Bool) -> HerdrShellPane {
+                let rect = HerdrShellRect(x: x, y: 0, width: 40, height: 24)
+                let inner = HerdrShellRect(x: x + border, y: border,
+                    width: 40 - border * 2 - (alternate ? 0 : 1), height: 24 - border * 2)
+                return .init(pane_id: id, content_revision: 1, rect: rect, inner_rect: inner,
+                    scrollbar_rect: nil, scroll: nil, focused: id == "b", mouse_reporting: false,
+                    sgr_pixel_mouse: false, alternate_screen_active: alternate, pixel_width: 0, pixel_height: 0)
+            }
+            func surface(_ alternate: Bool) -> HerdrShellSurface {
+                .init(boot_id: "boot", projection_revision: 1, surface_revision: alternate ? 2 : 1,
+                    frame: .init(cells: Array(repeating: cell(" "), count: 80 * 24), width: 80, height: 24,
+                        cursor: nil, hyperlinks: [], graphics: Data()),
+                    panes: [pane("a", x: 0, alternate: false), pane("b", x: 40, alternate: alternate)],
+                    splits: [], popup: nil, graphics: .init(assets: [], placements: [], retained_assets: []))
+            }
+            let tree = HerdrLayout.Node.split(.horizontal, 0.5, .pane("a"), .pane("b"))
+            let ids = ["a": UUID(), "b": UUID()], cellSize = CGSize(width: 8, height: 16)
+            let normal = try tree.nativeShellLayout(panes: ids, surface: surface(false), cellSize: cellSize, padding: 8, divider: 6)
+            let alternate = try tree.nativeShellLayout(panes: ids, surface: surface(true), cellSize: cellSize, padding: 8, divider: 6)
+            XCTAssertEqual(normal.layout, alternate.layout, "A gutter change must not move sibling panes")
+            XCTAssertEqual(normal.size, alternate.size)
+            let available = CGSize(width: 678, height: 400)
+            XCTAssertEqual(HerdrLayout.nativeShellViewportSize(surface: surface(false), nativeSize: normal.size,
+                availableSize: available, cellSize: cellSize),
+                HerdrLayout.nativeShellViewportSize(surface: surface(true), nativeSize: alternate.size,
+                    availableSize: available, cellSize: cellSize), "Alternate screen must not resize the shared PTYs")
+        }
     }
 
     private func cell(_ text: String, fg: UInt32 = 0, modifier: UInt16 = 0, link: UInt32? = nil) -> HerdrShellCell {

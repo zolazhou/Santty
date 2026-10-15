@@ -89,6 +89,7 @@ final class WorkspaceRootView: NSView {
     private var floatingPaneContentView: NSView?
     private var lastFloatingPaneInitialFrame: NSRect?
     private var isFloatingPaneAnimating = false
+    var debugIsFloatingPaneAnimating: Bool { isFloatingPaneAnimating }
     private var customFloatingPaneSize: NSSize?
     private var stagedFloatingPaneView: WorkspaceFloatingPaneContainerView?
     private var stagedFloatingPaneContentView: NSView?

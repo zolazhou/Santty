@@ -197,13 +197,37 @@ struct HerdrClientShellRenderer: Sendable {
 
     func ownsImage(_ id: UInt32) -> Bool { uploaded.values.contains(id) }
 
+    private func hyperlinksChanged(_ links: [String]) -> Bool {
+        guard let previous else { return true }
+        guard previous.hyperlinks != links else { return false }
+        return previous.rows.joined().contains { cell in
+            guard let index = cell.hyperlink.map(Int.init) else { return false }
+            let old = index < previous.hyperlinks.count ? previous.hyperlinks[index] : nil
+            let new = index < links.count ? links[index] : nil
+            return old != new
+        }
+    }
+
+    private func sameRenderedCell(_ old: HerdrShellCell, _ next: HerdrShellCell, links: [String]) -> Bool {
+        guard let previous,
+              (old.symbol, old.fg, old.bg, old.modifier, old.skip) == (next.symbol, next.fg, next.bg, next.modifier, next.skip) else { return false }
+        let oldLink = old.hyperlink.flatMap { Int($0) < previous.hyperlinks.count ? previous.hyperlinks[Int($0)] : nil }
+        let nextLink = next.hyperlink.flatMap { Int($0) < links.count ? links[Int($0)] : nil }
+        return oldLink == nextLink
+    }
+
+    private func sameRenderedRow(_ old: [HerdrShellCell], _ next: ArraySlice<HerdrShellCell>, links: [String]) -> Bool {
+        guard old.count == next.count else { return false }
+        return zip(old, next).allSatisfy { sameRenderedCell($0.0, $0.1, links: links) }
+    }
+
     private func patchBaseline(for viewport: HerdrShellViewportFrame) -> UInt64? {
         guard let previous, let old = previous.revision, let next = viewport.revision,
               old.boot == next.boot, old.target == next.target,
               previous.damageOrigin != nil, previous.damageOrigin == viewport.damageOrigin,
               old.surface <= next.surface, previous.cellRect == viewport.cellRect,
               previous.width == viewport.width, previous.height == viewport.height,
-              previous.hyperlinks == viewport.frame.hyperlinks,
+              !hyperlinksChanged(viewport.frame.hyperlinks),
               viewport.rowRevisions.count == Int(viewport.frame.height) else { return nil }
         return old.surface
     }
@@ -211,9 +235,21 @@ struct HerdrClientShellRenderer: Sendable {
     func canReuse(_ target: HerdrShellRenderTarget, from surface: HerdrShellSurface,
                   assets: [HerdrShellAssetKey: Data]) throws -> Bool {
         let viewport = try HerdrShellViewportFrame.extract(target, from: surface)
-        guard let baseline = patchBaseline(for: viewport), let content = viewport.contentRevision,
-              content <= baseline, let previous, previous.cursor == viewport.cursor,
+        guard let previous, let old = previous.revision, let next = viewport.revision,
+              old.boot == next.boot, old.target == next.target,
+              previous.cellRect == viewport.cellRect, previous.width == viewport.width, previous.height == viewport.height,
+              previous.cursor == viewport.cursor,
               previous.placements == viewport.placements, previous.retained == viewport.retained else { return false }
+        let matchingLinks = !hyperlinksChanged(viewport.frame.hyperlinks)
+        if matchingLinks, let baseline = patchBaseline(for: viewport), let content = viewport.contentRevision, content <= baseline {
+            // Native patch damage proves this pane has not changed.
+        } else {
+            guard (0..<Int(viewport.height)).allSatisfy({ row in
+                let cells = viewport.cells(in: row)
+                return matchingLinks && previous.rows[row].elementsEqual(cells)
+                    || sameRenderedRow(previous.rows[row], cells, links: viewport.frame.hyperlinks)
+            }) else { return false }
+        }
         return !viewport.placements.contains { uploaded[$0.asset] == nil && assets[$0.asset] != nil }
     }
 
@@ -238,7 +274,7 @@ struct HerdrClientShellRenderer: Sendable {
             output.append(contentsOf: "\u{1b}[0m\u{1b}[2J\u{1b}_Ga=d,d=A,q=2;\u{1b}\\".utf8)
         }
         let changedSize = previous?.width != viewport.width || previous?.height != viewport.height
-        let changedLinks = previous?.hyperlinks != frame.hyperlinks
+        let changedLinks = hyperlinksChanged(frame.hyperlinks)
         let baseline = patchBaseline(for: viewport)
         // Retain only this pane's rows, so idle panes cannot pin whole historical surfaces.
         var retainedRows = changedSize ? Array(repeating: [HerdrShellCell](), count: height) : previous!.rows
@@ -246,10 +282,11 @@ struct HerdrClientShellRenderer: Sendable {
             try Task.checkCancellation()
             if let baseline, viewport.rowRevisions[row + Int(viewport.cellRect?.y ?? 0)] <= baseline { continue }
             let cells = viewport.cells(in: row)
-            let oldCells = changedSize || changedLinks ? nil : previous?.rows[row]
+            let oldCells = changedSize ? nil : previous?.rows[row]
             if !changedSize, !changedLinks, let previous,
                previous.rows[row].elementsEqual(cells) { continue }
             retainedRows[row] = Array(cells)
+            if let oldCells, sameRenderedRow(oldCells, cells, links: frame.hyperlinks) { continue }
             var coveredThrough = 0
             var invalidatedThrough = 0
             var lastStyle: (fg: UInt32, bg: UInt32, modifier: UInt16)?
@@ -264,7 +301,8 @@ struct HerdrClientShellRenderer: Sendable {
                 let symbol = columns > width - column || clean.isEmpty ? " " : clean
                 coveredThrough = column + max(1, columns > width - column ? 1 : columns)
                 let previousCell = oldCells.map { $0[$0.startIndex + column] }
-                guard previousCell != cell || column < invalidatedThrough else { continue }
+                guard previousCell.map({ sameRenderedCell($0, cell, links: frame.hyperlinks) }) != true
+                    || column < invalidatedThrough else { continue }
                 if let previousCell {
                     let oldWidth = previousCell.symbol.utf8.count == 1 ? 1 : Self.columnWidth(Self.printable(previousCell.symbol))
                     // A narrower replacement must repaint cells previously covered by a wide glyph.

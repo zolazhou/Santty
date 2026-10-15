@@ -164,6 +164,13 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     private var lastHerdrBellAt: TimeInterval = 0
     private var herdrShellPendingProjection: (HerdrShellSnapshot, HerdrShellSurface, [HerdrShellAssetKey: Data])?
     private var herdrShellPresentedSnapshot: HerdrShellSnapshot?
+    private var herdrFloatingRecords: [HerdrFloatingPaneRecord] = []
+    private var herdrShellViewportCalibration: (tab: UUID, layout: LayoutNode, available: CGSize, cell: CGSize,
+        padding: CGFloat, divider: CGFloat, size: HerdrShellSize)?
+    private var herdrFloatingDisplays: [PaneID: HerdrFloatingPaneDisplay] = [:]
+    private var herdrFloatingTransition = false
+    private var herdrFloatingTask: Task<Void, Never>?
+    private var herdrFloatingShutdownTask: Task<Void, Never>?
     private var herdrShellLayouts: [String: HerdrLayout.Node] = [:]
     private var herdrDiscoveredWorkspaces: [HerdrSnapshot.Workspace] = []
     private var herdrDiscoveryTask: Task<Void, Never>?
@@ -334,6 +341,13 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         focusedPaneController as? BrowserPaneController
     }
 
+    private var canSplitFocusedPane: Bool {
+        focusedPaneIsTiled && focusedPaneController != nil
+            && focusedTerminalPaneController.map({ $0.isLive }) != false
+            && selectedTabState?.focusedPaneID.flatMap({ floatingRecord(for: $0) }) == nil
+            && herdrFloatingTask == nil
+    }
+
     private var focusedPaneIsTiled: Bool {
         guard let tabState = selectedTabState, let focusedPaneID = tabState.focusedPaneID else {
             return false
@@ -470,6 +484,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     override func viewDidLayout() {
         super.viewDidLayout()
         scheduleHerdrShellResize()
+        resizeHerdrFloatingPane()
     }
 
     func windowDidResize(_ notification: Notification) { scheduleHerdrShellResize() }
@@ -547,11 +562,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         }
         return switch menuItem.action {
         case #selector(splitPaneHorizontally(_:)), #selector(splitPaneVertically(_:)):
-            if focusedTerminalPaneController != nil {
-                focusedTerminalPaneController?.isLive == true && focusedPaneIsTiled
-            } else {
-                focusedPaneController != nil && focusedPaneIsTiled
-            }
+            canSplitFocusedPane
         case #selector(newBrowserPane(_:)), #selector(newNotesPane(_:)):
             focusedPaneController != nil && focusedPaneIsTiled
         case #selector(focusBrowserLocationBar(_:)):
@@ -801,6 +812,11 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
         if tabState.activeDetachedPaneID != nil {
             hideActiveDetachedPane(in: tabState, animated: true, reapplyAutoZoom: true)
+            return
+        }
+
+        if let id = tabState.activeFloatingPaneState?.paneID, herdrFloatingDisplays[id] != nil {
+            toggleHerdrFloatingPane(in: tabState)
             return
         }
 
@@ -1170,7 +1186,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func splitFocusedPane(along axis: SplitAxis) {
-        guard focusedPaneController != nil, focusedPaneIsTiled else {
+        guard canSplitFocusedPane else {
             NSSound.beep()
             return
         }
@@ -1506,7 +1522,15 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             tabState.activeFloatingPaneState = floatingState
         }
         tabState.floatingPaneSizes[activePaneID] = newSize
+        if let index = herdrFloatingRecords.firstIndex(where: { $0.paneID == activePaneID }) {
+            herdrFloatingRecords[index].size = newSize
+            scheduleWorkspaceSave()
+        }
         rootView.setCustomFloatingPaneSize(newSize)
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(220))
+            self?.resizeHerdrFloatingPane()
+        }
     }
 
     private func focusedResizeTarget(
@@ -2140,6 +2164,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func canDetachFocusedPane() -> Bool {
+        if let id = selectedTabState?.focusedPaneID, floatingRecord(for: id) != nil { return false }
         guard let tabState = selectedTabState,
             let focusedPaneID = tabState.focusedPaneID,
             tabState.isPaneTiled(focusedPaneID)
@@ -2162,6 +2187,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func canToggleFloatingPane() -> Bool {
+        if herdrFloatingTask != nil || herdrOperationPending { return false }
         guard let tabState = selectedTabState else {
             return false
         }
@@ -2179,6 +2205,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func detachFocusedPane(animated: Bool) {
+        if let id = selectedTabState?.focusedPaneID, floatingRecord(for: id) != nil { NSSound.beep(); return }
         guard
             let tabState = selectedTabState,
             let paneID = tabState.focusedPaneID,
@@ -2473,6 +2500,12 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func enterFloatingPane(in tabState: WorkspaceTabState, animated: Bool) {
+        if tabState.focusedPaneController is TerminalPaneController,
+           (tabState.focusedPaneController as? TerminalPaneController)?.herdrBinding != nil,
+           herdrWindowWorkspaceID != nil {
+            toggleHerdrFloatingPane(in: tabState, animated: animated)
+            return
+        }
         guard
             tabState.id == selectedTabID,
             tabState.activeFloatingPaneState == nil,
@@ -2523,6 +2556,11 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         animated: Bool,
         reapplyAutoZoom: Bool
     ) {
+        guard herdrFloatingTask == nil else { return }
+        if let id = tabState.activeFloatingPaneState?.paneID, herdrFloatingDisplays[id] != nil {
+            toggleHerdrFloatingPane(in: tabState, animated: animated)
+            return
+        }
         guard
             tabState.id == selectedTabID,
             let floatingPaneState = tabState.activeFloatingPaneState,
@@ -2576,6 +2614,11 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         in tabState: WorkspaceTabState,
         reapplyAutoZoom: Bool
     ) {
+        guard herdrFloatingTask == nil else { return }
+        if let id = tabState.activeFloatingPaneState?.paneID, herdrFloatingDisplays[id] != nil {
+            toggleHerdrFloatingPane(in: tabState, animated: false)
+            return
+        }
         if let floatingState = tabState.activeFloatingPaneState,
             let paneController = tabState.paneControllers[floatingState.paneID],
             let size = rootView.floatingPaneFrame(for: paneController.hostView)?.size
@@ -2644,6 +2687,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
     private func suspendActiveFloatingPresentation(in tabState: WorkspaceTabState) {
         captureFloatingPaneSizes(in: tabState)
+        if let id = tabState.activeFloatingPaneState?.paneID { herdrFloatingDisplays[id]?.stop() }
         rootView.removeFloatingPaneView()
     }
 
@@ -2655,6 +2699,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             floatingState.size = size
             tabState.activeFloatingPaneState = floatingState
             tabState.floatingPaneSizes[floatingState.paneID] = size
+            if let index = herdrFloatingRecords.firstIndex(where: { $0.paneID == floatingState.paneID }) {
+                herdrFloatingRecords[index].size = size
+            }
         }
 
         if let detachedPaneID = tabState.activeDetachedPaneID,
@@ -2707,6 +2754,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         )
         rootView.setFloatingPaneFrame(targetFrame)
         rootView.finishFloatingPaneAnimation()
+        if herdrShellSession?.isPresentationReady == true { herdrFloatingDisplays[paneID]?.resume() }
     }
 
     private func buildPaneViewsDictionary(
@@ -3124,18 +3172,14 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
                 id: "pane.split.horizontal",
                 title: "Split Horizontally",
                 shortcut: KeybindingSettings.displayShortcut(for: .splitPaneHorizontally),
-                isEnabled: focusedTerminalPaneController != nil
-                    ? focusedTerminalPaneController?.isLive == true && focusedPaneIsTiled
-                    : focusedPaneController != nil && focusedPaneIsTiled,
+                isEnabled: canSplitFocusedPane,
                 perform: { [weak self] in self?.splitPaneHorizontally(nil) }
             ),
             AppCommand(
                 id: "pane.split.vertical",
                 title: "Split Vertically",
                 shortcut: KeybindingSettings.displayShortcut(for: .splitPaneVertically),
-                isEnabled: focusedTerminalPaneController != nil
-                    ? focusedTerminalPaneController?.isLive == true && focusedPaneIsTiled
-                    : focusedPaneController != nil && focusedPaneIsTiled,
+                isEnabled: canSplitFocusedPane,
                 perform: { [weak self] in self?.splitPaneVertically(nil) }
             ),
             AppCommand(
@@ -3554,6 +3598,7 @@ extension WorkspaceViewController {
     var debugContentFrame: NSRect { rootView.debugContentFrame }
     var debugTabStripFrame: NSRect { rootView.debugTabStripFrame }
     var debugRenderedContentFrame: NSRect { rootView.debugRenderedContentFrame }
+    var debugIsFloatingPaneAnimating: Bool { rootView.debugIsFloatingPaneAnimating }
     var debugFloatingPaneFrame: NSRect? { rootView.debugFloatingPaneFrame }
     var debugLastFloatingPaneInitialFrame: NSRect? { rootView.debugLastFloatingPaneInitialFrame }
     var debugCommandSnapshots: [AppCommandSnapshot] {
@@ -4420,15 +4465,19 @@ extension WorkspaceViewController {
 
     func finishHerdrShutdown() async {
         releaseHerdrConnections()
+        await herdrFloatingShutdownTask?.value
     }
 
     func releaseHerdrConnections() {
         herdrWorkspaceClosed = true
         workspaceSelectionGeneration += 1; workspaceSelectionTask?.cancel(); workspaceSelectionTask = nil
-        herdrCatalog.stop()
         paletteNavigationTask?.cancel()
         herdrDiscoveryTask?.cancel()
         selectLocalWorkspace()
+        if let shutdown = herdrFloatingShutdownTask {
+            let catalog = herdrCatalog
+            Task { await shutdown.value; catalog.stop() }
+        } else { herdrCatalog.stop() }
         herdrManagementState = .disconnected
         herdrManagementGeneration += 1
         herdrManagement?.disconnect()
@@ -4439,6 +4488,8 @@ extension WorkspaceViewController {
 
     var debugFocusedHerdrPane: TerminalPaneController? { focusedTerminalPaneController?.herdrBinding == nil ? nil : focusedTerminalPaneController }
     var debugHerdrOperationPending: Bool { herdrOperationPending }
+    var debugHerdrShellSession: HerdrClientShellSession? { herdrShellSession }
+    var debugHerdrWorkspaceClient: HerdrWorkspaceClient? { herdrClient }
 }
 
 extension WorkspaceViewController {
@@ -4465,6 +4516,7 @@ extension WorkspaceViewController {
         document.workspaces = workspaceEntries
         document.selectedWorkspace = herdrWindowWorkspaceID.flatMap { id in herdrClient.map { .init(source: .herdr(endpoint: $0.endpoint, workspaceID: id)) } }
             ?? .init(source: .local(localWorkspaceID))
+        document.herdrFloatingPanes = herdrFloatingRecords.isEmpty ? nil : herdrFloatingRecords
         document.localWorkspaceID = localWorkspaceID
         document.localWorkspaceName = localWorkspaceName
         document.otherLocalWorkspaces = otherLocalWorkspaces.isEmpty ? nil : otherLocalWorkspaces.map {
@@ -4485,7 +4537,7 @@ extension WorkspaceViewController {
                 if let terminal = pane as? TerminalPaneController {
                     return .init(id: pane.id, kind: terminal.herdrBinding == nil ? .localTerminal : .persistentTerminal,
                         name: pane.name, title: terminal.lastKnownTitle, cwd: terminal.currentWorkingDirectory,
-                        binding: terminal.herdrBinding, mode: terminal.herdrRestorationMode)
+                        binding: floatingRecord(for: terminal.id)?.placeholder ?? terminal.herdrBinding, mode: terminal.herdrRestorationMode)
                 }
                 if let browser = pane as? BrowserPaneController {
                     return .init(id: pane.id, kind: .browser, name: pane.name, title: pane.displayTitle, browserURL: browser.restorationURL)
@@ -4549,6 +4601,7 @@ extension WorkspaceViewController {
 
     func restoreWorkspace(_ document: SavedWorkspace) throws {
         try document.validate()
+        herdrFloatingRecords = document.herdrFloatingPanes ?? []
         workspaceEntries = (document.workspaces ?? []).map {
             var entry = $0
             if entry.kind != .local { entry.isAvailable = false; entry.status = "Reconnecting" }
@@ -4754,12 +4807,13 @@ extension WorkspaceViewController {
               let workspace = workspaces.first(where: { $0.workspace_id == workspaceID }) ?? workspaces.first,
               let backendTabs, backendTabs.count <= 256 else { throw CLIError("Invalid Herdr workspace snapshot") }
         let targetID = workspace.workspace_id
-        let orderedTabs = backendTabs.filter { $0.workspace_id == targetID }
+        let allBackendTabs = backendTabs.filter { $0.workspace_id == targetID }
+        let orderedTabs = allBackendTabs.filter { !hiddenHerdrFloatingTabs.contains($0.tab_id) }
         guard Set(orderedTabs.map(\.tab_id)).count == orderedTabs.count, panes.count <= 512,
               Set(panes.map(\.pane_id)).count == panes.count,
               orderedTabs.allSatisfy({ !$0.tab_id.isEmpty && $0.tab_id.utf8.count <= 1024 && $0.label.utf8.count <= 4096 }) else { throw CLIError("Invalid Herdr tabs") }
         var layouts: [String: HerdrLayout] = [:]
-        for tab in orderedTabs {
+        for tab in allBackendTabs {
             let tabPanes = panes.filter { $0.workspace_id == targetID && $0.tab_id == tab.tab_id }
             let layout: HerdrLayout
             if let shell, tabPanes.count == 1, let pane = tabPanes.first {
@@ -4819,13 +4873,18 @@ extension WorkspaceViewController {
             var binding: HerdrPaneBinding?
             for metadata in panes.filter({ $0.tab_id == backendTab.tab_id && $0.workspace_id == targetID }) {
                 let identity = try HerdrPaneBinding(endpoint: client.endpoint, pane: metadata)
-                let previous = herdrWindowWorkspaceID == nil ? nil : oldControllers.first { pane in
+                let floating = floatingRecord(placeholderID: metadata.pane_id)
+                let previous = floating.flatMap { herdrFloatingDisplays[$0.paneID]?.pane } ?? (herdrWindowWorkspaceID == nil ? nil : oldControllers.first { pane in
                     guard let old = pane.herdrBinding, old.endpoint == client.endpoint,
                           old.serviceIdentity == metadata.serviceIdentity else { return false }
                     return old.matches(metadata, requireRuntime: false)
-                }
+                })
                 let controller = previous
-                let pane = controller ?? makeTerminalPaneController(workingDirectory: metadata.cwd, herdr: identity)
+                let remembered = herdrFloatingRecords.first {
+                    $0.source.endpoint == client.endpoint && $0.placeholder == nil && $0.floating == nil
+                        && $0.source.matches(metadata, requireRuntime: false)
+                }
+                let pane = controller ?? makeTerminalPaneController(id: remembered?.paneID ?? UUID(), workingDirectory: metadata.cwd, herdr: identity)
                 if controller == nil, let previous {
                     replacementIDs[previous.id] = pane.id
                     pane.name = previous.name
@@ -4852,7 +4911,7 @@ extension WorkspaceViewController {
                 paneAutoResizeConfigurations: [:], focusedPaneID: focusedNativeID)
             if let existing {
                 existingTabs[tab.id] = existing
-                if existing.id == selectedTabID { captureFloatingPaneSizes(in: tab) }
+                if existing.id == selectedTabID, herdrFloatingTask == nil { captureFloatingPaneSizes(in: tab) }
             }
             if let auxiliaries = existing.flatMap({ localAuxiliaries(from: $0) }) {
                 controllers.merge(auxiliaries.paneControllers) { current, _ in current }
@@ -4861,6 +4920,13 @@ extension WorkspaceViewController {
             tab.herdrBackendLayout = native
             tab.composeHerdrLayout()
             tab.paneControllers = controllers
+            for record in herdrFloatingRecords where controllers[record.paneID] != nil && tab.floatingPaneSizes[record.paneID] == nil {
+                tab.floatingPaneSizes[record.paneID] = record.size
+            }
+            if let record = herdrFloatingRecords.first(where: { $0.source.tabID == backendTab.tab_id && floatingRecord(for: $0.paneID) != nil }) {
+                tab.activeFloatingPaneState = .init(paneID: record.paneID, size: record.size)
+                if let size = record.size { tab.floatingPaneSizes[record.paneID] = size }
+            }
             let retainedFocus = tab.focusedPaneID.flatMap { controllers[$0] == nil ? nil : $0 }
             let localFocus = retainedFocus.map { native.path(to: $0) == nil || tab.isPaneDetached($0) || tab.activeFloatingPaneState?.paneID == $0 } == true
             tab.focusedPaneID = localFocus || optimisticHerdrFocus != nil
@@ -5017,10 +5083,224 @@ extension WorkspaceViewController {
     func waitForWorkspaceSelection() async { await workspaceSelectionTask?.value }
 
     private func queueHerdrFocus(_ binding: HerdrPaneBinding) {
+        if herdrFloatingTransition, let tab = selectedTabState,
+           let id = tab.activeFloatingPaneState?.paneID, let pane = tab.terminalPaneController(for: id),
+           pane.herdrBinding?.paneID == binding.paneID, pane.herdrBinding?.endpoint == binding.endpoint {
+            return
+        }
+        if let record = herdrFloatingRecords.first(where: { $0.floating?.paneID == binding.paneID && $0.floating?.tabID == binding.tabID && $0.source.endpoint == binding.endpoint }),
+           let display = herdrFloatingDisplays[record.paneID] {
+            try? display.session.setFocused(view.window?.isKeyWindow == true)
+            return
+        }
         optimisticHerdrFocus = binding
         pendingHerdrFocus = binding
         flushHerdrFocus()
     }
+
+    private var hiddenHerdrFloatingTabs: Set<String> {
+        Set(herdrFloatingRecords.compactMap { record in
+            guard record.source.endpoint == herdrClient?.endpoint,
+                  record.source.serviceIdentity == herdrShellSession?.serviceIdentity,
+                  record.placeholder != nil, let floating = record.floating,
+                  floating.tabID != record.source.tabID, herdrFloatingDisplays[record.paneID] != nil else { return nil }
+            return floating.tabID
+        })
+    }
+
+    private func floatingRecord(for id: PaneID) -> HerdrFloatingPaneRecord? {
+        herdrFloatingRecords.first { $0.paneID == id && $0.source.endpoint == herdrClient?.endpoint
+            && $0.source.serviceIdentity == herdrShellSession?.serviceIdentity
+            && $0.placeholder != nil && $0.floating?.tabID != $0.source.tabID && herdrFloatingDisplays[id] != nil }
+    }
+
+    private func floatingRecord(placeholderID: String) -> HerdrFloatingPaneRecord? {
+        herdrFloatingRecords.first { $0.placeholder?.paneID == placeholderID && floatingRecord(for: $0.paneID) != nil }
+    }
+
+    private func updateHerdrFloatingRecord(_ record: HerdrFloatingPaneRecord) {
+        herdrFloatingRecords.removeAll { $0.paneID == record.paneID }
+        // Keep the size after returning the pane; workspace switches rebuild its local controller.
+        if record.size != nil || record.placeholder != nil || record.floating != nil { herdrFloatingRecords.append(record) }
+        scheduleWorkspaceSave()
+    }
+
+    private func makeHerdrFloatingDisplay(_ record: HerdrFloatingPaneRecord, session: HerdrClientShellSession? = nil) throws -> HerdrFloatingPaneDisplay {
+        let display = try HerdrFloatingPaneDisplay(record: record, session: session, initialViewport: { [weak self] in
+            guard let self, let (_, width, height) = self.herdrClientShellViewport(), let surface = self.herdrShellSession?.projection.coherentSurface else { return nil }
+            return (.init(cols: surface.frame.width, rows: surface.frame.height), width, height)
+        })
+        try syncHerdrShellTheme(display.session, dark: view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+        display.pane.onFocusRequest = { [weak self] in self?.handlePaneFocusRequest(withID: $0) }
+        display.pane.onTitleChange = { [weak self] in self?.handleTitleChange(for: $0) }
+        display.pane.onExit = { [weak self] in self?.handlePaneExit(withID: $0) }
+        display.session.onEffect = { [weak self, weak display] message in
+            guard let self, let display, display.session.isPresentationReady else { return }
+            self.handleHerdrShellEffect(message, session: display.session)
+        }
+        display.onFailure = { [weak self] error in
+            guard let self, !self.herdrWorkspaceClosed else { return }
+            self.herdrLastError = error.localizedDescription
+            self.herdrErrorHandler?(error.localizedDescription)
+        }
+        herdrFloatingDisplays[record.paneID] = display
+        return display
+    }
+
+    private func prepareHerdrFloatingDisplays(client: HerdrWorkspaceClient, session: HerdrClientShellSession) async throws {
+        let records = herdrFloatingRecords.filter { $0.source.endpoint == client.endpoint && $0.placeholder != nil && $0.floating != nil }
+        guard records.contains(where: { herdrFloatingDisplays[$0.paneID] == nil }) else { return }
+        let current = try await client.snapshot()
+        for record in records where herdrFloatingDisplays[record.paneID] == nil {
+            guard record.source.serviceIdentity == session.serviceIdentity,
+                  let floating = record.floating, let placeholder = record.placeholder,
+                  current.panes.contains(where: { floating.matches($0) }),
+                  current.panes.contains(where: { placeholder.matches($0) }), floating.tabID != record.source.tabID else {
+                // A changed server exposes its real tabs; it never authorizes deleting a runtime.
+                herdrFloatingRecords.removeAll { $0.paneID == record.paneID }
+                herdrLastError = "Floating placement changed on Herdr; the terminal remains available in its tab"
+                continue
+            }
+            _ = try makeHerdrFloatingDisplay(record)
+        }
+    }
+
+    private func resizeHerdrFloatingPane() {
+        guard !herdrFloatingTransition, let id = selectedTabState?.activeFloatingPaneState?.paneID else { return }
+        herdrFloatingDisplays[id]?.resize()
+    }
+
+    private func toggleHerdrFloatingPane(in tab: WorkspaceTabState, animated: Bool = true) {
+        guard herdrFloatingTask == nil, !herdrOperationPending, let client = herdrClient,
+              let session = herdrShellSession, session.isPresentationReady,
+              let id = tab.activeFloatingPaneState?.paneID ?? tab.focusedPaneID,
+              let original = tab.terminalPaneController(for: id) else { NSSound.beep(); return }
+        let epoch = herdrShellGeneration
+        let returning = floatingRecord(for: id) != nil
+        let previousFocus = tab.focusedPaneID
+        let destination: NSRect
+        if returning {
+            guard let frame = rootView.placeholderFrame(for: id) else { NSSound.beep(); return }
+            destination = frame
+            herdrOperationPending = true
+            herdrFloatingTransition = true
+            herdrFloatingDisplays[id]?.freeze()
+            rootView.beginFloatingPaneAnimation()
+        } else {
+            guard let frame = renderedPaneFrameInFloatingOverlay(for: id, in: tab) else { NSSound.beep(); return }
+            herdrOperationPending = true
+            herdrFloatingTransition = true
+            pendingHerdrFocus = nil; optimisticHerdrFocus = nil
+            original.setClientShellPresented(false)
+            rootView.setCustomFloatingPaneSize(tab.floatingPaneSizes[id])
+            tab.activeFloatingPaneState = .init(paneID: id, size: tab.floatingPaneSizes[id])
+            rootView.installFloatingPaneView(original.hostView, initialFrame: frame, animated: animated)
+            rebuildWorkspaceLayout(applyAutoZoomAnimated: false, restoreFloatingPresentation: false)
+            destination = rootView.floatingPaneTargetFrame()
+        }
+        herdrFloatingTransition = true
+        herdrOperationPending = true
+        if animated {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = WorkspaceFloatingPaneConfiguration.animationDuration
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                rootView.animateFloatingPaneFrame(to: destination)
+            } completionHandler: { [weak self] in
+                Task { @MainActor in
+                    guard let self, self.herdrShellGeneration == epoch, self.selectedTabID == tab.id else { return }
+                    if !returning { self.rootView.finishFloatingPaneAnimation() }
+                }
+            }
+        } else {
+            rootView.setFloatingPaneFrame(destination)
+            if !returning { rootView.finishFloatingPaneAnimation() }
+        }
+        herdrFloatingTask = Task { [weak self, weak tab] in
+            guard let self, let tab else { return }
+            defer {
+                self.herdrFloatingTransition = false; self.herdrOperationPending = false
+                self.herdrFloatingTask = nil; self.requestHerdrLayoutRefresh()
+                self.flushHerdrFocus(); self.flushHerdrSplit(); self.scheduleWorkspaceSave()
+            }
+            var transfer: HerdrFloatingPaneTransfer?
+            do {
+                if let record = self.floatingRecord(for: id), let display = self.herdrFloatingDisplays[id] {
+                    let operation = HerdrFloatingPaneTransfer(record: record, client: client, session: session)
+                    transfer = operation
+                    operation.onChange = { [weak self] in self?.updateHerdrFloatingRecord($0) }
+                    self.herdrFloatingTransition = true
+                    display.freeze()
+                    try await display.session.deactivateAndWait()
+                    try await operation.leave()
+                    let focus = tab.focusedPaneID != previousFocus ? tab.focusedPaneID ?? id : id
+                    try display.pane.applyHerdrMove(record.source)
+                    display.stop(); self.herdrFloatingDisplays.removeValue(forKey: id)
+                    tab.activeFloatingPaneState = nil
+                    tab.focusedPaneID = focus
+                    if focus == id {
+                        self.optimisticHerdrFocus = record.source
+                        self.pendingHerdrFocus = record.source
+                    }
+                    self.herdrFloatingTransition = false
+                    try session.invalidatePresentation()
+                    self.requestHerdrLayoutRefresh()
+                    try await self.waitForHerdrShellPresentation(session, epoch: epoch)
+                    self.focusPane(withID: focus)
+                    self.applyFocusedPaneResponder()
+                } else {
+                    let child = HerdrClientShellSession(endpoint: client.endpoint)
+                    let connecting = Task {
+                        try await child.start(size: .init(cols: 1, rows: 1), cellWidth: 0, cellHeight: 0, focused: false, activateWhenMetadataReady: false)
+                    }
+                    var installed = false
+                    defer { connecting.cancel(); if !installed { child.disconnect() } }
+                    let source = try await original.resolveHerdrQueryBinding(using: client)
+                    guard self.herdrShellGeneration == epoch, self.selectedTabID == tab.id else { throw CancellationError() }
+                    let surface = session.projection.coherentSurface
+                    let record = HerdrFloatingPaneRecord(paneID: id, source: source, size: tab.floatingPaneSizes[id],
+                        sourceViewport: surface.map { .init(cols: $0.frame.width, rows: $0.frame.height) })
+                    let operation = HerdrFloatingPaneTransfer(record: record, client: client, session: session)
+                    transfer = operation
+                    operation.onChange = { [weak self] in self?.updateHerdrFloatingRecord($0) }
+                    self.updateHerdrFloatingRecord(record)
+                    try await self.flushWorkspaceState()
+                    self.herdrFloatingTransition = true
+                    for case let pane as TerminalPaneController in tab.paneControllers.values { pane.setClientShellPresented(false) }
+                    try await operation.enter()
+                    guard self.herdrShellGeneration == epoch, self.selectedTabID == tab.id else { throw CancellationError() }
+                    try await connecting.value
+                    let display = try self.makeHerdrFloatingDisplay(operation.record, session: child)
+                    installed = true
+                    display.pane.name = original.name
+                    tab.activeFloatingPaneState = .init(paneID: id, size: tab.floatingPaneSizes[id])
+                    self.herdrFloatingTransition = false
+                    try session.invalidatePresentation()
+                    self.requestHerdrLayoutRefresh()
+                    try await self.waitForHerdrShellPresentation(session, epoch: epoch)
+                    original.disconnectHerdr()
+                    self.focusPane(withID: id)
+                    self.applyFocusedPaneResponder()
+                }
+            } catch {
+                if let transfer, self.herdrShellGeneration == epoch, session.failure == nil {
+                    do { try await transfer.leave() }
+                    catch { self.herdrLastError = "Floating transfer needs recovery: \(error.localizedDescription)" }
+                }
+                if let transfer, transfer.record.placeholder == nil && transfer.record.floating == nil { self.updateHerdrFloatingRecord(transfer.record) }
+                self.herdrFloatingDisplays.removeValue(forKey: id)?.stop()
+                tab.activeFloatingPaneState = nil
+                if self.herdrShellGeneration == epoch, session.failure == nil {
+                    self.herdrFloatingTransition = false
+                    try? session.invalidatePresentation()
+                    self.requestHerdrLayoutRefresh()
+                    try? await self.waitForHerdrShellPresentation(session, epoch: epoch)
+                }
+                if !(error is CancellationError), self.herdrShellGeneration == epoch { self.presentHerdrError(error) }
+            }
+        }
+    }
+
+    func waitForHerdrFloatingTransitionForTesting() async { await herdrFloatingTask?.value }
 
     private func flushHerdrFocus() {
         if herdrWindowWorkspaceID != nil, herdrShellSession?.isPresentationReady != true { return }
@@ -5051,6 +5331,13 @@ extension WorkspaceViewController {
         let backendPath = pending.path.map { $0 == .child(1) }
         runHerdrOperation { client in
             do {
+                guard self.herdrClient === client else { return }
+                if self.herdrWindowWorkspaceID != nil, self.herdrShellSession?.isPresentationReady != true {
+                    if !self.pendingHerdrSplits.contains(where: { $0.binding.tabID == pending.binding.tabID && $0.path == pending.path }) {
+                        self.pendingHerdrSplits.insert(pending, at: 0)
+                    }
+                    return
+                }
                 try await client.verify(pending.binding)
                 guard let tab = self.tabs.first(where: { $0.herdrTabBinding?.tabID == pending.binding.tabID }),
                       tab.herdrBackendLayout?.node(at: pending.path)?.paneIDsInTraversalOrder == pending.edit.paneIDs else {
@@ -5132,12 +5419,15 @@ extension WorkspaceViewController {
     }
 
     private func stopHerdrClientShell() {
+        let floating = herdrFloatingDisplays.values.filter { $0.session.state != .disconnected }
+        for display in floating { display.freeze() }
         let wasShell = herdrShellSession != nil || herdrWindowWorkspaceID != nil
         herdrShellGeneration += 1
         herdrShellProjectionTask?.cancel(); herdrShellProjectionTask = nil
         herdrShellResizeTask?.cancel(); herdrShellResizeTask = nil
         retireHerdrShellHostColorQuery()
         herdrShellPendingProjection = nil; herdrShellPresentedSnapshot = nil; herdrShellLayouts.removeAll()
+        herdrShellViewportCalibration = nil
         herdrShellStagingTab = nil
         rootView.cancelStagedContentView()
         rootView.cancelStagedFloatingPaneView(); herdrShellRetainedPresentation.removeAll()
@@ -5148,11 +5438,25 @@ extension WorkspaceViewController {
             tab.composeHerdrLayout()
         }
         herdrClient?.retireCommands()
-        if let session = herdrShellSession, let callbacks = borrowedHerdrCallbacks {
+        let session = herdrShellSession
+        let callbacks = borrowedHerdrCallbacks
+        if let session, let callbacks {
             session.onProjection = nil; session.onEffect = nil
             session.onState = callbacks.state; session.onFailure = callbacks.failure
-            do { try session.deactivate() } catch { session.disconnect() }
-        } else { herdrShellSession?.disconnect() }
+        } else { session?.onProjection = nil; session?.onFailure = nil; session?.onEffect = nil; session?.onState = nil }
+        if floating.isEmpty {
+            if callbacks != nil { do { try session?.deactivate() } catch { session?.disconnect() } }
+            else { session?.disconnect() }
+        } else {
+            let previous = herdrFloatingShutdownTask
+            // Keep the source client active until floating clients release geometry ownership.
+            herdrFloatingShutdownTask = Task {
+                await previous?.value
+                for display in floating { try? await display.session.deactivateAndWait(); display.stop() }
+                if callbacks != nil { do { try session?.deactivate() } catch { session?.disconnect() } }
+                else { session?.disconnect() }
+            }
+        }
         borrowedHerdrCallbacks = nil; herdrShellSession = nil
         herdrShellPopup?.setPresented(false)
         rootView.removeHerdrPopupView(); herdrShellPopup = nil
@@ -5169,6 +5473,9 @@ extension WorkspaceViewController {
 
 
     private func startHerdrClientShell(workspaceID: String) async throws {
+        await herdrFloatingShutdownTask?.value
+        herdrFloatingShutdownTask = nil
+        try Task.checkCancellation()
         guard let client = herdrClient else { throw CLIError("Herdr endpoint is unavailable") }
         let epoch = herdrShellGeneration
         guard herdrShellGeneration == epoch, herdrClient === client, !herdrWorkspaceClosed else { throw CancellationError() }
@@ -5183,6 +5490,7 @@ extension WorkspaceViewController {
             self.herdrShellPopup?.applyState(state)
             for tab in self.tabs {
                 for case let pane as TerminalPaneController in tab.paneControllers.values where pane.herdrBinding != nil {
+                    if self.floatingRecord(for: pane.id) != nil { continue }
                     pane.applyClientShellState(state)
                 }
             }
@@ -5230,6 +5538,7 @@ extension WorkspaceViewController {
             if let failure = session.failure { throw failure }
             guard let metadata = session.projection.snapshot else { throw CLIError("Herdr shell initial metadata timed out") }
             try client.establishQueryIdentity(session)
+            try await prepareHerdrFloatingDisplays(client: client, session: session)
             if try await refreshHerdrLayout(workspaceID: workspaceID, shellMetadata: metadata) {
                 while ProcessInfo.processInfo.systemUptime < deadline {
                     try Task.checkCancellation()
@@ -5247,7 +5556,14 @@ extension WorkspaceViewController {
         guard let (size, width, height) = viewport else { throw CLIError("Herdr metadata and native viewport did not become ready") }
         try Task.checkCancellation()
         guard herdrShellGeneration == epoch, herdrShellSession === session else { throw CancellationError() }
-        try session.activate(size: size, cellWidth: width, cellHeight: height)
+        let sourceSize = herdrFloatingRecords.first { $0.source.endpoint == client.endpoint
+            && $0.source.serviceIdentity == session.serviceIdentity && $0.source.tabID == selectedTabState?.herdrTabBinding?.tabID
+            && $0.placeholder != nil && $0.floating != nil }?.sourceViewport ?? size
+        try session.activate(size: sourceSize, cellWidth: width, cellHeight: height)
+        if let tabID = session.projection.snapshot?.focused_tab_id, hiddenHerdrFloatingTabs.contains(tabID),
+           let record = herdrFloatingRecords.first(where: { $0.floating?.tabID == tabID }) {
+            try await session.selectInitialTab(record.source.tabID)
+        }
         try await waitForHerdrShellPresentation(session, epoch: epoch)
         if session.projection.snapshot?.focused_workspace_id != workspaceID {
             _ = try await client.request("workspace.focus", params: .init(workspace_id: workspaceID))
@@ -5354,6 +5670,10 @@ extension WorkspaceViewController {
 
     private func handleHerdrShellEffect(_ message: HerdrShellServerMessage, session: HerdrClientShellSession) {
         func remoteHasKeyboardFocus() -> Bool {
+            let owner = herdrShellPopup == nil
+                ? focusedTerminalPaneController.flatMap { herdrFloatingDisplays[$0.id]?.session } ?? herdrShellSession
+                : herdrShellSession
+            guard owner === session else { return false }
             let target: NSView?
             if let popup = herdrShellPopup { target = popup.canAcceptInput ? popup.terminalView : nil }
             else { target = focusedTerminalPaneController?.herdrBinding != nil && focusedTerminalPaneController?.canAcceptInput == true ? focusedTerminalPaneController?.focusTargetView : nil }
@@ -5386,6 +5706,16 @@ extension WorkspaceViewController {
         }
     }
 
+    private func sameHerdrViewportTopology(_ a: LayoutNode, _ b: LayoutNode) -> Bool {
+        switch (a, b) {
+        case let (.panel(a), .panel(b)): return a == b
+        case let (.split(axisA, childrenA, _), .split(axisB, childrenB, _)):
+            return axisA == axisB && childrenA.count == childrenB.count
+                && zip(childrenA, childrenB).allSatisfy { sameHerdrViewportTopology($0.0, $0.1) }
+        default: return false
+        }
+    }
+
     private func herdrClientShellViewport(surface: HerdrShellSurface? = nil) -> (HerdrShellSize, UInt32, UInt32)? {
         guard let tab = herdrShellStagingTab ?? selectedTabState, let layout = tab.herdrBackendLayout,
               let pane = layout.paneIDsInTraversalOrder.compactMap({ tab.terminalPaneController(for: $0) }).first,
@@ -5406,12 +5736,20 @@ extension WorkspaceViewController {
            let tree = try? herdrShellLayouts[tabID]?.projected(on: surface) {
             let paneIDs = Dictionary(uniqueKeysWithValues: tab.paneControllers.values.compactMap { controller -> (String, UUID)? in
                 guard let pane = controller as? TerminalPaneController, let binding = pane.herdrBinding else { return nil }
-                return (binding.paneID, pane.id)
+                return (floatingRecord(for: pane.id)?.placeholder?.paneID ?? binding.paneID, pane.id)
             })
             guard let geometry = try? tree.nativeShellLayout(panes: paneIDs, surface: surface, cellSize: cellSize,
-                padding: TerminalSettings.padding, divider: WorkspaceLayoutMetrics.dividerThickness),
-                  let size = HerdrLayout.nativeShellViewportSize(surface: surface, nativeSize: geometry.size,
-                    availableSize: frame.size, cellSize: cellSize) else { return nil }
+                padding: TerminalSettings.padding, divider: WorkspaceLayoutMetrics.dividerThickness) else { return nil }
+            if let cached = herdrShellViewportCalibration, cached.tab == tab.id, sameHerdrViewportTopology(cached.layout, layout),
+               cached.available == frame.size, cached.cell == cellSize, cached.padding == TerminalSettings.padding,
+               cached.divider == AppAppearanceSettings.workspaceDividerThickness {
+                return (cached.size, grid.cellWidthPixels, grid.cellHeightPixels)
+            }
+            guard let size = HerdrLayout.nativeShellViewportSize(surface: surface, nativeSize: geometry.size,
+                availableSize: frame.size, cellSize: cellSize) else { return nil }
+            // Content chrome can change without changing the physical viewport or split topology.
+            herdrShellViewportCalibration = (tab.id, layout, frame.size, cellSize, TerminalSettings.padding,
+                AppAppearanceSettings.workspaceDividerThickness, size)
             return (size, grid.cellWidthPixels, grid.cellHeightPixels)
         }
         func chrome(_ node: LayoutNode) -> NSSize {
@@ -5435,14 +5773,15 @@ extension WorkspaceViewController {
 
     private func scheduleHerdrShellResize() {
         guard herdrWindowWorkspaceID != nil, herdrShellSession != nil, herdrShellResizeTask == nil,
-              tilingView?.isDraggingDivider != true else { return }
+              herdrFloatingTask == nil, !herdrFloatingTransition, tilingView?.isDraggingDivider != true else { return }
         let epoch = herdrShellGeneration
         herdrShellResizeTask = Task { [weak self] in
             await Task.yield()
             guard let self, self.herdrShellGeneration == epoch, !Task.isCancelled else { return }
             defer { self.herdrShellResizeTask = nil }
-            guard self.tilingView?.isDraggingDivider != true else { return }
-            guard let session = self.herdrShellSession, let (size, width, height) = self.herdrClientShellViewport() else { return }
+            guard self.tilingView?.isDraggingDivider != true, self.herdrFloatingTask == nil, !self.herdrFloatingTransition else { return }
+            guard let session = self.herdrShellSession, session.isPresentationReady,
+                  let (size, width, height) = self.herdrClientShellViewport() else { return }
             do { try session.resize(size, cellWidth: width, cellHeight: height) }
             catch { self.herdrLastError = error.localizedDescription }
         }
@@ -5481,6 +5820,8 @@ extension WorkspaceViewController {
 
     private func applyHerdrShellProjection(_ snapshot: HerdrShellSnapshot, _ surface: HerdrShellSurface,
                                            _ assets: [HerdrShellAssetKey: Data]) async throws -> Bool {
+        // Transfers keep the visible scene; the latest frame is queued explicitly after completion.
+        if herdrFloatingTransition { return true }
         guard let session = herdrShellSession, let client = herdrClient,
               snapshot.boot_id == session.projection.snapshot?.boot_id,
               session.canPresent(surface) else { return true }
@@ -5490,7 +5831,8 @@ extension WorkspaceViewController {
         let previousPanes = Array(previousTab?.paneControllers.values ?? [:].values)
         defer { session.endPresentation(surface) }
         guard let workspace = snapshot.focused_workspace_id, let tabID = snapshot.focused_tab_id else { throw CLIError("Herdr shell has no existing workspace") }
-        let ordered = snapshot.tabs.filter { $0.workspace_id == workspace }.map(\.tab_id)
+        if hiddenHerdrFloatingTabs.contains(tabID) { return true }
+        let ordered = snapshot.tabs.filter { $0.workspace_id == workspace && !hiddenHerdrFloatingTabs.contains($0.tab_id) }.map(\.tab_id)
         let native = tabs.compactMap { $0.herdrTabBinding?.tabID }
         let identityMatches = ordered == native && herdrWindowWorkspaceID == workspace && ordered.allSatisfy { id in
             Set(herdrShellLayouts[id]?.paneIDs ?? []) == Set(snapshot.panes.filter { $0.tab_id == id }.map(\.pane_id))
@@ -5515,7 +5857,9 @@ extension WorkspaceViewController {
         }
         var paneIDs: [String: PaneID] = [:]
         for case let pane as TerminalPaneController in tab.paneControllers.values {
-            if let binding = pane.herdrBinding { paneIDs[binding.paneID] = pane.id }
+            if let record = floatingRecord(for: pane.id), let placeholder = record.placeholder {
+                paneIDs[placeholder.paneID] = pane.id
+            } else if let binding = pane.herdrBinding { paneIDs[binding.paneID] = pane.id }
         }
         let references = (Array(tab.paneControllers.values) + previousPanes + herdrShellRetainedPresentation)
             .compactMap { $0 as? TerminalPaneController }
@@ -5533,7 +5877,7 @@ extension WorkspaceViewController {
                 tab.herdrSplitEdits.removeValue(forKey: path)
                 continue
             }
-            let ids = Set(edit.paneIDs.compactMap { tab.terminalPaneController(for: $0)?.herdrBinding?.paneID })
+            let ids = Set(edit.paneIDs.compactMap { floatingRecord(for: $0)?.placeholder?.paneID ?? tab.terminalPaneController(for: $0)?.herdrBinding?.paneID })
             let rectangles = surface.panes.filter { ids.contains($0.pane_id) }.map(\.rect)
             let start = rectangles.map { axis == .horizontal ? Int($0.x) : Int($0.y) }.min() ?? 0
             let end = rectangles.map { axis == .horizontal ? Int($0.x) + Int($0.width) : Int($0.y) + Int($0.height) }.max() ?? 0
@@ -5544,7 +5888,8 @@ extension WorkspaceViewController {
         }
         let keepLocalFocus = selectedTabID == tab.id
             && (optimisticHerdrFocus.map { $0.tabID != snapshot.focused_tab_id || $0.paneID != snapshot.focused_pane_id } == true
-                || tab.focusedPaneController.map { ($0 as? TerminalPaneController)?.herdrBinding == nil } == true)
+                || tab.focusedPaneController.map { ($0 as? TerminalPaneController)?.herdrBinding == nil } == true
+                || tab.activeFloatingPaneState?.paneID == tab.focusedPaneID)
         let focused = snapshot.focused_pane_id.flatMap { paneIDs[$0] }
         let changed = herdrShellNativeLayoutPending || topologyChanged || previousEditCount != tab.herdrSplitEdits.count
             || tab.herdrBackendLayout != projected || selectedTabID != tab.id || previousTab?.id != tab.id
@@ -5560,8 +5905,17 @@ extension WorkspaceViewController {
             candidateViews = buildPaneViewsDictionary(for: tab)
             for (id, host) in candidateViews where host.window != nil {
                 if let pane = tab.terminalPaneController(for: id), pane.herdrBinding != nil {
-                    candidateViews[id] = pane.stageClientShellDisplay()
-                    stagedPanes.append(pane)
+                    let native = surface.panes.first { paneIDs[$0.pane_id] == id }
+                    let grid = pane.clientShellGridMetrics
+                    if previousTab?.id == tab.id, herdrShellPresentedSnapshot?.boot_id == snapshot.boot_id,
+                       previousPanes.contains(where: { $0 === pane }),
+                       let native, let grid, grid.columns == native.inner_rect.width, grid.rows == native.inner_rect.height {
+                        // Keep the visible surface in place until its placeholder is replaced at commit.
+                        candidateViews[id] = TerminalPanePlaceholderView(paneID: id)
+                    } else {
+                        candidateViews[id] = pane.stageClientShellDisplay()
+                        stagedPanes.append(pane)
+                    }
                 } else {
                     candidateViews[id] = TerminalPanePlaceholderView(paneID: id)
                 }
@@ -5585,13 +5939,27 @@ extension WorkspaceViewController {
             herdrShellStagingTab = tab
             let floatingID = tab.activeFloatingPaneState?.paneID ?? tab.activeDetachedPaneID
             if let id = floatingID, let pane = tab.terminalPaneController(for: id), pane.herdrBinding != nil {
-                let display: NSView
-                if pane.hostView.window != nil {
-                    display = pane.stageClientShellDisplay(); stagedPanes.append(pane)
-                } else { display = pane.hostView }
-                rootView.stageFloatingPaneView(display,
-                    size: tab.activeFloatingPaneState?.size ?? tab.floatingPaneSizes[id])
-                stagedFloating = display
+                if let display = herdrFloatingDisplays[id], floatingRecord(for: id) != nil {
+                    display.pane.setClientShellPresented(false)
+                    let host: NSView
+                    if display.pane.hostView.window != nil {
+                        host = display.pane.stageClientShellDisplay(); stagedPanes.append(display.pane)
+                    } else { host = display.pane.hostView }
+                    rootView.stageFloatingPaneView(host, size: tab.activeFloatingPaneState?.size ?? tab.floatingPaneSizes[id])
+                    stagedFloating = host
+                    if display.session.projection.snapshot != nil {
+                        display.resize(); try display.session.invalidatePresentation()
+                    }
+                    try await display.start()
+                } else {
+                    let display: NSView
+                    if pane.hostView.window != nil {
+                        display = pane.stageClientShellDisplay(); stagedPanes.append(pane)
+                    } else { display = pane.hostView }
+                    rootView.stageFloatingPaneView(display,
+                        size: tab.activeFloatingPaneState?.size ?? tab.floatingPaneSizes[id])
+                    stagedFloating = display
+                }
             }
         }
         defer {
@@ -5604,6 +5972,10 @@ extension WorkspaceViewController {
         if changed && stagedTiling == nil {
             tab.herdrFocusedPaneID = focused
             if !keepLocalFocus { tab.focusedPaneID = focused; selectedTabID = tab.id }
+        }
+        if !canStageTab, let id = tab.activeFloatingPaneState?.paneID,
+           let display = herdrFloatingDisplays[id], !display.session.isPresentationReady {
+            try await display.start()
         }
         try client.routeCommands(to: session)
         applyingHerdrLayout = true
@@ -5619,6 +5991,7 @@ extension WorkspaceViewController {
         var requests: [HerdrShellRenderRequest] = []
         for metadata in surface.panes {
             guard let id = paneIDs[metadata.pane_id], let pane = tab.terminalPaneController(for: id) else { throw CLIError("Herdr shell pane is not mapped") }
+            if floatingRecord(placeholderID: metadata.pane_id) != nil { continue }
             try pane.bindClientShell(session, bootID: snapshot.boot_id)
             if pane.clientShellRenderHostView.window != nil {
                 let viewportAt = ProcessInfo.processInfo.systemUptime
@@ -5687,6 +6060,7 @@ extension WorkspaceViewController {
         if let candidate = stagedTiling, !rootView.isStagedContentView(candidate) { return false }
         if let popup = stagedPopup, !rootView.isStagedHerdrPopupView(popup.terminalView) { return false }
         if let floating = stagedFloating, !rootView.isStagedFloatingPaneView(floating) { return false }
+        if herdrFloatingTransition { return true }
         let finalizedAt = ProcessInfo.processInfo.systemUptime
         defer { session.recordStage("hostFinalize", seconds: ProcessInfo.processInfo.systemUptime - finalizedAt) }
         if optimisticHerdrFocus != nil, selectedTabID != tab.id {
@@ -5739,7 +6113,8 @@ extension WorkspaceViewController {
         herdrShellPopup?.setPresented(true)
         let keepCurrentLocalFocus = selectedTabID == tab.id
             && (optimisticHerdrFocus.map { $0.tabID != snapshot.focused_tab_id || $0.paneID != snapshot.focused_pane_id } == true
-                || tab.focusedPaneController.map { ($0 as? TerminalPaneController)?.herdrBinding == nil } == true)
+                || tab.focusedPaneController.map { ($0 as? TerminalPaneController)?.herdrBinding == nil } == true
+                || tab.activeFloatingPaneState?.paneID == tab.focusedPaneID)
         if optimisticHerdrFocus == nil { tab.herdrFocusedPaneID = focused }
         if !keepCurrentLocalFocus { tab.focusedPaneID = focused; selectedTabID = tab.id }
         if stagedTiling != nil && stagedFloating == nil { restoreActiveFloatingPresentation(in: tab) }
@@ -5775,6 +6150,10 @@ extension WorkspaceViewController {
         }
         applyingHerdrLayout = false
         guard preparedOutputs.allSatisfy({ $0.isCurrent() }), session.acknowledgePresentation(surface) else { return false }
+        for index in herdrFloatingRecords.indices where herdrFloatingRecords[index].source.endpoint == client.endpoint
+            && herdrFloatingRecords[index].source.serviceIdentity == session.serviceIdentity && herdrFloatingRecords[index].source.tabID == tabID {
+            herdrFloatingRecords[index].sourceViewport = .init(cols: surface.frame.width, rows: surface.frame.height)
+        }
         if let pending = optimisticHerdrFocus, pending.tabID == snapshot.focused_tab_id,
            pending.paneID == snapshot.focused_pane_id {
             optimisticHerdrFocus = nil
@@ -5877,7 +6256,10 @@ extension WorkspaceViewController {
             item(key("workspace", representative, space.workspace_id), sourceTitle, .workspace, kind.title, kind.symbol,
                  current: inWorkspace, inWorkspace: inWorkspace,
                  target: .herdr(binding: representative, tab: nil, pane: nil, localPane: nil))
-            for (index, backendTab) in backendTabs.filter({ $0.workspace_id == space.workspace_id }).enumerated() {
+            let floatingRecords = herdrFloatingRecords.filter { $0.source.endpoint == endpoint && $0.source.serviceIdentity == representative.serviceIdentity
+                && $0.placeholder != nil && $0.floating != nil }
+            let hiddenTabs = Set(floatingRecords.compactMap { $0.floating?.tabID })
+            for (index, backendTab) in backendTabs.filter({ $0.workspace_id == space.workspace_id && !hiddenTabs.contains($0.tab_id) }).enumerated() {
                 let backendPanes = spacePanes.filter { $0.tab_id == backendTab.tab_id }
                 guard let first = backendPanes.first, let binding = try? HerdrPaneBinding(endpoint: endpoint, pane: first) else { continue }
                 let installed = (tabs + herdrAuxiliaryTabs).first {
@@ -5891,15 +6273,19 @@ extension WorkspaceViewController {
                      target: .herdr(binding: binding, tab: backendTab.tab_id, pane: nil, localPane: nil))
                 for pane in backendPanes {
                     guard let targetBinding = try? HerdrPaneBinding(endpoint: endpoint, pane: pane) else { continue }
-                    let native = installed?.paneControllers.values.compactMap { $0 as? TerminalPaneController }.first { $0.herdrBinding?.paneID == pane.pane_id }
+                    let floating = floatingRecords.first { $0.placeholder?.paneID == pane.pane_id }
+                    let native = installed?.paneControllers.values.compactMap { $0 as? TerminalPaneController }.first {
+                        floating == nil ? $0.herdrBinding?.paneID == pane.pane_id : $0.id == floating?.paneID
+                    }
+                    let label = floating.flatMap { record in metadata.panes.first { $0.pane_id == record.floating?.paneID }?.label } ?? pane.label
                     let subtitle: String
                     if let native, let installed {
                         subtitle = palettePaneSubtitle(native, tab: installed, workspace: space.label)
                     } else { subtitle = "\(space.label) › \(title) · Terminal" }
-                    item(key("pane", targetBinding, pane.pane_id), native?.name ?? pane.label ?? native?.displayTitle ?? pane.title ?? pane.pane_id,
+                    item(key("pane", targetBinding, pane.pane_id), native?.name ?? label ?? native?.displayTitle ?? pane.title ?? pane.pane_id,
                          .pane, subtitle, "terminal",
                          current: currentTab && native != nil && native?.id == installed?.focusedPaneID, inWorkspace: inWorkspace,
-                         target: .herdr(binding: targetBinding, tab: backendTab.tab_id, pane: pane.pane_id, localPane: nil))
+                         target: .herdr(binding: targetBinding, tab: backendTab.tab_id, pane: floating == nil ? pane.pane_id : nil, localPane: floating?.paneID))
                 }
                 if let installed {
                     for pane in paletteOrderedPanes(installed) where (pane as? TerminalPaneController)?.herdrBinding == nil {
@@ -5931,6 +6317,12 @@ extension WorkspaceViewController {
     }
 
     private func navigateFromPalette(to target: PaletteTarget) {
+        if case let .herdr(binding, _, paneID, _) = target,
+           let record = herdrFloatingRecords.first(where: { $0.floating?.paneID == paneID && $0.source.endpoint == binding.endpoint && $0.source.serviceIdentity == binding.serviceIdentity }),
+           let placeholder = record.placeholder {
+            navigateFromPalette(to: .herdr(binding: placeholder, tab: record.source.tabID, pane: nil, localPane: record.paneID))
+            return
+        }
         paletteNavigationTask?.cancel()
         paletteNavigationGeneration += 1
         let generation = paletteNavigationGeneration

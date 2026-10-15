@@ -11,7 +11,11 @@ while True:
     text = os.read(sys.stdin.fileno(), 1)
     if not text:
         break
-    if text == b'L':
+    if text == b'A':
+        os.write(sys.stdout.fileno(), b'\x1b[?1049h\x1b[2J\x1b[HALTERNATE')
+    elif text == b'N':
+        os.write(sys.stdout.fileno(), b'\x1b[?1049l')
+    elif text == b'L':
         os.write(sys.stdout.fileno(), f'line {line:04d} '.encode() + bytes([65 + line % 26]) * 80 + b'\r\n')
         line += 1
     elif text == b'S':
