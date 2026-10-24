@@ -86,7 +86,6 @@ final class TerminalPaneInteractionTests: XCTestCase {
         session.receive("\u{1b}[?1003h\u{1b}[?1006h\u{1b}[31m" + sample + "\u{1b}[0m\r\n"
                         + words + "\r\n"
                         + (1...60).map { "row \($0)\r\n" }.joined())
-        await Task.detached { session.waitForPendingOutput() }.value
         for _ in 0..<100 {
             if terminal.scrollModeViewport?.total ?? 0 > 60 { break }
             try await Task.sleep(for: .milliseconds(20))

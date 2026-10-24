@@ -6,13 +6,6 @@ import XCTest
 @testable import Santty
 
 final class SanttyTests: XCTestCase {
-    override func tearDown() {
-        Task { @MainActor in
-                AgentNotificationSettings.reset()
-                AgentSessionStore.shared.reset()
-        }
-        super.tearDown()
-    }
 
     func testSinglePaneTraversalReturnsOnlyPane() {
         let paneID = UUID()
@@ -792,7 +785,7 @@ final class SanttyTests: XCTestCase {
         let picker = try XCTUnwrap(firstSubview(ofType: NSSegmentedControl.self, in: view))
         let table = try XCTUnwrap(firstSubview(ofType: NSTableView.self, in: view))
         XCTAssertEqual((0..<picker.segmentCount).map { picker.label(forSegment: $0) },
-                       ["All", "Agents", "Workspace", "Tab", "Pane", "Command"])
+                       ["All", "Workspace", "Tab", "Pane", "Command"])
         let tab = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
             windowNumber: panel.windowNumber, context: nil, characters: "\t", charactersIgnoringModifiers: "\t",
             isARepeat: false, keyCode: 48))
@@ -819,7 +812,7 @@ final class SanttyTests: XCTestCase {
     @MainActor
     func testPaletteRefreshPreservesSearchCategoryAndSelectedIdentity() throws {
         let first = AppCommand(id: "first", title: "Logs", shortcut: nil, isEnabled: true, kind: .pane, subtitle: "Default › API") {}
-        let second = AppCommand(id: "second", title: "Logs", shortcut: nil, isEnabled: true, kind: .pane, subtitle: "Herdr › API") {}
+        let second = AppCommand(id: "second", title: "Logs", shortcut: nil, isEnabled: true, kind: .pane, subtitle: "Tools › API") {}
         let view = CommandPaletteView(commands: [first, second], searchQuery: "logs")
         let table = try XCTUnwrap(firstSubview(ofType: NSTableView.self, in: view))
         table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
@@ -884,18 +877,6 @@ final class SanttyTests: XCTestCase {
         let restoredContentSize = try XCTUnwrap(panel.contentView?.bounds.size)
         XCTAssertEqual(restoredContentSize.width, expectedContentSize.width, accuracy: 0.001)
         XCTAssertEqual(restoredContentSize.height, expectedContentSize.height, accuracy: 0.001)
-    }
-
-    @MainActor
-    func testAgentNotificationSettingsPersistEnabledAgents() {
-        AgentNotificationSettings.reset()
-
-        AgentNotificationSettings.isClaudeCodeEnabled = true
-        AgentNotificationSettings.isCodexEnabled = true
-
-        XCTAssertTrue(AgentNotificationSettings.isClaudeCodeEnabled)
-        XCTAssertTrue(AgentNotificationSettings.isCodexEnabled)
-        AgentNotificationSettings.reset()
     }
 
     @MainActor

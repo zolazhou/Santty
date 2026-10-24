@@ -168,8 +168,6 @@ struct SettingsView: View {
                 terminalFontSize: $terminalFontSize,
                 terminalPadding: $terminalPadding
             )
-        case .agents:
-            AgentSettingsPane()
         case .keybindings:
             KeybindingSettingsPane()
         }

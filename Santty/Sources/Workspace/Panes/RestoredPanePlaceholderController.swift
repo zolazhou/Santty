@@ -25,7 +25,7 @@ final class RestoredPanePlaceholderController: NSObject, PaneControlling {
         }
         label.stringValue = message
         label.alignment = .center
-        button.title = pane.kind == .localTerminal ? "Start New Local Terminal" : "Choose Existing Terminal"
+        button.title = "Start New Local Terminal"
         button.target = self; button.action = #selector(activate)
         let stack = NSStackView(views: [label, button])
         stack.orientation = .vertical

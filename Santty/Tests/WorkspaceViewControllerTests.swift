@@ -12,11 +12,8 @@ final class WorkspaceViewControllerTests: XCTestCase {
             AppCommand(id: "remote", title: "Logs", shortcut: nil, isEnabled: true, kind: .pane, subtitle: "Santty › API") {},
             AppCommand(id: "local", title: "Logs", shortcut: nil, isEnabled: true, kind: .pane, subtitle: "Default › API", isInCurrentWorkspace: true) {},
             AppCommand(id: "tab", title: "API", shortcut: nil, isEnabled: true, kind: .tab, isInCurrentWorkspace: true) {},
-            AppCommand(id: "agent", title: "Codex", shortcut: nil, isEnabled: true, kind: .agent, subtitle: "API · Running · /projects/service") {},
         ]
-        XCTAssertEqual(CommandPaletteFilter.results(items, query: "", kind: nil).map(\.id), ["command", "space", "tab", "agent"])
-        XCTAssertEqual(CommandPaletteFilter.results(items, query: "", kind: .agent).map(\.id), ["agent"])
-        XCTAssertEqual(CommandPaletteFilter.results(items, query: "codex service", kind: nil).map(\.id), ["agent"])
+        XCTAssertEqual(CommandPaletteFilter.results(items, query: "", kind: nil).map(\.id), ["command", "space", "tab"])
         XCTAssertEqual(CommandPaletteFilter.results(items, query: "logs", kind: nil).map(\.id), ["local", "remote"])
         XCTAssertEqual(CommandPaletteFilter.results(items, query: "Santty logs", kind: nil).map(\.id), ["remote"])
         XCTAssertEqual(CommandPaletteFilter.results(items, query: "", kind: .pane).map(\.id), ["remote", "local"])
@@ -34,7 +31,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
         controller.debugNewTab()
         let target = try XCTUnwrap(controller.paletteNavigationItems.first { $0.kind == .pane && $0.title == "Floating target" })
         target.perform()
-        await controller.waitForPaletteNavigationForTesting()
+        await Task.yield()
         XCTAssertEqual(controller.debugFocusedPaneID, floating)
         XCTAssertEqual(controller.debugActiveFloatingPaneState?.paneID, floating)
         controller.debugHandlePaneFocusRequest(withID: first)
@@ -42,11 +39,10 @@ final class WorkspaceViewControllerTests: XCTestCase {
         controller.debugDetachFocusedPane()
         controller.debugNewTab()
         try XCTUnwrap(controller.paletteNavigationItems.first { $0.kind == .pane && $0.title == "Hidden target" }).perform()
-        await controller.waitForPaletteNavigationForTesting()
+        await Task.yield()
         XCTAssertEqual(controller.debugActiveDetachedPaneID, first)
         XCTAssertEqual(controller.debugFocusedPaneID, first)
         XCTAssertTrue(controller.debugCommandSnapshots.allSatisfy { !$0.id.hasPrefix("navigate.") }, "CLI command exports must remain commands only")
-        XCTAssertNil(controller.herdrLastError)
     }
 
     @MainActor
@@ -58,32 +54,9 @@ final class WorkspaceViewControllerTests: XCTestCase {
         let selected = controller.debugSelectedTabID
         controller.debugCloseTab(withID: first)
         stale.perform()
-        await controller.waitForPaletteNavigationForTesting()
+        await Task.yield()
         XCTAssertEqual(controller.debugSelectedTabID, selected)
-        XCTAssertTrue(controller.herdrLastError?.contains("no longer exists") == true)
-    }
-
-    @MainActor
-    func testNotesPanesSplitRepeatedlyAndReportTheirKindToCLI() async throws {
-        let controller = Self.makeController()
-        controller.debugPerformCommand(withID: "pane.notes.new")
-        let first = try XCTUnwrap(controller.debugFocusedNotesPane)
-        await first.content.waitForPendingOperations()
-        controller.debugPerformCommand(withID: "pane.notes.new")
-        let second = try XCTUnwrap(controller.debugFocusedNotesPane)
-        await second.content.waitForPendingOperations()
-        XCTAssertNotEqual(first.id, second.id)
-        XCTAssertEqual(controller.debugPaneIDsInTraversalOrder.count, 3)
-        let response = try controller.handleCLIRequest(CLIRequest(command: "list"))
-        let notes = try XCTUnwrap(response.tabs).flatMap(\.panes).filter { $0.kind == "notes" }
-        XCTAssertEqual(Set(notes.map(\.id)), Set([first.id, second.id]))
-        XCTAssertTrue(notes.allSatisfy { !$0.isLive })
-        controller.debugPerformCommand(withID: "pane.close")
-        for _ in 0..<60 {
-            if controller.debugPaneIDsInTraversalOrder.count == 2 { break }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        XCTAssertEqual(controller.debugPaneIDsInTraversalOrder.count, 2)
+        XCTAssertTrue(controller.paletteNavigationItems.allSatisfy { $0.id != stale.id })
     }
 
     @MainActor
@@ -627,10 +600,11 @@ final class WorkspaceViewControllerTests: XCTestCase {
     func testWorkspaceSwitcherRemainsLegibleOnDarkChromeWithLightSystemAppearance() throws {
         let toolbar = WorkspaceToolbarView(frame: NSRect(x: 0, y: 0, width: 640, height: 32))
         toolbar.appearance = NSAppearance(named: .aqua)
-        toolbar.updateWorkspaces([
-            .init(workspace_id: "w1", label: "Santty", active_tab_id: "t1"),
-            .init(workspace_id: "w2", label: "Other", active_tab_id: "t2"),
-        ], selectedID: "w1")
+        let first = UUID(), second = UUID()
+        toolbar.updateWorkspaceEntries([
+            .init(reference: first, name: "Santty"),
+            .init(reference: second, name: "Other"),
+        ], selectedID: "local." + first.uuidString)
         toolbar.layoutSubtreeIfNeeded()
         let button = toolbar.workspaceSwitcher
         XCTAssertFalse(button.isHidden)
@@ -642,17 +616,16 @@ final class WorkspaceViewControllerTests: XCTestCase {
         XCTAssertTrue(toolbar.bounds.contains(button.convert(button.bounds, to: toolbar)))
         XCTAssertEqual(button.frame.minX, toolbar.bounds.minX, accuracy: 0.001)
         XCTAssertGreaterThanOrEqual(toolbar.tabStripView.frame.minX, button.frame.maxX)
-        toolbar.updateAgentStatus(sessionCount: 1, unreadCount: 0)
         toolbar.updateDetachedPanes([], target: nil, action: #selector(NSButton.performClick(_:)))
         toolbar.layoutSubtreeIfNeeded()
         XCTAssertEqual(button.frame.minX, toolbar.bounds.minX, accuracy: 0.001)
         XCTAssertLessThanOrEqual(toolbar.tabStripView.frame.maxX,
-            toolbar.agentStatusButton.convert(toolbar.agentStatusButton.bounds, to: toolbar).minX)
+            toolbar.bounds.maxX)
         var selected: String?
         toolbar.onSelectWorkspace = { selected = $0 }
-        button.selectItem(at: 2)
+        button.selectItem(at: 1)
         XCTAssertTrue(button.sendAction(button.action, to: button.target))
-        XCTAssertEqual(selected, "w2")
+        XCTAssertEqual(selected, "local." + second.uuidString)
     }
 
     @MainActor
@@ -678,41 +651,23 @@ final class WorkspaceViewControllerTests: XCTestCase {
     }
 
     @MainActor
-    func testWorkspaceSwitcherKeepsMenuAndSelectionStableAcrossTabUpdates() async {
+    func testWorkspaceSwitcherKeepsMenuAndSelectionStableAcrossTabUpdates() {
         let toolbar = WorkspaceToolbarView(frame: NSRect(x: 0, y: 0, width: 640, height: 32))
-        let other = HerdrSnapshot.Workspace(workspace_id: "w2", label: "Other", active_tab_id: "t2")
-        toolbar.updateWorkspaces([.init(workspace_id: "w1", label: "Santty", active_tab_id: "t1"), other], selectedID: "w1")
+        let first = UUID(), second = UUID()
+        let entries = [WorkspaceEntry(reference: first, name: "Santty"), .init(reference: second, name: "Other")]
+        toolbar.updateWorkspaceEntries(entries, selectedID: "local." + first.uuidString)
         let items = toolbar.workspaceSwitcher.itemArray
-        toolbar.updateWorkspaces([.init(workspace_id: "w1", label: "Santty", active_tab_id: "t3"), other], selectedID: "w1")
-        XCTAssertEqual(items.count, toolbar.workspaceSwitcher.numberOfItems)
+        toolbar.updateWorkspaceEntries(entries, selectedID: "local." + first.uuidString)
         for (before, after) in zip(items, toolbar.workspaceSwitcher.itemArray) { XCTAssertTrue(before === after) }
         var chosen: String?
         toolbar.onSelectWorkspace = { chosen = $0 }
-        toolbar.workspaceSwitcher.selectItem(at: 2)
+        toolbar.workspaceSwitcher.selectItem(at: 1)
         _ = toolbar.workspaceSwitcher.sendAction(toolbar.workspaceSwitcher.action, to: toolbar.workspaceSwitcher.target)
-        XCTAssertEqual(chosen, "w2")
-        XCTAssertEqual(toolbar.workspaceSwitcher.titleOfSelectedItem, "Santty", "Selection waits for backend confirmation")
-        toolbar.updateWorkspaces([.init(workspace_id: "w1", label: "Renamed", active_tab_id: "t3"), other], selectedID: "w2")
+        XCTAssertEqual(chosen, "local." + second.uuidString)
+        XCTAssertEqual(toolbar.workspaceSwitcher.titleOfSelectedItem, "Santty")
+        toolbar.updateWorkspaceEntries([.init(reference: first, name: "Renamed"), entries[1]], selectedID: "local." + second.uuidString)
         XCTAssertEqual(toolbar.workspaceSwitcher.titleOfSelectedItem, "Other")
-        XCTAssertEqual(toolbar.workspaceSwitcher.item(at: 1)?.title, "Renamed")
-        toolbar.updateWorkspaces([], selectedID: nil)
-        XCTAssertFalse(toolbar.workspaceSwitcher.isHidden)
-        XCTAssertEqual(toolbar.workspaceSwitcher.titleOfSelectedItem, "Default")
-        XCTAssertEqual(toolbar.workspaceSwitcher.numberOfItems, 1)
-    }
-
-    func testAgentStatusBadgeStaysInsideButtonTrailingEdge() async throws {
-        try await MainActor.run {
-            let button = WorkspaceStatusButtonView(
-                frame: NSRect(x: 0, y: 0, width: 98, height: 32)
-            )
-
-            button.title = "Agents"
-            button.symbolName = "sparkles"
-            button.badgeText = "3"
-
-            XCTAssertLessThanOrEqual(button.debugBadgeFrame.maxX, button.bounds.maxX)
-        }
+        XCTAssertEqual(toolbar.workspaceSwitcher.item(at: 0)?.title, "Renamed")
     }
 
     func testAccentColorAppliesToFocusedPaneAndSelectedTab() async throws {
@@ -1025,22 +980,25 @@ final class WorkspaceViewControllerTests: XCTestCase {
 
     func testDirectionalPaneFocusUsesRecencyForAmbiguousPositionMatch() async throws {
         try await MainActor.run {
-            let controller = Self.makeController()
-            let leftPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+            for showSidebar in [false, true] {
+                let controller = Self.makeController()
+                if showSidebar { controller.toggleSidebar(nil) }
+                let leftPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
 
-            controller.debugSplitFocusedPane(along: .horizontal)
-            let topRightPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
-            controller.debugSplitFocusedPane(along: .vertical)
-            let bottomRightPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+                controller.debugSplitFocusedPane(along: .horizontal)
+                let topRightPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+                controller.debugSplitFocusedPane(along: .vertical)
+                let bottomRightPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
 
-            controller.debugFocusPane(withID: leftPaneID)
-            controller.debugFocusPane(in: .right)
-            XCTAssertEqual(controller.debugFocusedPaneID, bottomRightPaneID)
+                controller.debugFocusPane(withID: leftPaneID)
+                controller.debugFocusPane(in: .right)
+                XCTAssertEqual(controller.debugFocusedPaneID, bottomRightPaneID)
 
-            controller.debugFocusPane(withID: topRightPaneID)
-            controller.debugFocusPane(withID: leftPaneID)
-            controller.debugFocusPane(in: .right)
-            XCTAssertEqual(controller.debugFocusedPaneID, topRightPaneID)
+                controller.debugFocusPane(withID: topRightPaneID)
+                controller.debugFocusPane(withID: leftPaneID)
+                controller.debugFocusPane(in: .right)
+                XCTAssertEqual(controller.debugFocusedPaneID, topRightPaneID)
+            }
         }
     }
 
@@ -1120,8 +1078,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
                     workspaceTarget: controller,
                     commandPaletteAction: #selector(AppMenuTestTarget.handleCommandPalette(_:)),
                     checkForUpdatesAction: #selector(AppMenuTestTarget.handleCheckForUpdates(_:)),
-                    settingsAction: #selector(AppMenuTestTarget.handleSettings(_:)),
-                    notesAction: #selector(AppMenuTestTarget.handleSettings(_:))
+                    settingsAction: #selector(AppMenuTestTarget.handleSettings(_:))
                 )
 
                 let event = try XCTUnwrap(NSEvent.keyEvent(
@@ -1804,12 +1761,10 @@ final class WorkspaceViewControllerTests: XCTestCase {
                 XCTAssertEqual(
                     controller.debugCommandSnapshots.map(\.id),
                     [
-                        "terminal.herdr.diagnostics", "workspace.new", "workspace.herdr.new", "workspace.remote.add", "workspace.remote.authenticate", "workspace.rename", "workspace.close", "terminal.herdr.disconnect", "terminal.herdr.reconnect",
-                "terminal.herdr.takeover", "terminal.herdr.end",
-                "pane.rename",
+                        "sidebar.toggle", "sidebar.left", "sidebar.right", "sidebar.browser", "sidebar.workspaces",
+                        "workspace.new", "workspace.rename", "workspace.close", "pane.rename",
                         "pane.split.horizontal",
                         "pane.split.vertical",
-                        "pane.notes.new",
                         "pane.browser.new",
                         "pane.browser.location",
                         "pane.browser.convert",
@@ -2250,4 +2205,319 @@ private func assertColorEqual(
     XCTAssertEqual(left?.greenComponent ?? 0, right?.greenComponent ?? 0, accuracy: accuracy, file: file, line: line)
     XCTAssertEqual(left?.blueComponent ?? 0, right?.blueComponent ?? 0, accuracy: accuracy, file: file, line: line)
     XCTAssertEqual(left?.alphaComponent ?? 0, right?.alphaComponent ?? 0, accuracy: accuracy, file: file, line: line)
+}
+
+extension WorkspaceViewControllerTests {
+    @MainActor
+    func testSidebarFocusCrossesBothSidesWithoutSelectingItsTab() throws {
+        let controller = Self.makeController()
+        let main = try XCTUnwrap(controller.debugFocusedPaneID)
+        let tab = controller.debugSelectedTabID
+        controller.toggleSidebar(nil)
+        XCTAssertEqual(controller.debugSidebarPaneIDs.count, 1)
+        XCTAssertFalse(controller.debugSidebarFocused)
+        XCTAssertEqual(controller.debugTabIDs.count, 1)
+        controller.focusLeftPane(nil)
+        XCTAssertTrue(controller.debugSidebarFocused)
+        XCTAssertEqual(controller.debugSelectedTabID, tab)
+        controller.focusRightPane(nil)
+        XCTAssertFalse(controller.debugSidebarFocused)
+        XCTAssertEqual(controller.debugFocusedPaneID, main)
+        controller.moveSidebarRight(nil)
+        let outer = try XCTUnwrap(controller.view as? WindowContentView)
+        controller.view.layoutSubtreeIfNeeded()
+        let mainFrame = outer.mainView.convert(outer.mainView.bounds, to: outer)
+        let sideFrame = outer.sidebarView.convert(outer.sidebarView.bounds, to: outer)
+        XCTAssertLessThanOrEqual(mainFrame.maxX, sideFrame.minX, "main=\(mainFrame) sidebar=\(sideFrame)")
+        controller.focusRightPane(nil)
+        XCTAssertTrue(controller.debugSidebarFocused, "main=\(mainFrame) sidebar=\(sideFrame) panes=\(controller.debugSidebarPaneIDs.map { controller.debugSidebarPane($0)!.hostView.convert(controller.debugSidebarPane($0)!.hostView.bounds, to: outer) })")
+        controller.focusLeftPane(nil)
+        XCTAssertFalse(controller.debugSidebarFocused)
+        XCTAssertEqual(controller.debugSidebarSide, .right)
+        XCTAssertTrue(controller.commandPaletteCommands.first { $0.id == "pane.focus.right" }?.isEnabled == true)
+    }
+
+    @MainActor
+    func testSidebarPaneIdentitySurvivesMainTabsWorkspacesAndVisibility() throws {
+        let controller = Self.makeController()
+        controller.toggleSidebar(nil)
+        let ids = controller.debugSidebarPaneIDs
+        let pane = try XCTUnwrap(controller.debugSidebarPane(ids[0]))
+        controller.debugNewTab()
+        controller.newWorkspace(nil)
+        XCTAssertEqual(controller.debugSidebarPaneIDs, ids)
+        XCTAssertTrue(controller.debugSidebarPane(ids[0]) === pane)
+        controller.debugFocusSidebarPane(ids[0])
+        controller.toggleSidebar(nil)
+        XCTAssertFalse(controller.debugSidebarFocused)
+        XCTAssertFalse(controller.debugSidebarVisible)
+        controller.toggleSidebar(nil)
+        XCTAssertTrue(controller.debugSidebarPane(ids[0]) === pane)
+        XCTAssertFalse(controller.debugSidebarFocused)
+        XCTAssertFalse(controller.debugWorkspaceEntries.contains { $0.reference == controller.savedWorkspace().sidebar?.tab.id })
+        controller.debugFocusSidebarPane(ids[0])
+        controller.newWorkspace(nil)
+        XCTAssertFalse(controller.debugSidebarFocused)
+        XCTAssertTrue(controller.debugSidebarPane(ids[0]) === pane)
+    }
+
+    @MainActor
+    func testSidebarPaneCommandsStayInsideTheirOwner() throws {
+        let controller = Self.makeController()
+        let mainLayout = controller.debugLayoutNode
+        controller.toggleSidebar(nil)
+        controller.debugFocusSidebarPane(try XCTUnwrap(controller.debugSidebarPaneIDs.first))
+        controller.newBrowserPane(nil)
+        XCTAssertEqual(controller.debugSidebarPaneIDs.count, 2)
+        XCTAssertTrue(controller.debugFocusedPaneIsBrowser)
+        controller.equalizePaneSplits(nil)
+        controller.movePaneDividerUp(nil)
+        controller.movePaneDown(nil)
+        XCTAssertEqual(controller.debugLayoutNode, mainLayout)
+        XCTAssertTrue(controller.savedWorkspace().sidebar?.tab.autoResize.isEmpty == true)
+        controller.closePane(nil)
+        XCTAssertEqual(controller.debugSidebarPaneIDs.count, 1)
+        XCTAssertEqual(controller.debugLayoutNode, mainLayout)
+        try controller.savedWorkspace().validate()
+    }
+
+    @MainActor
+    func testSidebarClosingLastPaneHidesAndReopensDefaults() throws {
+        let controller = Self.makeController()
+        controller.toggleSidebar(nil)
+        for id in controller.debugSidebarPaneIDs {
+            controller.debugFocusSidebarPane(id)
+            controller.closePane(nil)
+        }
+        XCTAssertFalse(controller.debugSidebarVisible)
+        XCTAssertFalse(controller.debugSidebarFocused)
+        XCTAssertEqual(controller.debugTabIDs.count, 1)
+        try controller.savedWorkspace().validate()
+        controller.toggleSidebar(nil)
+        XCTAssertEqual(controller.debugSidebarPaneIDs.count, 1)
+    }
+
+    @MainActor
+    func testSidebarSnapshotRestoresListsAndBrowserWithIndependentFocus() throws {
+        let controller = Self.makeController()
+        controller.moveSidebarRight(nil)
+        controller.addSidebarBrowser(nil)
+        let ids = controller.debugSidebarPaneIDs
+        let encoded = try JSONEncoder().encode(controller.savedWorkspace())
+        let document = try JSONDecoder().decode(SavedWorkspace.self, from: encoded)
+        XCTAssertGreaterThanOrEqual(document.sidebar?.preferredWidth ?? 0, 240)
+        XCTAssertTrue(document.sidebar?.tab.autoResize.isEmpty == true)
+        try document.validate()
+        let restored = Self.makeController()
+        try restored.restoreWorkspace(document)
+        XCTAssertEqual(restored.debugSidebarPaneIDs, ids)
+        XCTAssertTrue(restored.debugSidebarFocused)
+        XCTAssertTrue(restored.debugSidebarVisible)
+        XCTAssertEqual(restored.debugSidebarSide, .right)
+        XCTAssertTrue(restored.debugFocusedPaneIsBrowser)
+        XCTAssertEqual(restored.debugTabIDs, controller.debugTabIDs)
+        XCTAssertEqual(restored.savedWorkspace().sidebar?.tab.panes.map(\.kind), document.sidebar?.tab.panes.map(\.kind))
+    }
+
+    @MainActor
+    func testSidebarSnapshotRejectsCrossOwnerIDsAndUnsafeState() throws {
+        let controller = Self.makeController()
+        controller.toggleSidebar(nil)
+        let original = controller.savedWorkspace()
+        var invalid = original
+        invalid.sidebar?.preferredWidth = .infinity
+        XCTAssertThrowsError(try invalid.validate())
+        invalid = original
+        invalid.sidebar?.tab = try XCTUnwrap(original.tabs.first)
+        XCTAssertThrowsError(try invalid.validate())
+        invalid = original
+        invalid.sidebar?.isVisible = false
+        invalid.sidebarIsFocused = true
+        XCTAssertThrowsError(try invalid.validate())
+        invalid = original
+        invalid.version = 7
+        XCTAssertThrowsError(try invalid.validate())
+
+    }
+
+    @MainActor
+    func testHiddenSidebarIsExcludedFromDirectionalFocusAndCLI() throws {
+        let controller = Self.makeController()
+        controller.toggleSidebar(nil)
+        let tabIDs = controller.debugTabIDs
+        controller.toggleSidebar(nil)
+        controller.focusLeftPane(nil)
+        XCTAssertFalse(controller.debugSidebarFocused)
+        let response = try controller.handleCLIRequest(CLIRequest(command: "list"))
+        XCTAssertEqual(response.tabs?.map(\.id), tabIDs)
+        XCTAssertEqual(response.tabs?.flatMap(\.panes).count, 1)
+    }
+}
+
+extension WorkspaceViewControllerTests {
+    @MainActor
+    func testSidebarWidthUsesPointsAndPreservesPreferenceAfterWindowClamp() throws {
+        let view = WindowContentView(frame: NSRect(x: 0, y: 0, width: 1200, height: 800))
+        let state = WindowSidebarState()
+        state.isVisible = true
+        view.updateMinimumWidths(main: 500, sidebar: 240)
+        view.updateSidebar(state)
+        XCTAssertEqual(view.sidebarView.frame.width, 280, accuracy: 0.01)
+        view.frame.size.width = 800
+        view.needsLayout = true
+        view.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThanOrEqual(view.mainView.frame.width, 500)
+        XCTAssertGreaterThanOrEqual(view.sidebarView.frame.width, 240)
+        view.frame.size.width = 10000
+        view.needsLayout = true
+        view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(view.sidebarView.frame.width, 280, accuracy: 0.01)
+        XCTAssertEqual(state.preferredWidth, 280)
+        state.side = .right
+        view.updateSidebar(state)
+        XCTAssertEqual(view.sidebarView.frame.width, 280, accuracy: 0.01)
+        XCTAssertEqual(view.sidebarView.frame.maxY, view.mainView.frame.maxY)
+    }
+
+    @MainActor
+    func testSidebarWidthOnlyPersistsExplicitDividerChanges() throws {
+        let view = WindowContentView(frame: NSRect(x: 0, y: 0, width: 1200, height: 800))
+        let state = WindowSidebarState(); state.isVisible = true
+        view.updateSidebar(state)
+        let outer = try XCTUnwrap(view.subviews.first as? WorkspaceTilingView)
+        var widths: [CGFloat] = []
+        view.onWidthChange = { widths.append($0) }
+        outer.onFractionsChange?([], [0.3, 0.7], .layoutClamp)
+        XCTAssertTrue(widths.isEmpty)
+        outer.onFractionsChange?([], [0.3, 0.7], .userDrag)
+        XCTAssertEqual(try XCTUnwrap(widths.last), 0.3 * (1200 - AppAppearanceSettings.workspaceDividerThickness), accuracy: 0.01)
+    }
+
+    @MainActor
+    func testSidebarWorkspaceListNavigatesMainAndRejectsMissingTargets() throws {
+        let controller = Self.makeController()
+        let original = controller.debugSelectedWorkspace
+        controller.newWorkspace(nil)
+        let other = controller.debugSelectedWorkspace
+        controller.toggleSidebar(nil)
+        let id = try XCTUnwrap(controller.debugSidebarPaneIDs.first)
+        let pane = try XCTUnwrap(controller.debugSidebarPane(id) as? SidebarListPaneController)
+        controller.debugFocusSidebarPane(id)
+        pane.onSelectWorkspace?(original)
+        XCTAssertEqual(controller.debugSelectedWorkspace, original)
+        XCTAssertFalse(controller.debugSidebarFocused)
+        controller.debugFocusSidebarPane(id)
+        pane.onSelectWorkspace?(UUID())
+        XCTAssertEqual(controller.debugSelectedWorkspace, original)
+        XCTAssertTrue(controller.debugSidebarFocused)
+        pane.onSelectWorkspace?(other)
+        XCTAssertEqual(controller.debugSelectedWorkspace, other)
+        XCTAssertTrue(controller.debugSidebarPane(id) === pane)
+    }
+
+}
+
+extension WorkspaceViewControllerTests {
+    @MainActor
+    func testStalePaneAndTabTargetsCannotStealSidebarFocus() throws {
+        let controller = Self.makeController()
+        controller.toggleSidebar(nil)
+        let paneID = try XCTUnwrap(controller.debugSidebarPaneIDs.first)
+        controller.debugFocusSidebarPane(paneID)
+        controller.debugFocusPane(withID: UUID())
+        XCTAssertTrue(controller.debugSidebarFocused)
+        controller.debugSelectTab(withID: UUID())
+        XCTAssertTrue(controller.debugSidebarFocused)
+        controller.selectLocalWorkspace(UUID())
+        XCTAssertTrue(controller.debugSidebarFocused)
+        XCTAssertEqual(controller.debugSidebarFocusedPaneID, paneID)
+    }
+}
+
+extension WorkspaceViewControllerTests {
+    @MainActor
+    func testSidebarRestoresCanonicalFractionsBeforeWindowHasGeometry() throws {
+        let original = Self.makeController()
+        original.toggleSidebar(nil)
+        original.addSidebarWorkspaces(nil)
+        var saved = original.savedWorkspace()
+        let ids = original.debugSidebarPaneIDs
+        let layout = LayoutNode.split(axis: .vertical, children: ids.map { .panel($0) }, fractions: [0.8, 0.2])
+        saved.sidebar?.tab.layout = layout
+        let restored = WorkspaceViewController()
+        restored.loadViewIfNeeded()
+        try restored.restoreWorkspace(saved)
+        XCTAssertEqual(restored.savedWorkspace().sidebar?.tab.layout, layout)
+        restored.view.frame = NSRect(x: 0, y: 0, width: 1200, height: 800)
+        restored.view.needsLayout = true
+        restored.view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(restored.savedWorkspace().sidebar?.tab.layout, layout)
+        let outer = try XCTUnwrap(restored.view as? WindowContentView)
+        XCTAssertEqual(outer.sidebarView.paneViews.count, 2)
+        restored.view.frame.size.height = 350
+        restored.view.needsLayout = true
+        restored.view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(restored.savedWorkspace().sidebar?.tab.layout, layout)
+        restored.view.frame.size.height = 1000
+        restored.view.needsLayout = true
+        restored.view.layoutSubtreeIfNeeded()
+        XCTAssertEqual(restored.savedWorkspace().sidebar?.tab.layout, layout)
+        let top = try XCTUnwrap(restored.debugSidebarPane(ids[0]))
+        XCTAssertEqual(top.hostView.frame.height / (1000 - AppAppearanceSettings.workspaceDividerThickness), 0.8, accuracy: 0.01)
+    }
+}
+
+extension WorkspaceViewControllerTests {
+    @MainActor
+    func testSidebarOuterDividerDragUpdatesSnapshotAndHonorsMainMinimum() throws {
+        let controller = Self.makeController()
+        controller.toggleSidebar(nil)
+        let windowView = try XCTUnwrap(controller.view as? WindowContentView)
+        let outer = try XCTUnwrap(windowView.subviews.first as? WorkspaceTilingView)
+        outer.debugApplyDragForDivider(at: [], dividerIndex: 0, location: NSPoint(x: 400, y: 400))
+        XCTAssertGreaterThan(windowView.sidebarView.frame.width, 280)
+        XCTAssertEqual(try XCTUnwrap(controller.savedWorkspace().sidebar?.preferredWidth), windowView.sidebarView.frame.width, accuracy: 0.01)
+        controller.debugSplitFocusedPane(along: .horizontal)
+        controller.view.layoutSubtreeIfNeeded()
+        outer.debugApplyDragForDivider(at: [], dividerIndex: 0, location: NSPoint(x: 1150, y: 400))
+        let minimum = try XCTUnwrap(controller.debugLayoutNode).minimumSize().width + AppAppearanceSettings.workspaceEdgePadding * 2
+        XCTAssertGreaterThanOrEqual(windowView.mainView.frame.width + 0.01, minimum)
+        XCTAssertEqual(try XCTUnwrap(controller.savedWorkspace().sidebar?.preferredWidth), windowView.sidebarView.frame.width, accuracy: 0.01)
+        try controller.savedWorkspace().validate()
+    }
+}
+
+extension WorkspaceViewControllerTests {
+    @MainActor
+    func testSidebarWorkspaceListKeyboardSelectionTracksStableIdentity() throws {
+        let controller = Self.makeController()
+        controller.toggleSidebar(nil)
+        let pane = try XCTUnwrap(controller.debugSidebarPane(try XCTUnwrap(controller.debugSidebarPaneIDs.first)) as? SidebarListPaneController)
+        let first = WorkspaceEntry(reference: UUID(), name: "First")
+        let second = WorkspaceEntry(reference: UUID(), name: "Second")
+        var selected: [UUID] = []
+        var cancelled = false
+        pane.onSelectWorkspace = { selected.append($0) }
+        pane.onCancel = { cancelled = true }
+        func key(_ code: UInt16) throws {
+            let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                timestamp: 0, windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "",
+                isARepeat: false, keyCode: code))
+            pane.focusTargetView.keyDown(with: event)
+        }
+        pane.update(entries: [first, second], selected: first.reference)
+        try key(125); try key(36)
+        XCTAssertEqual(selected, [second.reference])
+        pane.update(entries: [first, second], selected: first.reference)
+        try key(36)
+        XCTAssertEqual(selected.last, second.reference)
+        pane.update(entries: [first], selected: first.reference)
+        try key(36)
+        XCTAssertEqual(selected.last, first.reference)
+        pane.update(entries: [], selected: nil)
+        try key(125); try key(126); try key(36)
+        XCTAssertEqual(selected.count, 3)
+        try key(53)
+        XCTAssertTrue(cancelled)
+    }
 }

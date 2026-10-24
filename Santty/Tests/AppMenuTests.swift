@@ -16,7 +16,6 @@ final class AppMenuTests: XCTestCase {
             NSApp.mainMenu = previousMainMenu
             NSApp.windowsMenu = previousWindowsMenu
         }
-        XCTAssertFalse(action.isGlobal)
         XCTAssertEqual(action.defaultShortcut, .init(.m, modifiers: [.command, .option]))
         KeyboardShortcuts.setShortcut(.init(.m, modifiers: [.command, .shift]), for: shortcutName)
         let target = AppDelegate()
@@ -24,8 +23,7 @@ final class AppMenuTests: XCTestCase {
             applicationTarget: target, workspaceTarget: NSObject(),
             commandPaletteAction: #selector(NSObject.description),
             checkForUpdatesAction: #selector(NSObject.description),
-            settingsAction: #selector(NSObject.description),
-            notesAction: #selector(NSObject.description)
+            settingsAction: #selector(NSObject.description)
         )
         let item = try XCTUnwrap(NSApp.windowsMenu?.item(withTitle: action.title))
         XCTAssertTrue(item.target === target)
@@ -49,42 +47,18 @@ final class AppMenuTests: XCTestCase {
             workspaceTarget: workspace,
             commandPaletteAction: #selector(NSObject.description),
             checkForUpdatesAction: #selector(NSObject.description),
-            settingsAction: #selector(NSObject.description),
-            notesAction: #selector(NSObject.description)
+            settingsAction: #selector(NSObject.description)
         )
 
         let mainMenu = try XCTUnwrap(NSApp.mainMenu)
-        let applicationMenu = try XCTUnwrap(mainMenu.items.first?.submenu)
-        let notesItem = try XCTUnwrap(applicationMenu.item(withTitle: "Notes"))
-        XCTAssertTrue(notesItem.target === target)
-        XCTAssertEqual(notesItem.keyEquivalent, "")
         let paneMenu = try XCTUnwrap(mainMenu.items.first { $0.submenu?.title == "Pane" }?.submenu)
-        XCTAssertNil(paneMenu.item(withTitle: "Herdr Connection Settings..."))
-        XCTAssertNil(paneMenu.item(withTitle: "Enter Herdr Mode…"))
-        XCTAssertNil(paneMenu.item(withTitle: "New Persistent Terminal"))
-        for selector in [#selector(WorkspaceViewController.disconnectPersistentTerminal(_:)),
-                         #selector(WorkspaceViewController.takeOverPersistentTerminal(_:)),
-                         #selector(WorkspaceViewController.endPersistentTerminal(_:))] {
-            XCTAssertFalse(paneMenu.items.contains { $0.action == selector })
-        }
-        let reconnect = try XCTUnwrap(paneMenu.item(withTitle: "Reconnect Herdr Window"))
-        XCTAssertEqual(reconnect.action, #selector(WorkspaceViewController.reconnectPersistentTerminal(_:)))
-        XCTAssertTrue(paneMenu.delegate === workspace)
-        XCTAssertTrue(reconnect.isHidden)
-        reconnect.isHidden = false
-        paneMenu.delegate?.menuNeedsUpdate?(paneMenu)
-        XCTAssertTrue(reconnect.isHidden, "Local workspaces have no Herdr window to reconnect")
-        XCTAssertFalse(KeybindingAction.allCases.contains { $0.commandID == "terminal.herdr.new" })
-        XCTAssertEqual(paneMenu.item(withTitle: "New Herdr Workspace")?.action,
-            #selector(WorkspaceViewController.newHerdrWorkspace(_:)))
-        XCTAssertNil(KeybindingAction.newHerdrWorkspace.defaultShortcut)
         XCTAssertEqual(paneMenu.item(withTitle: "New Workspace")?.action,
             #selector(WorkspaceViewController.newWorkspace(_:)))
         XCTAssertNil(KeybindingAction.newWorkspace.defaultShortcut)
-        XCTAssertNil(paneMenu.item(withTitle: "Close Herdr Workspace"))
         XCTAssertEqual(paneMenu.item(withTitle: "Close Workspace")?.action,
             #selector(WorkspaceViewController.closeWorkspace(_:)))
         XCTAssertNil(KeybindingAction.closeWorkspace.defaultShortcut)
+        XCTAssertEqual(KeybindingAction.closeWorkspace.rawValue, "closeWorkspace")
         XCTAssertEqual(paneMenu.item(withTitle: "Rename Workspace")?.action,
             #selector(WorkspaceViewController.renameWorkspace(_:)))
         XCTAssertNil(KeybindingAction.renameWorkspace.defaultShortcut)

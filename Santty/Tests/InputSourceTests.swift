@@ -260,21 +260,6 @@ final class InputSourceTests: XCTestCase {
     }
 
     @MainActor
-    func testHerdrPaneUsesServerProcessInformation() async throws {
-        let service = HerdrWorkspaceTests.Service()
-        try await service.start("capabilities")
-        defer { service.stop() }
-        let runtime = try await HerdrWorkspaceClient(endpoint: service.endpoint).create()
-        let pane = TerminalPaneController(herdr: try HerdrPaneBinding(endpoint: service.endpoint, pane: runtime))
-        defer { pane.disconnectHerdr() }
-        let foreground = try await pane.inputSourceForeground()
-        XCTAssertEqual(foreground.groupID, 12345)
-        XCTAssertEqual(foreground.processes.map(\.id), pane.herdrProcessInfo?.foreground_processes?.map(\.pid))
-        XCTAssertFalse(foreground.processes.isEmpty)
-        XCTAssertEqual(foreground.processes.first?.command, pane.herdrProcessInfo?.foreground_processes?.first?.cmdline)
-    }
-
-    @MainActor
     func testLateQueryCannotApplyToAnotherPaneAndQueriesDoNotOverlap() async throws {
         let harness = Harness()
         defer { harness.coordinator.stop() }

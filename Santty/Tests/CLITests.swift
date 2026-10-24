@@ -6,6 +6,22 @@ import XCTest
 
 final class CLITests: XCTestCase {
     @MainActor
+    func testInstanceDiscoveryUsesLiveHintOrUniqueCandidateAndRejectsAmbiguity() throws {
+        func probe(_ path: String) throws -> CLIResponse {
+            if path == "stale" { throw CLIError("Socket closed") }
+            return CLIResponse(tabs: [])
+        }
+        XCTAssertEqual(try CLIInstanceDiscovery.resolve(explicit: "chosen", inherited: nil, candidates: []) { _ in
+            XCTFail("An explicit socket must not probe other instances")
+            return CLIResponse()
+        }, "chosen")
+        XCTAssertEqual(try CLIInstanceDiscovery.resolve(explicit: nil, inherited: "live", candidates: ["other"], probe: probe), "live")
+        XCTAssertEqual(try CLIInstanceDiscovery.resolve(explicit: nil, inherited: "stale", candidates: ["live"], probe: probe), "live")
+        XCTAssertThrowsError(try CLIInstanceDiscovery.resolve(explicit: nil, inherited: "stale", candidates: ["first", "second"], probe: probe))
+        XCTAssertThrowsError(try CLIInstanceDiscovery.resolve(explicit: nil, inherited: "stale", candidates: [], probe: probe))
+    }
+
+    @MainActor
     func testPaneNamesStaySeparateFromTitlesAndSurvivePanePresentationChanges() throws {
         let workspace = WorkspaceViewController()
         workspace.debugLoadForTesting()

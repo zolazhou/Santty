@@ -61,10 +61,6 @@ let project = Project(
             url: "https://github.com/sparkle-project/Sparkle",
             requirement: .upToNextMajor(from: "2.8.0")
         ),
-        .remote(
-            url: "https://github.com/swiftlang/swift-markdown",
-            requirement: .exact("0.9.0")
-        ),
     ],
     settings: .settings(
         base: [
@@ -103,7 +99,6 @@ let project = Project(
                 .package(product: "GhosttyTerminal"),
                 .package(product: "KeyboardShortcuts"),
                 .package(product: "Sparkle"),
-                .package(product: "Markdown"),
                 .sdk(name: "AppKit", type: .framework),
                 .sdk(name: "CoreGraphics", type: .framework),
                 .sdk(name: "CoreText", type: .framework),
@@ -113,7 +108,6 @@ let project = Project(
                 .sdk(name: "MetalKit", type: .framework),
                 .sdk(name: "IOKit", type: .framework),
                 .sdk(name: "Carbon", type: .framework),
-                .sdk(name: "UserNotifications", type: .framework),
             ],
             settings: .settings(
                 base: [

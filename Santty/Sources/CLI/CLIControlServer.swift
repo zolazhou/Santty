@@ -79,11 +79,10 @@ final class CLIControlServer {
                                 throw CLIError(
                                     "CLI access is disabled or the workspace is unavailable.")
                             }
-                            response = try await workspace.handleCLIRequestAsync(request)
+                            response = try workspace.handleCLIRequest(request)
                             if var tabs = response.tabs {
                                 for t in tabs.indices {
                                     for p in tabs[t].panes.indices {
-                                        guard tabs[t].panes[p].backend != "herdr" else { continue }
                                         let group = tabs[t].panes[p].foregroundProcessGroupID
                                         tabs[t].panes[p].processes =
                                             processes

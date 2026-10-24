@@ -87,8 +87,7 @@ enum AppMenu {
         workspaceTarget: AnyObject,
         commandPaletteAction: Selector,
         checkForUpdatesAction: Selector,
-        settingsAction: Selector,
-        notesAction: Selector
+        settingsAction: Selector
     ) {
         let mainMenu = NSMenu()
         NSApp.mainMenu = mainMenu
@@ -98,8 +97,7 @@ enum AppMenu {
                 target: applicationTarget,
                 commandPaletteAction: commandPaletteAction,
                 checkForUpdatesAction: checkForUpdatesAction,
-                settingsAction: settingsAction,
-                notesAction: notesAction
+                settingsAction: settingsAction
             )
         )
         mainMenu.addItem(makeEditMenuItem())
@@ -112,8 +110,7 @@ enum AppMenu {
         target: AnyObject,
         commandPaletteAction: Selector,
         checkForUpdatesAction: Selector,
-        settingsAction: Selector,
-        notesAction: Selector
+        settingsAction: Selector
     ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Santty")
@@ -126,10 +123,6 @@ enum AppMenu {
         )
         commandPaletteItem.target = target
         commandPaletteItem.keyEquivalentModifierMask = [.command]
-
-        // The global hotkey owns keyboard dispatch; the menu is a click-only entry.
-        let notesItem = menu.addItem(withTitle: "Notes", action: notesAction, keyEquivalent: "")
-        notesItem.target = target
 
         menu.addItem(.separator())
 
@@ -189,18 +182,22 @@ enum AppMenu {
         item.submenu = menu
         menu.delegate = target as? NSMenuDelegate
 
-        let diagnosticsItem = menu.addItem(withTitle: "Herdr Diagnostics...", action: #selector(WorkspaceViewController.showPersistentDiagnostics(_:)), keyEquivalent: "")
-        diagnosticsItem.target = target
+        addKeybindingMenuItem(to: menu, action: .toggleSidebar, selector: #selector(WorkspaceViewController.toggleSidebar(_:)), target: target)
+        let sidebarMenu = NSMenu(title: "Sidebar")
+        let sidebarItem = menu.addItem(withTitle: "Sidebar", action: nil, keyEquivalent: "")
+        sidebarItem.submenu = sidebarMenu
+        for (title, action) in [
+            ("Move Left", #selector(WorkspaceViewController.moveSidebarLeft(_:))),
+            ("Move Right", #selector(WorkspaceViewController.moveSidebarRight(_:))),
+            ("Add Browser", #selector(WorkspaceViewController.addSidebarBrowser(_:))),
+            ("Add Workspaces", #selector(WorkspaceViewController.addSidebarWorkspaces(_:)))
+        ] {
+            sidebarMenu.addItem(withTitle: title, action: action, keyEquivalent: "").target = target
+        }
+        menu.addItem(.separator())
         addKeybindingMenuItem(to: menu, action: .newWorkspace, selector: #selector(WorkspaceViewController.newWorkspace(_:)), target: target)
-        addKeybindingMenuItem(to: menu, action: .newHerdrWorkspace, selector: #selector(WorkspaceViewController.newHerdrWorkspace(_:)), target: target)
-        let remoteItem = menu.addItem(withTitle: "Add Remote Herdr Machine...", action: #selector(WorkspaceViewController.addRemoteHerdrMachine(_:)), keyEquivalent: "")
-        remoteItem.target = target
-        let authenticateItem = menu.addItem(withTitle: "Authenticate Remote Herdr Machine...", action: #selector(WorkspaceViewController.authenticateRemoteHerdrMachine(_:)), keyEquivalent: "")
-        authenticateItem.target = target
         addKeybindingMenuItem(to: menu, action: .renameWorkspace, selector: #selector(WorkspaceViewController.renameWorkspace(_:)), target: target)
         addKeybindingMenuItem(to: menu, action: .closeWorkspace, selector: #selector(WorkspaceViewController.closeWorkspace(_:)), target: target)
-        let reconnectItem = addKeybindingMenuItem(to: menu, action: .reconnectPersistentTerminal, selector: #selector(WorkspaceViewController.reconnectPersistentTerminal(_:)), target: target)
-        reconnectItem.isHidden = true
         menu.addItem(.separator())
         let renameItem = menu.addItem(
             withTitle: "Rename Pane...",
@@ -225,13 +222,6 @@ enum AppMenu {
         )
 
         menu.addItem(.separator())
-
-        addKeybindingMenuItem(
-            to: menu,
-            action: .newNotesPane,
-            selector: #selector(WorkspaceViewController.newNotesPane(_:)),
-            target: target
-        )
 
         addKeybindingMenuItem(
             to: menu,

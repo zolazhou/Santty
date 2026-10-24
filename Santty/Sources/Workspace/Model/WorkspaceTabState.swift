@@ -14,20 +14,6 @@ final class WorkspaceTabState {
     var paneAutoResizeConfigurations: [PaneID: PaneAutoResizeConfiguration]
     var focusedPaneID: PaneID?
     var customTitle: String?
-    var herdrTabBinding: HerdrPaneBinding?
-    var herdrBackendTitle: String?
-    var herdrZoomed = false
-    var herdrBackendLayout: LayoutNode?
-    var herdrLocalLayout: LayoutNode?
-    var herdrLocalFraction: CGFloat = 0.7
-    var herdrFocusedPaneID: PaneID?
-    struct SplitEdit {
-        let id = UUID()
-        let fractions: [CGFloat]
-        let paneIDs: [PaneID]
-        var acknowledged = false
-    }
-    var herdrSplitEdits: [[LayoutPathComponent]: SplitEdit] = [:]
     private var recentlyFocusedPaneIDs: [PaneID]
     var activeAutoZoomState: ActiveAutoZoomState?
     var activeFloatingPaneState: ActiveFloatingPaneState?
@@ -56,37 +42,6 @@ final class WorkspaceTabState {
         self.activeFloatingPaneState = activeFloatingPaneState
     }
 
-    func makeProjectionCandidate() -> WorkspaceTabState {
-        let candidate = WorkspaceTabState(id: id, layoutNode: nil, paneControllers: [:],
-            paneAutoResizeConfigurations: [:], focusedPaneID: nil)
-        candidate.applyProjectionCandidate(self)
-        return candidate
-    }
-
-    // Preserve the installed object for outstanding presentation callbacks.
-    func applyProjectionCandidate(_ candidate: WorkspaceTabState) {
-        precondition(id == candidate.id)
-        layoutNode = candidate.layoutNode
-        paneControllers = candidate.paneControllers
-        paneAutoResizeConfigurations = candidate.paneAutoResizeConfigurations
-        focusedPaneID = candidate.focusedPaneID
-        customTitle = candidate.customTitle
-        herdrTabBinding = candidate.herdrTabBinding
-        herdrBackendTitle = candidate.herdrBackendTitle
-        herdrZoomed = candidate.herdrZoomed
-        herdrBackendLayout = candidate.herdrBackendLayout
-        herdrLocalLayout = candidate.herdrLocalLayout
-        herdrLocalFraction = candidate.herdrLocalFraction
-        herdrFocusedPaneID = candidate.herdrFocusedPaneID
-        herdrSplitEdits = candidate.herdrSplitEdits
-        recentlyFocusedPaneIDs = candidate.recentlyFocusedPaneIDs
-        activeAutoZoomState = candidate.activeAutoZoomState
-        activeFloatingPaneState = candidate.activeFloatingPaneState
-        detachedPaneIDs = candidate.detachedPaneIDs
-        activeDetachedPaneID = candidate.activeDetachedPaneID
-        floatingPaneSizes = candidate.floatingPaneSizes
-    }
-
     var focusedPaneController: (any PaneControlling)? {
         guard let focusedPaneID else {
             return nil
@@ -104,7 +59,6 @@ final class WorkspaceTabState {
             return customTitle
         }
 
-        if let herdrBackendTitle { return herdrBackendTitle }
         if let focusedTitle = focusedPaneController?.displayTitle {
             return focusedTitle
         }
@@ -126,19 +80,6 @@ final class WorkspaceTabState {
         recentlyFocusedPaneIDs.firstIndex(of: paneID)
     }
 
-    func remapPresentationPaneIDs(_ replacements: [PaneID: PaneID]) {
-        guard !replacements.isEmpty else { return }
-        func mapped(_ id: PaneID) -> PaneID { replacements[id] ?? id }
-        focusedPaneID = focusedPaneID.map(mapped)
-        herdrFocusedPaneID = herdrFocusedPaneID.map(mapped)
-        recentlyFocusedPaneIDs = recentlyFocusedPaneIDs.map(mapped)
-        detachedPaneIDs = detachedPaneIDs.map(mapped)
-        activeDetachedPaneID = activeDetachedPaneID.map(mapped)
-        activeFloatingPaneState = activeFloatingPaneState.map { .init(paneID: mapped($0.paneID), size: $0.size) }
-        paneAutoResizeConfigurations = Dictionary(uniqueKeysWithValues: paneAutoResizeConfigurations.map { (mapped($0.key), $0.value) })
-        floatingPaneSizes = Dictionary(uniqueKeysWithValues: floatingPaneSizes.map { (mapped($0.key), $0.value) })
-    }
-
     func isPaneDetached(_ paneID: PaneID) -> Bool {
         detachedPaneIDs.contains(paneID)
     }
@@ -149,29 +90,6 @@ final class WorkspaceTabState {
 
     var tiledPaneIDsInTraversalOrder: [PaneID] {
         (layoutNode?.paneIDsInTraversalOrder ?? []).filter { !isPaneDetached($0) }
-    }
-
-    func composeHerdrLayout() {
-        guard let backend = herdrBackendLayout else { return }
-        layoutNode = combinedHerdrLayout(backend: previewHerdrLayout(backend))
-    }
-
-    func previewHerdrLayout(_ backend: LayoutNode) -> LayoutNode {
-        var preview = backend
-        for (path, edit) in herdrSplitEdits where backend.node(at: path)?.paneIDsInTraversalOrder == edit.paneIDs {
-            preview = preview.replacingFractions(at: path, with: edit.fractions) ?? preview
-        }
-        return preview
-    }
-
-    func combinedHerdrLayout(backend: LayoutNode) -> LayoutNode {
-        guard let local = herdrLocalLayout else { return backend }
-        return .split(axis: .horizontal, children: [backend, local], fractions: [herdrLocalFraction, 1 - herdrLocalFraction])
-    }
-
-    var renderedLayout: LayoutNode? {
-        guard herdrZoomed, let backend = herdrBackendLayout, let focused = herdrFocusedPaneID else { return layoutNode }
-        return combinedHerdrLayout(backend: backend.path(to: focused) == nil ? previewHerdrLayout(backend) : .panel(focused))
     }
 
     var lastFocusedTiledPaneID: PaneID? {

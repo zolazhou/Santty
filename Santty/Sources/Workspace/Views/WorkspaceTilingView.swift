@@ -192,7 +192,6 @@ enum TilingFractionChangeSource: Equatable {
 final class WorkspaceTilingView: NSView {
     var onFractionsChange:
         (([LayoutPathComponent], [CGFloat], TilingFractionChangeSource) -> Void)?
-    var commitsDividerChangesOnMouseUp = false
     private(set) var isDraggingDivider = false
 
     private var layoutNode: LayoutNode?
@@ -489,15 +488,9 @@ final class WorkspaceTilingView: NSView {
 
         animationGeneration += 1
 
-        guard case .split(_, _, let originalFractions)? = layoutNode?.node(at: hitDivider.splitPath) else { return }
+        guard case .split? = layoutNode?.node(at: hitDivider.splitPath) else { return }
         isDraggingDivider = true
-        defer {
-            isDraggingDivider = false
-            if commitsDividerChangesOnMouseUp,
-               case .split(_, _, let fractions)? = layoutNode?.node(at: hitDivider.splitPath), fractions != originalFractions {
-                onFractionsChange?(hitDivider.splitPath, fractions, .userDrag)
-            }
-        }
+        defer { isDraggingDivider = false }
 
         while let nextEvent = window?.nextEvent(
             matching: [.leftMouseDragged, .leftMouseUp]
@@ -554,9 +547,7 @@ final class WorkspaceTilingView: NSView {
             )
             currentLayout = layout
             applyPaneFrames(layout)
-            if !commitsDividerChangesOnMouseUp || !isDraggingDivider {
-                onFractionsChange?(splitPath, newFractions, .userDrag)
-            }
+            onFractionsChange?(splitPath, newFractions, .userDrag)
         }
     }
 

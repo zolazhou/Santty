@@ -59,13 +59,13 @@ final class WorkspaceStore: @unchecked Sendable {
                         lastWritten = data
                         continuation.resume(returning: .init(workspace: document, warning: canWrite ? nil : "Another Santty instance owns workspace saving; this instance restores read-only"))
                     } catch {
-                        // A future format is never replaced by an older backup from this app version.
+                        // An unsupported format must not be replaced by a backup from this version.
                         if let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
                            attributes[.type] as? FileAttributeType == .typeRegular,
                            ((attributes[.size] as? NSNumber)?.intValue ?? Int.max) <= Self.maximumBytes,
                            let data = try? Data(contentsOf: url),
                            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                           let version = json["version"] as? Int, !(1...SavedWorkspace.currentVersion).contains(version) { throw error }
+                           let version = json["version"] as? Int, version != SavedWorkspace.currentVersion { throw error }
                         let (document, _) = try decode(backupURL)
                         continuation.resume(returning: .init(workspace: document, warning: "Recovered workspace from backup; the primary file is damaged or missing"))
                     }

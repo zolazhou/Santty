@@ -51,55 +51,27 @@ pane rules. The palette uses the shared English input source; closing it applies
 the destination pane's rule, or restores the source used before opening it.
 Both features start disabled. Sources must be enabled in macOS System Settings.
 Selecting an input source does not reset a third-party IME's internal Chinese /
-English mode. Ordinary SSH and tmux sessions expose only the local foreground
-program; Herdr panes use the server's foreground process information.
+English mode. SSH and tmux sessions expose only the local foreground program.
 
-## Notes
+## Window Sidebar
 
-Press **Control-Option-N** from any app to open Notes. The shortcut focuses an
-already-visible note, or saves and hides it when Notes has keyboard focus.
-You can also use **Santty → Notes** or **Notes** in the command palette.
-Customize the global shortcut in **Settings → Keybindings → Application**.
-Double-click the shortcut to record a replacement, press Delete while recording
-to clear it, or right-click its displayed value and choose **Reset to Default**.
+Use **Pane → Toggle Sidebar** or **Show Sidebar** in the command palette to open
+this window's fixed tool area. It starts on the left with the Workspaces list.
+**Pane → Sidebar** adds Browser or Workspaces,
+and moves the area to either side. Drag its outer divider to change its width;
+its internal panes use the same split layout as the main workspace.
 
-Notes uses a native TextKit 2 editor with live Markdown styling, links, lists,
-code blocks, and clickable `- [ ]` / `- [x]` task checkboxes. Markdown markers
-appear when editing the corresponding text. Standard copy, paste, undo, redo,
-spelling, grammar, and system Writing Tools are supported where available.
-Parsing uses `swift-markdown`; Santty owns the text styling and TextKit 2 block
-decorations. The editor shares SwiftUI's single scrolling viewport. On macOS 26
-and later, the header and footer use `safeAreaBar` with the system's soft scroll
-edge effect.
-Syntax outside the formatting toolbar's supported set remains editable source.
-Press **Command-Shift-P** to open or close the note browser. Use **Control-P** /
-**Control-N** or the arrow keys to select a note, then Return to open it.
+The sidebar has one internal tab and never appears in the workspace picker or
+main tab strip. Switching workspaces keeps its content and layout. Directional
+**Focus Left / Right / Above / Below Pane** commands cross between the sidebar
+and the main area; Next/Previous Pane stays inside the current area. Pane actions
+operate on the focused area, while Tab and Workspace actions target the main
+area. Terminal splitting, floating and detaching remain main-area actions.
 
-Use **Pane → Open Notes in Pane** or the command palette to open Notes beside
-another pane. Multiple Notes panes can coexist with the standalone Notes window;
-each selects its own note and keeps its own cursor and scroll position. Notes
-panes remain visible when focus changes and support the usual pane layout controls.
-
-The standalone Notes window hides when it loses focus. Click the pin button to keep it visible above
-other apps; use this mode with external correction tools that activate their
-own windows. Escape, Command-W, or the close button saves and hides Notes.
-Input-method composition and active Writing Tools sessions take precedence.
-Hiding preserves the editor's selection, scroll position, and undo history.
-
-Each note is a separate UTF-8 `.md` file, saved after a short typing pause and
-before switching, closing, or quitting. Release builds use
-`~/Library/Application Support/Santty/Notes/`; Debug builds use
-`~/Library/Application Support/Santty-Dev/Notes/`. An existing `note.md` is kept.
-Read failures disable
-editing to protect the existing file; write failures preserve the in-memory note
-and provide a retry action. Unsaved changes prevent a normal quit until saving
-succeeds or quitting is cancelled. Window geometry and pin state are local.
-The standalone Notes window stays hidden on launch and is available while Santty
-is running. Notes watches both the current file and its directory: saved changes
-from another pane, the window, or an external editor refresh idle views. External
-updates clear the affected editor's undo history. If local changes are unsaved,
-or the file is deleted, Notes retains the text and pauses saving until you choose
-**Use File Version** or **Overwrite File**. Simultaneous edits are not merged.
+Hiding the sidebar preserves its content. Closing its final pane hides it;
+opening an empty sidebar restores the Workspaces list. Position, preferred
+width, pane layout and Browser URLs restore with the window.
+Set an optional Toggle Sidebar shortcut in **Settings → Keybindings**.
 
 ## Scroll Mode (Experimental)
 
@@ -140,39 +112,32 @@ Use **Pane → Rename Pane...** or **Rename Pane** in the command palette to nam
 the focused terminal or browser pane. Leave the field empty to remove its name.
 Names stay hidden until Command is held alone for 350 ms, then appear as overlays
 on named panes in the current tab. Releasing Command, using a shortcut or mouse
-action, or leaving the window hides them without resizing the content. In Herdr workspaces, pane names follow backend labels, including external renames and name removal.
+action, or leaving the window hides them without resizing the content.
 
-## Persistent Terminals with Herdr (Experimental)
+## Local Workspaces
 
-The command palette also searches workspaces, tabs and panes across local and discovered Herdr workspaces. Use the **All / Workspace / Tab / Pane / Command** filters, or type a name and its workspace (for example, `Santty logs`). Results show their owning workspace/tab and mark the current selection. Empty All searches show workspaces, current-workspace tabs and commands; the Pane filter lists panes, including Notes, Browser, floating and hidden content. Choosing a target switches its workspace and focuses it after the matching ClientShell layout is ready. Searching does not attach terminals or start Herdr. The palette keeps the search and selected result while metadata updates; deleted targets and changed connections are rejected with a non-modal navigation status.
+Use the workspace picker or command palette to switch between local workspaces.
+**New Workspace** creates an independent set of tabs and pane layouts; terminal
+sessions keep running when you switch away. **Rename Workspace**, **Rename Tab**
+and **Close Workspace** are available in menus and the command palette. Closing
+a workspace asks for confirmation and ends its local terminal processes. Closing
+the last workspace creates a fresh Default workspace.
 
-The bottom-left workspace picker presents **Local Workspace**, **Herdr Workspace**, and **Remote Herdr Workspace** together. Santty opens local content immediately and discovers local Herdr workspaces and enabled saved SSH machines in the background. **New Workspace** creates a local workspace with its own tabs and pane layouts, named Workspace 1, Workspace 2, and so on. Switch between all three workspace types in the picker or command palette; local terminal sessions keep running while another workspace is displayed. **Rename Workspace** changes the selected local or Herdr workspace name; **Rename Tab** changes the selected tab title (leave it empty for an automatic title). Both commands are in the command palette and menus, with configurable shortcuts. Local workspace names, layouts and the last selected local workspace are saved and restored. Workspace types use distinct icons; remote entries also show their machine label. Workspace, tab and pane IDs are scoped to their endpoint, so identical server IDs on different machines remain separate.
+The command palette searches workspace, tab and pane names with **All / Workspace /
+Tab / Pane / Command** filters. Pane results include Browser, floating and
+hidden content. Choosing a result switches workspace and focuses its target;
+stale results report a navigation status without changing selection.
 
-Configure the executable, session and API socket in **Settings → General → Herdr Workspaces**. **Apply and Refresh Workspaces** validates and saves the settings, then refreshes discovery. Changing the local connection returns local Herdr views to the last selected local workspace. Select an installed compatible Herdr executable and the absolute API socket path of an already running service (protocol 22). The executable suggestion checks `~/.local/bin/herdr`, `/opt/homebrew/bin/herdr` and `/usr/local/bin/herdr`; it does not depend on the launching shell’s PATH. The existing session name is descriptive; the explicit socket routes both management and terminal clients. ClientShell is the only terminal transport. Local terminal and management connections use sockets; its endpoint protocol is negotiated separately, while management queries require API protocol 22. Local connections attach to an existing service. Remote connections use the native `remote-client-bridge` over OpenSSH stdio, with `remote-api-bridge` for management queries. The native remote bridge may start the server from an existing compatible installation; background connections do not install, upgrade, replace or stop it. An unavailable source leaves local workspaces usable.
+Workspaces, selected tabs, pane names, layouts, floating/hidden panes, Browser URLs,
+the window sidebar are saved to
+`~/Library/Application Support/Santty/Workspace/workspace.json`. Saves are atomic,
+keep a previous valid backup, and allow one writer per file. Other instances restore
+read-only. Previous local shells restore as placeholders with **Start New Local
+Terminal**; previous commands are never replayed. A declined save error keeps the workspace open.
 
-Use **Pane → Add Remote Herdr Machine...** to run `herdr machine add` in a local terminal. Herdr handles SSH authentication, remote session discovery, and installation/replacement confirmations. Existing profiles from `herdr machine list --json` appear automatically; one profile targets one remote session. **Pane → Authenticate Remote Herdr Machine...** runs `herdr machine reconnect` for a saved profile. SSH config, ssh-agent, host-key checks, and Herdr's scoped shared authentication connection are reused; Santty stores no passwords or private keys. Removing or disabling a profile disconnects its source and leaves its server processes running.
-
-Remote interruptions retain the last displayed scene with input disabled. Connections use native health checks, compression and exponential retry delays up to two minutes. A reconnect cannot take selection away from another workspace, and an operation with an unknown result is never replayed. You can return to a local workspace while a remote switch or reconnect is pending. See [the remote implementation and verification notes](docs/plans/remote-herdr-workspaces.md).
-
-Tabs, panes, binary splits, proportions and backend zoom follow the selected Herdr workspace. Focus and divider drags synchronize with Herdr, with each client keeping its own selection. Notes and Browser panes remain available in a local area beside the backend terminal tree. Local panes support splitting, rearrangement, floating, hiding and automatic focus resizing. Floating a Herdr terminal creates an idle placeholder in its original layout and moves the same running terminal into a separate backend tab. A second native ClientShell connection sizes that tab independently; Santty hides the helper tab from its tab strip and search, while other Herdr clients can see it. Returning the terminal restores its original slot and closes the placeholder. Hidden terminals keep their existing backend grid. Workspace switches preserve local auxiliary panes with their Herdr workspace, including when returning to a local workspace. If a backend tab disappears, its auxiliary panes are recovered into the last selected local workspace. Focusing local content does not send terminal focus commands; returning to a terminal synchronizes focus. **New Herdr Workspace** creates and selects a new backend workspace with an initial terminal. Actions can be assigned shortcuts in Keybindings settings.
-
-Each discovered endpoint keeps a ClientShell connection. Selecting a workspace activates its text/image scenes and semantic input; other endpoints continue updating metadata without streaming pane screens. Its pane presentation uses the public backend pane identity; history and process information use a separately verified runtime mapping. History and process queries resolve a missing mapping on demand; an unconfirmed identity disables only the query. Agent metadata and semantic notifications continue on these connections while local content is selected. Leaving a Herdr workspace deactivates its surface interest and preserves the connection for later activation. Disconnection marks status unavailable and retains messages and unread markers; input resumes after a fresh coherent presentation. Floating transfers animate the existing scene immediately while the native transfer runs; input resumes when the new native surface is ready. Returning a pane keeps it selected and synchronizes that selection with Herdr. They require a verified management runtime mapping; changed identities or rejected operations retain the terminal and report an error. Native popups inside floating tabs are currently unsupported; return the pane to its tab before opening one. **Take Control of Herdr Window** reconnects through ClientShell and claims the current tab geometry through an endpoint focus request; it does not create per-pane controller processes.
-
-The **Agents** panel has **Agents / Messages** views across all Herdr workspaces. Selecting a row or clicking a system notification navigates to its workspace, tab and pane after verifying the service identity. Completion read state belongs to Santty; other clients remain independent. System notification preferences in **Settings → Agents** cover Claude, Codex and other Herdr agents. Initial snapshots establish a baseline and do not replay old alerts. Messages are kept in memory (up to 256); Herdr notifications are live broadcasts without replay history or full assistant transcripts. Startup removes only exact hooks previously installed by this app bundle, preserves custom hooks and backs up changed configuration files. Local agents are no longer monitored.
-
-Use **Pane → Herdr Diagnostics...** or **Herdr Diagnostics** in the command palette to inspect versions, connection states, saved bindings and the last error category. **Copy JSON** includes local executable/socket paths and object IDs, but excludes terminal text, pane titles, cwd, command lines and raw errors. Diagnostics also report discovery failures and the configured endpoint.
-
-In a Herdr workspace, closing a pane/tab is a confirmed backend operation that ends its terminals and processes. Closing the window or selecting a local workspace only disconnects the projected Herdr views. **Close Workspace** always asks for confirmation. For a local workspace it closes its tabs and local terminal processes, then selects another local workspace (or creates a fresh Default if it was the last). For a Herdr workspace it ends all backend terminals, returns to the last selected local workspace, and recovers its local browser and notes panes there. **End Persistent Terminal** explicitly ends a backend terminal. Take Control explicitly claims geometry control from another client.
-
-Santty saves all local workspaces and their selected tabs, Herdr workspace bindings and local additions, mixed layouts, names, floating/hidden panes, Browser URLs and Notes references to `~/Library/Application Support/Santty/Workspace/workspace.json`. The v7 format additionally stores floating Herdr runtime and placeholder identities and reads v1–v6 files; older builds refuse to overwrite v7 files. Saves are atomic, with a previous valid backup and one writer per file. Another instance can discover workspaces but cannot activate ClientShell or save changes while the owner is running. Old full-window saves restore local tabs into Default and retain their Herdr additions for explicit selection from the picker. Old mixed layouts retain saved terminal identities as placeholders; reconnect them by selecting the corresponding workspace.
-
-Startup restores local content first, then restores a saved Herdr selection once its source is reachable and its fresh ClientShell presentation is ready. Previous local shells remain placeholders with an explicit Start New Local Terminal button; their commands are never replayed. Selecting a Herdr workspace activates its endpoint connection; local additions are reattached only when the service identity still matches. Take Control is never restored automatically. Notes cancellation or a declined save error keeps the workspace open.
-
-ClientShell image display has been confirmed against a running Herdr service; complete lifecycle acceptance remains pending. **Open Recent History Snapshot** provides a frozen, selectable text view of at most 1000 rows / 256 KiB; older history, inline images and live cross-history selection are unavailable. Its navigation uses Cocoa text motions, with approximate Vim shortcuts. Prompt Editor requires Control and sends one bracketed multiline paste followed by Return.
-
-CLI read/search use the backend recent snapshot and report its source and truncation; line numbers refer to that snapshot. Process information and inherited cwd come from Herdr. Agent status and completion notifications come exclusively from Herdr; local hook installation, the agent event socket and PID liveness monitoring have been removed. Stale CLI socket hints are rediscovered using the backend pane and socket; ambiguous instances require `--socket`. Reinstall the bundled CLI after upgrading. See [the implementation plan](docs/plans/herdr-native-client.md).
-
-**Pane → Reconnect Herdr Window** appears when the selected Herdr window is disconnected. Disconnect and Take Control remain available in the command palette; use Close Pane to end a backend terminal. Herdr connection actions have no default shortcut; assign them in **Settings → Keybindings → Pane**. Herdr workspace attachment remains experimental. Current-machine Debug/Release builds and connection stress have passed, but macOS 14 runtime, Intel runtime and full input-to-pixel performance coverage are still release gates.
+Only the current v10 workspace format is supported. Earlier development snapshots
+are not migrated. Unsupported or unreadable files are preserved; remove local
+workspace snapshots manually when starting fresh.
 
 ## Read Pane Logs from an Agent
 

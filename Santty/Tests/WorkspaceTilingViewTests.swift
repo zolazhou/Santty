@@ -512,36 +512,35 @@ final class WorkspaceTilingViewTests: XCTestCase {
 
     // MARK: - WorkspaceTilingView: Divider Drag
 
-    func testDeferredDividerDragCommitsOnlyFinalFractionsOnMouseUp() throws {
-        for deferred in [false, true] {
-            let a = PaneID(), b = PaneID()
-            let tiling = WorkspaceTilingView()
-            tiling.commitsDividerChangesOnMouseUp = deferred
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 600),
-                                  styleMask: [], backing: .buffered, defer: false)
-            window.contentView = tiling; window.orderBack(nil)
-            defer { window.orderOut(nil); window.contentView = nil }
-            tiling.setLayoutNode(.split(axis: .horizontal, children: [.panel(a), .panel(b)], fractions: [0.5, 0.5]),
-                                 paneViews: [a: NSView(), b: NSView()])
-            tiling.layoutSubtreeIfNeeded()
-            var commits: [[CGFloat]] = []
-            tiling.onFractionsChange = { _, fractions, source in
-                if source == .userDrag { commits.append(fractions) }
-            }
-            func event(_ type: NSEvent.EventType, x: CGFloat) throws -> NSEvent {
-                try XCTUnwrap(NSEvent.mouseEvent(with: type, location: NSPoint(x: x, y: 300), modifierFlags: [],
-                    timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0,
-                    clickCount: 1, pressure: 1))
-            }
-            NSApp.postEvent(try event(.leftMouseDragged, x: 600), atStart: false)
-            NSApp.postEvent(try event(.leftMouseDragged, x: 700), atStart: false)
-            NSApp.postEvent(try event(.leftMouseUp, x: 700), atStart: false)
-            tiling.mouseDown(with: try event(.leftMouseDown, x: 500))
-            XCTAssertEqual(commits.count, deferred ? 1 : 2)
-            XCTAssertEqual(commits.last, tiling.debugCurrentFractions(at: []))
-            XCTAssertGreaterThan(try XCTUnwrap(commits.last?.first), 0.6)
-            XCTAssertFalse(tiling.isDraggingDivider)
+    func testDividerDragPublishesFractionsWhileDragging() throws {
+
+        let a = PaneID(), b = PaneID()
+        let tiling = WorkspaceTilingView()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 600),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.contentView = tiling; window.orderBack(nil)
+        defer { window.orderOut(nil); window.contentView = nil }
+        tiling.setLayoutNode(.split(axis: .horizontal, children: [.panel(a), .panel(b)], fractions: [0.5, 0.5]),
+                             paneViews: [a: NSView(), b: NSView()])
+        tiling.layoutSubtreeIfNeeded()
+        var commits: [[CGFloat]] = []
+        tiling.onFractionsChange = { _, fractions, source in
+            if source == .userDrag { commits.append(fractions) }
         }
+        func event(_ type: NSEvent.EventType, x: CGFloat) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.mouseEvent(with: type, location: NSPoint(x: x, y: 300), modifierFlags: [],
+                timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                clickCount: 1, pressure: 1))
+        }
+        NSApp.postEvent(try event(.leftMouseDragged, x: 600), atStart: false)
+        NSApp.postEvent(try event(.leftMouseDragged, x: 700), atStart: false)
+        NSApp.postEvent(try event(.leftMouseUp, x: 700), atStart: false)
+        tiling.mouseDown(with: try event(.leftMouseDown, x: 500))
+        XCTAssertEqual(commits.count, 2)
+        XCTAssertEqual(commits.last, tiling.debugCurrentFractions(at: []))
+        XCTAssertGreaterThan(try XCTUnwrap(commits.last?.first), 0.6)
+        XCTAssertFalse(tiling.isDraggingDivider)
+
     }
 
     func testDividerDragCallbackFiresWithCorrectPath() {

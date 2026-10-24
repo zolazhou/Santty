@@ -62,7 +62,7 @@ struct CLIRequest: Codable, Sendable {
 }
 
 enum CLIInstanceDiscovery {
-    static func resolve(explicit: String?, inherited: String?, herdrPaneID: String?, herdrSocketPath: String?,
+    static func resolve(explicit: String?, inherited: String?,
                         candidates: [String], probe: (String) throws -> CLIResponse) throws -> String {
         if let explicit { return explicit }
         var paths = Array(Set(candidates + (inherited.map { [$0] } ?? []))).sorted()
@@ -73,11 +73,7 @@ enum CLIInstanceDiscovery {
         for path in paths {
             guard Date() < deadline else { throw CLIError("Santty instance discovery timed out; choose --socket explicitly.") }
             guard let response = try? probe(path), response.version == 2, response.error == nil else { continue }
-            if let herdrPaneID {
-                guard let herdrSocketPath, response.tabs?.contains(where: { tab in
-                    tab.panes.contains { $0.isLive && $0.herdrPaneID == herdrPaneID && $0.herdrSocketPath == herdrSocketPath && $0.backendError == nil }
-                }) == true else { continue }
-            } else if path == inherited { return path }
+            if path == inherited { return path }
             live.append(path)
         }
         guard live.count == 1 else {
@@ -99,17 +95,10 @@ struct CLIPane: Codable, Sendable {
     let isFocused: Bool
     let isLive: Bool
     let isDetached: Bool
-    var backend: String? = nil
-    var herdrPaneID: String? = nil
-    var herdrTerminalID: String? = nil
-    var herdrSocketPath: String? = nil
-    var backendError: String? = nil
 
     private enum CodingKeys: String, CodingKey {
         case id, title, name, kind, cwd, foregroundProcessGroupID, processes
         case isFocused, isLive, isDetached
-        case backend, herdrPaneID, herdrTerminalID, herdrSocketPath
-        case backendError
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -125,11 +114,6 @@ struct CLIPane: Codable, Sendable {
         try container.encode(isFocused, forKey: .isFocused)
         try container.encode(isLive, forKey: .isLive)
         try container.encode(isDetached, forKey: .isDetached)
-        try container.encodeIfPresent(backend, forKey: .backend)
-        try container.encodeIfPresent(herdrPaneID, forKey: .herdrPaneID)
-        try container.encodeIfPresent(herdrTerminalID, forKey: .herdrTerminalID)
-        try container.encodeIfPresent(herdrSocketPath, forKey: .herdrSocketPath)
-        try container.encodeIfPresent(backendError, forKey: .backendError)
     }
 }
 
@@ -156,9 +140,6 @@ struct CLIResponse: Codable, Sendable {
     var totalLines: Int?
     var matches: [CLIMatch]?
     var totalMatches: Int?
-    var textSource: String?
-    var historyTruncated: Bool?
-    var backendRevision: UInt64?
 }
 
 struct CLIMatch: Codable, Sendable {

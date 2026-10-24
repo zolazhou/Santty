@@ -2,7 +2,7 @@ import AppKit
 import KeyboardShortcuts
 
 enum KeybindingAction: String, CaseIterable, Identifiable {
-    case toggleNotes
+    case toggleSidebar
     case toggleMaximizeWindow
     case splitPaneHorizontally
     case splitPaneVertically
@@ -22,7 +22,6 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
     case movePaneUp
     case movePaneDown
     case newBrowserPane
-    case newNotesPane
     case focusBrowserLocation
     case convertPaneToBrowser
     case convertPaneToTerminal
@@ -35,13 +34,7 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
     case closePane
     case newWorkspace
     case renameWorkspace
-    case newHerdrWorkspace
-    // Preserve shortcuts assigned before the command became generic.
-    case closeWorkspace = "closeHerdrWorkspace"
-    case disconnectPersistentTerminal
-    case reconnectPersistentTerminal
-    case takeOverPersistentTerminal
-    case endPersistentTerminal
+    case closeWorkspace
     case newTab
     case renameTab
     case closeTab
@@ -49,21 +42,14 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
     case focusNextTab
 
     var id: String { rawValue }
-    var isGlobal: Bool { self == .toggleNotes }
 
     var commandID: String {
         switch self {
         case .newWorkspace: "workspace.new"
         case .renameWorkspace: "workspace.rename"
-        case .newHerdrWorkspace: "workspace.herdr.new"
         case .closeWorkspace: "workspace.close"
-        case .disconnectPersistentTerminal: "terminal.herdr.disconnect"
-        case .reconnectPersistentTerminal: "terminal.herdr.reconnect"
-        case .takeOverPersistentTerminal: "terminal.herdr.takeover"
-        case .endPersistentTerminal: "terminal.herdr.end"
 
-        case .toggleNotes:
-            "app.notes"
+        case .toggleSidebar: "sidebar.toggle"
         case .toggleMaximizeWindow:
             "window.zoom"
         case .splitPaneHorizontally:
@@ -100,8 +86,6 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             "pane.move.up"
         case .movePaneDown:
             "pane.move.down"
-        case .newNotesPane:
-            "pane.notes.new"
         case .newBrowserPane:
             "pane.browser.new"
         case .focusBrowserLocation:
@@ -141,15 +125,9 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
         switch self {
         case .newWorkspace: "New Workspace"
         case .renameWorkspace: "Rename Workspace"
-        case .newHerdrWorkspace: "New Herdr Workspace"
         case .closeWorkspace: "Close Workspace"
-        case .disconnectPersistentTerminal: "Disconnect Herdr Window"
-        case .reconnectPersistentTerminal: "Reconnect Herdr Window"
-        case .takeOverPersistentTerminal: "Take Control of Herdr Window"
-        case .endPersistentTerminal: "End Persistent Terminal"
 
-        case .toggleNotes:
-            "Toggle Notes"
+        case .toggleSidebar: "Toggle Sidebar"
         case .toggleMaximizeWindow:
             "Toggle Maximize Window"
         case .splitPaneHorizontally:
@@ -186,8 +164,6 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             "Move Pane Up"
         case .movePaneDown:
             "Move Pane Down"
-        case .newNotesPane:
-            "Open Notes in Pane"
         case .newBrowserPane:
             "New Browser Pane"
         case .focusBrowserLocation:
@@ -225,14 +201,14 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
 
     var groupTitle: String {
         switch self {
-        case .newWorkspace, .renameWorkspace, .newHerdrWorkspace, .closeWorkspace, .disconnectPersistentTerminal, .reconnectPersistentTerminal, .takeOverPersistentTerminal, .endPersistentTerminal: "Pane"
-        case .toggleNotes, .toggleMaximizeWindow:
+        case .newWorkspace, .renameWorkspace, .closeWorkspace: "Pane"
+        case .toggleMaximizeWindow, .toggleSidebar:
             "Application"
         case .splitPaneHorizontally, .splitPaneVertically, .equalizePaneSplits,
             .movePaneDividerUp, .movePaneDividerDown, .movePaneDividerLeft,
             .movePaneDividerRight, .focusPreviousPane, .focusNextPane, .focusLeftPane,
             .focusRightPane, .focusAbovePane, .focusBelowPane, .movePaneLeft,
-            .movePaneRight, .movePaneUp, .movePaneDown, .newBrowserPane, .newNotesPane,
+            .movePaneRight, .movePaneUp, .movePaneDown, .newBrowserPane,
             .focusBrowserLocation,
             .convertPaneToBrowser, .convertPaneToTerminal, .toggleFloatingPane, .detachPane,
             .attachDetachedPane, .openPromptEditor, .enterScrollMode, .autoResizePane, .closePane:
@@ -244,10 +220,9 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
 
     var defaultShortcut: KeyboardShortcuts.Shortcut? {
         switch self {
+        case .toggleSidebar: nil
         case .renameTab: nil
-        case .newWorkspace, .renameWorkspace, .newHerdrWorkspace, .closeWorkspace, .disconnectPersistentTerminal, .reconnectPersistentTerminal, .takeOverPersistentTerminal, .endPersistentTerminal: nil
-        case .toggleNotes:
-            .init(.n, modifiers: [.control, .option])
+        case .newWorkspace, .renameWorkspace, .closeWorkspace: nil
         case .toggleMaximizeWindow:
             .init(.m, modifiers: [.command, .option])
         case .splitPaneHorizontally:
@@ -284,7 +259,7 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
             .init(.k, modifiers: [.option, .command])
         case .movePaneDown:
             .init(.j, modifiers: [.option, .command])
-        case .newBrowserPane, .newNotesPane, .convertPaneToBrowser, .convertPaneToTerminal:
+        case .newBrowserPane, .convertPaneToBrowser, .convertPaneToTerminal:
             nil
         case .focusBrowserLocation:
             .init(.l, modifiers: [.control])
@@ -313,10 +288,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
 
     @MainActor
     var shortcutName: KeyboardShortcuts.Name {
-        let identifier = isGlobal ? "SanttyToggleNotes" : "Santty.\(rawValue)"
-        let name = KeyboardShortcuts.Name(identifier, initial: defaultShortcut)
-        // Notes is global; workspace shortcuts must remain local to Santty.
-        if !isGlobal { KeyboardShortcuts.disable(name) }
+        let name = KeyboardShortcuts.Name("Santty.\(rawValue)", initial: defaultShortcut)
+        KeyboardShortcuts.disable(name)
         return name
     }
 }
@@ -339,8 +312,7 @@ enum KeybindingSettings {
     }
 
     static func notifyChange(for action: KeybindingAction) {
-        if action.isGlobal { KeyboardShortcuts.enable(action.shortcutName) }
-        else { KeyboardShortcuts.disable(action.shortcutName) }
+        KeyboardShortcuts.disable(action.shortcutName)
         NotificationCenter.default.post(name: didChangeNotification, object: action)
     }
 
@@ -354,7 +326,7 @@ enum KeybindingSettings {
         }
 
         return KeybindingAction.allCases.first {
-            !$0.isGlobal && effectiveShortcut(for: $0) == eventShortcut
+            effectiveShortcut(for: $0) == eventShortcut
         }
     }
 

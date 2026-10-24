@@ -45,7 +45,6 @@ struct DetachedPaneStatusItem: Equatable {
 @MainActor
 final class WorkspaceToolbarView: NSView {
     let tabStripView = WorkspaceTabStripView()
-    let agentStatusButton = WorkspaceStatusButtonView()
     let workspaceSwitcher = NSPopUpButton(frame: .zero, pullsDown: false)
     private let workspaceSwitcherBackground = AppAppearanceDefaults.makeVibrancyView(
         tintViewAlpha: AppAppearanceDefaults.vibrancyTintAlpha
@@ -53,48 +52,19 @@ final class WorkspaceToolbarView: NSView {
     var onSelectWorkspace: ((String) -> Void)?
     private var selectedWorkspaceID: String?
 
-    func updateWorkspaces(_ workspaces: [HerdrSnapshot.Workspace], selectedID: String?,
-                          localWorkspaces: [(id: String, name: String)] = [("", "Default")]) {
-        let entries = localWorkspaces.map { (id: $0.id, label: $0.name, symbol: "desktopcomputer", type: "Local workspace") }
-            + workspaces.map { (id: $0.workspace_id, label: $0.label, symbol: "server.rack", type: "Herdr workspace") }
-        let selectedID = selectedID ?? ""
-        let items = workspaceSwitcher.itemArray
-        let optionsChanged = items.count != entries.count || !zip(entries, items).allSatisfy {
-            $0.id == $1.representedObject as? String && $0.label == $1.title
-        }
-        let selectionChanged = selectedWorkspaceID != selectedID
-        guard optionsChanged || selectionChanged else { return }
-        if optionsChanged {
-            workspaceSwitcher.removeAllItems()
-            for entry in entries {
-                workspaceSwitcher.addItem(withTitle: entry.label)
-                workspaceSwitcher.lastItem?.representedObject = entry.id
-                workspaceSwitcher.lastItem?.image = NSImage(systemSymbolName: entry.symbol, accessibilityDescription: entry.type)
-                workspaceSwitcher.lastItem?.toolTip = entry.type
-            }
-        }
-        selectedWorkspaceID = selectedID
-        workspaceSwitcher.select(workspaceSwitcher.itemArray.first { $0.representedObject as? String == selectedID })
-        workspaceSwitcher.isHidden = false
-        workspaceSwitcher.toolTip = workspaceSwitcher.titleOfSelectedItem
-        needsLayout = true
-    }
-
     func updateWorkspaceEntries(_ entries: [WorkspaceEntry], selectedID: String?) {
         let changed = workspaceSwitcher.itemArray.count != entries.count || !zip(entries, workspaceSwitcher.itemArray).allSatisfy {
-            $0.id == $1.representedObject as? String && $0.title == $1.title && $0.isAvailable == $1.isEnabled
-                && $1.toolTip == [$0.kind.title, $0.status].compactMap { $0 }.joined(separator: " · ")
+            $0.id == $1.representedObject as? String && $0.name == $1.title
         }
         // Re-selecting during popup tracking can replace the user's choice before its action arrives.
         guard changed || selectedWorkspaceID != selectedID else { return }
         if changed {
             workspaceSwitcher.removeAllItems()
             for entry in entries {
-                workspaceSwitcher.addItem(withTitle: entry.title)
+                workspaceSwitcher.addItem(withTitle: entry.name)
                 workspaceSwitcher.lastItem?.representedObject = entry.id
-                workspaceSwitcher.lastItem?.image = NSImage(systemSymbolName: entry.kind.symbol, accessibilityDescription: entry.kind.title)
-                workspaceSwitcher.lastItem?.toolTip = [entry.kind.title, entry.status].compactMap { $0 }.joined(separator: " · ")
-                workspaceSwitcher.lastItem?.isEnabled = entry.isAvailable
+                workspaceSwitcher.lastItem?.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: "Local Workspace")
+                workspaceSwitcher.lastItem?.toolTip = "Local Workspace"
             }
         }
         selectedWorkspaceID = selectedID
@@ -183,13 +153,6 @@ final class WorkspaceToolbarView: NSView {
         )
     }
 
-    func updateAgentStatus(sessionCount: Int, unreadCount: Int) {
-        agentStatusButton.isHidden = sessionCount == 0
-        agentStatusButton.title = "Agents"
-        agentStatusButton.badgeText = unreadCount > 0 ? badgeText(for: unreadCount) : nil
-        needsLayout = true
-    }
-
     func updateDetachedPanes(
         _ items: [DetachedPaneStatusItem],
         target: AnyObject?,
@@ -225,13 +188,6 @@ final class WorkspaceToolbarView: NSView {
             }
         }
 
-        if agentStatusButton.superview !== statusStackView {
-            statusStackView.addArrangedSubview(agentStatusButton)
-        } else {
-            statusStackView.removeArrangedSubview(agentStatusButton)
-            statusStackView.addArrangedSubview(agentStatusButton)
-        }
-
         needsLayout = true
     }
 
@@ -241,7 +197,6 @@ final class WorkspaceToolbarView: NSView {
         for button in detachedPaneButtons.values {
             button.updateAppearance()
         }
-        agentStatusButton.updateAppearance()
     }
 
     func detachedPaneCellFrame(for paneID: PaneID) -> NSRect? {
@@ -265,7 +220,6 @@ final class WorkspaceToolbarView: NSView {
         statusStackView.alignment = .centerY
         statusStackView.distribution = .fill
         statusStackView.spacing = spacing
-        statusStackView.addArrangedSubview(agentStatusButton)
 
         workspaceSwitcher.cell = WorkspacePickerCell(textCell: "", pullsDown: false)
         addSubview(workspaceSwitcher)
@@ -274,7 +228,6 @@ final class WorkspaceToolbarView: NSView {
         workspaceSwitcherBackground.layer?.masksToBounds = true
         addSubview(workspaceSwitcherBackground, positioned: .below, relativeTo: workspaceSwitcher)
         workspaceSwitcherBackground.isHidden = !AppAppearanceSettings.isWindowHidden
-        updateWorkspaces([HerdrSnapshot.Workspace](), selectedID: nil)
         // Santty chrome stays dark even when macOS uses the light appearance.
         workspaceSwitcher.appearance = NSAppearance(named: AppAppearanceDefaults.vibrancyAppearanceName)
         workspaceSwitcher.controlSize = .regular
@@ -287,12 +240,6 @@ final class WorkspaceToolbarView: NSView {
         workspaceSwitcher.target = self
         workspaceSwitcher.action = #selector(selectWorkspace(_:))
 
-        agentStatusButton.symbolName = "sparkles"
-        agentStatusButton.title = "Agents"
-        agentStatusButton.isHidden = true
     }
 
-    private func badgeText(for count: Int) -> String {
-        count > 99 ? "99+" : String(count)
-    }
 }

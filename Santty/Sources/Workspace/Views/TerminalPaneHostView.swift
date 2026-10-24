@@ -90,7 +90,6 @@ final class TerminalPaneHostView: NSView {
     var onFocusRequest: ((PaneID) -> Void)?
 
     private let terminalView: TerminalView
-    var onPasteText: ((String) -> Bool)?
     private let vibrancyView = AppAppearanceDefaults.makeVibrancyView(
         tintViewAlpha: AppAppearanceDefaults.vibrancyTintAlpha
     )
@@ -99,13 +98,10 @@ final class TerminalPaneHostView: NSView {
     private let scrollModeBackgroundView = NSView()
     private let scrollModeLabel = NSTextField(labelWithString: "SCROLL")
     private(set) var scrollModeView: TerminalScrollModeView?
-    private var isPersistentHistoryActive = false
     private var isFocused = false
     private var isFloating = false
     private var terminalPadding = TerminalSettings.padding
     private var terminalPaddingConstraints: [NSLayoutConstraint] = []
-    private var fixedTerminalSizeConstraints: [NSLayoutConstraint] = []
-    private var fixedTerminalCursorRect: NSRect?
     private var pasteKeyMonitor: EventMonitorToken?
 
     override var acceptsFirstResponder: Bool {
@@ -182,7 +178,6 @@ final class TerminalPaneHostView: NSView {
     }
 
     override func layout() {
-        updateFixedTerminalViewport()
         super.layout()
 
         nameBadge.layout(in: self)
@@ -243,13 +238,8 @@ final class TerminalPaneHostView: NSView {
     }
 
     @objc func paste(_ sender: Any?) {
-        guard scrollModeView == nil, !isPersistentHistoryActive else { return }
+        guard scrollModeView == nil else { return }
         if pasteTerminalURLsFromGeneralPasteboard() {
-            return
-        }
-
-        if let onPasteText {
-            if let text = NSPasteboard.general.string(forType: .string) { _ = onPasteText(text) }
             return
         }
 
@@ -257,7 +247,7 @@ final class TerminalPaneHostView: NSView {
     }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        guard scrollModeView == nil, !isPersistentHistoryActive else { return [] }
+        guard scrollModeView == nil else { return [] }
         guard let types = sender.draggingPasteboard.types else {
             return []
         }
@@ -266,7 +256,7 @@ final class TerminalPaneHostView: NSView {
     }
 
     override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
-        guard scrollModeView == nil, !isPersistentHistoryActive else { return false }
+        guard scrollModeView == nil else { return false }
         guard let text = TerminalPasteboardText.dropInsertionText(from: sender.draggingPasteboard)
         else {
             return false
@@ -313,25 +303,6 @@ final class TerminalPaneHostView: NSView {
         setScrollModeActive(true)
         layoutSubtreeIfNeeded()
         window?.makeFirstResponder(view)
-    }
-
-    func showPersistentHistory(_ view: HerdrHistoryView) {
-        isPersistentHistoryActive = true
-        view.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(view, positioned: .above, relativeTo: terminalView)
-        NSLayoutConstraint.activate([
-            view.leadingAnchor.constraint(equalTo: terminalView.leadingAnchor), view.trailingAnchor.constraint(equalTo: terminalView.trailingAnchor),
-            view.topAnchor.constraint(equalTo: terminalView.topAnchor), view.bottomAnchor.constraint(equalTo: terminalView.bottomAnchor),
-        ])
-        scrollModeLabel.stringValue = "RECENT HISTORY · FROZEN"
-        setScrollModeActive(true)
-        window?.makeFirstResponder(view.textView)
-    }
-
-    func hidePersistentHistory() {
-        isPersistentHistoryActive = false
-        setScrollModeActive(false)
-        window?.makeFirstResponder(terminalView)
     }
 
     func hideScrollMode() {
@@ -425,50 +396,6 @@ final class TerminalPaneHostView: NSView {
         terminalPaddingConstraints[1].constant = -terminalPadding
         terminalPaddingConstraints[2].constant = terminalPadding
         terminalPaddingConstraints[3].constant = -terminalPadding
-        updateFixedTerminalViewport()
-    }
-
-    func setFixedTerminalCursorRect(_ rect: NSRect?) {
-        fixedTerminalCursorRect = rect
-        needsLayout = true
-        layoutSubtreeIfNeeded()
-    }
-
-    private func updateFixedTerminalViewport() {
-        guard fixedTerminalSizeConstraints.count == 2 else { return }
-        func offset(length: CGFloat, visible: CGFloat, previous: CGFloat, start: CGFloat?, end: CGFloat?) -> CGFloat {
-            var value = previous
-            if let start, let end {
-                value = min(value, start)
-                value = max(value, end - visible)
-            }
-            return min(max(0, value), max(0, length - visible))
-        }
-        let x = offset(length: fixedTerminalSizeConstraints[0].constant,
-                       visible: max(0, bounds.width - terminalPadding * 2),
-                       previous: terminalPadding - terminalPaddingConstraints[0].constant,
-                       start: fixedTerminalCursorRect?.minX, end: fixedTerminalCursorRect?.maxX)
-        let y = offset(length: fixedTerminalSizeConstraints[1].constant,
-                       visible: max(0, bounds.height - terminalPadding * 2),
-                       previous: terminalPadding - terminalPaddingConstraints[2].constant,
-                       start: fixedTerminalCursorRect?.minY, end: fixedTerminalCursorRect?.maxY)
-        terminalPaddingConstraints[0].constant = terminalPadding - x
-        terminalPaddingConstraints[2].constant = terminalPadding - y
-    }
-
-    // Keep the backend grid intact; pan the clipped viewport to keep its cursor visible.
-    func setFixedTerminalSize(_ size: NSSize) {
-        precondition(size.width.isFinite && size.height.isFinite && size.width > 0 && size.height > 0)
-        if fixedTerminalSizeConstraints.isEmpty {
-            NSLayoutConstraint.deactivate([terminalPaddingConstraints[1], terminalPaddingConstraints[3]])
-            fixedTerminalSizeConstraints = [terminalView.widthAnchor.constraint(equalToConstant: size.width),
-                                            terminalView.heightAnchor.constraint(equalToConstant: size.height)]
-            NSLayoutConstraint.activate(fixedTerminalSizeConstraints)
-        } else {
-            fixedTerminalSizeConstraints[0].constant = size.width
-            fixedTerminalSizeConstraints[1].constant = size.height
-        }
-        layoutSubtreeIfNeeded()
     }
 
     private func installPasteKeyMonitor() {
@@ -532,7 +459,6 @@ final class TerminalPaneHostView: NSView {
     }
 
     private func insertPasteText(_ text: String) -> Bool {
-        if let onPasteText { return onPasteText(text) }
         terminalView.sendText(text)
         return true
     }

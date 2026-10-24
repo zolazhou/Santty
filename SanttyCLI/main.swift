@@ -13,8 +13,6 @@ let usage = """
     Search is literal, returns matching lines in buffer order, and defaults to 100 results (maximum 1000).
     Line numbers refer to the current buffer and can change when history is discarded or the screen changes.
     SANTTY_CONTROL_SOCKET is a hint; stale instance paths are rediscovered.
-    Inside Herdr, HERDR_PANE_ID and HERDR_SOCKET_PATH select matching native views; ambiguous instances require --socket.
-    Persistent read/search covers the backend's most recent 1000 rows, not complete history.
     """
 
 do {
@@ -72,7 +70,7 @@ do {
         .filter { $0.hasSuffix(".sock") }.map { CLITransport.directory.appendingPathComponent($0).path }
     } else { candidates = [] }
     let socketPath = try CLIInstanceDiscovery.resolve(explicit: explicitSocket, inherited: environment["SANTTY_CONTROL_SOCKET"],
-        herdrPaneID: environment["HERDR_PANE_ID"], herdrSocketPath: environment["HERDR_SOCKET_PATH"], candidates: candidates) { path in
+        candidates: candidates) { path in
             let fd = try CLITransport.connect(to: path); defer { close(fd) }
             try CLITransport.write(CLIRequest(command: "list", includeProcesses: false), to: fd)
             return try JSONDecoder().decode(CLIResponse.self, from: CLITransport.readLine(fd, limit: CLITransport.maximumResponseBytes))
@@ -86,9 +84,7 @@ do {
         throw CLIError("CLI protocol mismatch. Reinstall the CLI from Santty settings.")
     }
     if let error = response.error { throw CLIError(error) }
-    if !json, response.textSource == "herdr_recent_1000" {
-        FileHandle.standardError.write(Data("santty: persistent history is a recent snapshot of at most 1000 rows; line numbers are relative to that snapshot.\n".utf8))
-    }
+
     if json {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

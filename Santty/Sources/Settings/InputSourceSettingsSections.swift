@@ -57,7 +57,7 @@ struct InputSourceSettingsSections: View {
             } header: {
                 Text("Pane Input")
             } footer: {
-                Text("Rules apply when entering a terminal pane or its foreground program changes. Program names match exactly; unknown programs keep the current input source. Manual changes last until the next context change. SSH and tmux programs require foreground process information from Herdr.")
+                Text("Rules apply when entering a terminal pane or its foreground program changes. Program names match exactly; unknown programs keep the current input source. Manual changes last until the next context change. Programs inside SSH or tmux cannot be identified through the local foreground process.")
             }
         }
         .onChange(of: settings) { _, value in InputSourceSettings.configuration = value }

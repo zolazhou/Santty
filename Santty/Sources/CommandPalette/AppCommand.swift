@@ -1,7 +1,6 @@
 import AppKit
 
 enum PaletteItemKind: String, CaseIterable {
-    case agent = "Agent"
     case workspace = "Workspace"
     case tab = "Tab"
     case pane = "Pane"
@@ -51,7 +50,7 @@ enum CommandPaletteFilter {
             guard item.isEnabled, kind == nil || kind == item.kind else { return nil }
             if query.isEmpty {
                 guard
-                    kind != nil || item.kind == .agent || item.kind == .workspace
+                    kind != nil || item.kind == .workspace
                         || item.kind == .command
                         || (item.kind == .tab && item.isInCurrentWorkspace)
                 else { return nil }
