@@ -874,7 +874,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         let initialTabState = makeTabState(startImmediately: false)
         tabs = [initialTabState]
         selectedTabID = initialTabState.id
+        workspacePersistenceActivated = true
         rebuildWorkspaceLayout()
+        scheduleWorkspaceSave()
     }
 
     private func makeTabState(startImmediately: Bool) -> WorkspaceTabState {

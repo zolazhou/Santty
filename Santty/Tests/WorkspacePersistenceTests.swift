@@ -148,6 +148,30 @@ final class WorkspaceRestorationTests: XCTestCase {
         return .init(selectedTabID: tab.id, tabs: [tab])
     }
 
+    func testFreshWorkspaceAutosavesWithoutAnExistingDocument() async throws {
+        let url = try location()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let workspace = WorkspaceViewController()
+        await workspace.prepareWorkspacePersistence(url: url)
+        workspace.debugLoadForTesting()
+        XCTAssertNil(workspace.workspacePersistenceError)
+        XCTAssertTrue(workspace.hasWorkspacePersistence)
+        try await Task.sleep(for: .milliseconds(450))
+        let initial = try JSONDecoder().decode(SavedWorkspace.self, from: Data(contentsOf: url))
+        XCTAssertEqual(initial, workspace.savedWorkspace())
+
+        workspace.updateSelectedWorkspaceName("Project")
+        try await Task.sleep(for: .milliseconds(450))
+        let updated = try JSONDecoder().decode(SavedWorkspace.self, from: Data(contentsOf: url))
+        XCTAssertEqual(updated.localWorkspaceName, "Project")
+        XCTAssertEqual(updated.localWorkspaceID, initial.localWorkspaceID)
+
+        workspace.updateSelectedWorkspaceName("Tools")
+        try await workspace.flushWorkspaceState()
+        let flushed = try JSONDecoder().decode(SavedWorkspace.self, from: Data(contentsOf: url))
+        XCTAssertEqual(flushed.localWorkspaceName, "Tools")
+    }
+
     func testLocalWorkspaceSwitchingPaletteAndRestorationKeepIndependentTabs() async throws {
         let workspace = WorkspaceViewController(); workspace.debugLoadForTesting()
         let defaultID = try XCTUnwrap(workspace.savedWorkspace().localWorkspaceID)
