@@ -1,0 +1,21 @@
+--- a/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift
++++ b/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift
+@@ -232,15 +232,14 @@
+         newSurface.setOcclusion(effectiveSurfaceVisible)
+         // Wakeups must keep draining while the surface is merely occluded:
+         // the app mailbox (titles, pwd, bell, child-exit) only empties in
+         // ghostty_app_tick, and a full mailbox blocks the session's write
+-        // thread on its next push. Only a detached surface or a
+-        // backgrounded app suspends ticks — visibility gates rendering
+-        // alone (canRenderFrame).
++        // thread on its next push. Santty retains detached panes with live
++        // sessions; visibility gates rendering alone (canRenderFrame).
+         controller.addWakeupObserver(
+             ObjectIdentifier(self),
+             shouldProcess: { [weak self] in
+                 guard let self else { return false }
+-                return isApplicationActive && isAttached()
++                return isApplicationActive
+             },
+             onWakeup: { [weak self] in
+                 self?.requestImmediateTick()

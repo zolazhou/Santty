@@ -12,17 +12,19 @@ public struct TerminalScrollViewport: Equatable, Sendable {
         self.offset = offset
         self.rows = rows
     }
-}
 
-@MainActor
-public protocol TerminalScrollViewportDelegate: TerminalSurfaceViewDelegate {
-    func terminalDidScroll(_ viewport: TerminalScrollViewport)
+    public init(_ scrollbar: TerminalScrollbar) {
+        self.init(total: Int(clamping: scrollbar.total), offset: Int(clamping: scrollbar.offset),
+                  rows: Int(clamping: scrollbar.len))
+    }
 }
 
 #if canImport(AppKit) && !canImport(UIKit)
     extension AppTerminalView {
         public var scrollModeGrid: TerminalGridMetrics? { surface?.size() }
-        public var scrollModeViewport: TerminalScrollViewport? { core.bridge.scrollModeViewport }
+        public var scrollModeViewport: TerminalScrollViewport? {
+            core.bridge.scrollbar.map(TerminalScrollViewport.init)
+        }
         public var scrollModeInputPoint: CGPoint? {
             guard let point = surface?.imePoint() else { return nil }
             return CGPoint(x: point.x, y: point.y - point.height / 2)

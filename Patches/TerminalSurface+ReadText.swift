@@ -1,4 +1,4 @@
-// Santty's additive API patch for libghostty-spm 1.3.1.
+// Santty's additive API patch for the pinned libghostty-spm package.
 // Compiled inside GhosttyTerminal; uses the existing prebuilt C library.
 import Foundation
 import GhosttyKit

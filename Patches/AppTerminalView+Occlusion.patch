@@ -1,0 +1,14 @@
+--- a/Sources/GhosttyTerminal/Platform/AppKit/AppTerminalView+Lifecycle.swift
++++ b/Sources/GhosttyTerminal/Platform/AppKit/AppTerminalView+Lifecycle.swift
+@@ -55,9 +55,8 @@
+         override open func viewDidMoveToWindow() {
+             super.viewDidMoveToWindow()
+             removeWindowObservers()
+-            // A new window (or none) starts visible; its next occlusion
+-            // change says otherwise.
+-            core.setWindowVisible(true)
++            // Reattaching a tab to an already covered window may produce no occlusion notification.
++            core.setWindowVisible(window?.occlusionState.contains(.visible) == true)
+             if window != nil {
+                 // SwiftUI/AppKit can temporarily detach and reattach the terminal view while
+                 // diffing the view hierarchy. Rebuilding on every reattach discards Ghostty's

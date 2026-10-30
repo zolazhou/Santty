@@ -116,6 +116,7 @@ final class TerminalPaneHostView: NSView {
         self.paneID = paneID
         self.terminalView = terminalView
         super.init(frame: .zero)
+        terminalView.setSurfaceVisible(false)
 
         wantsLayer = true
         layer?.masksToBounds = true
@@ -219,6 +220,12 @@ final class TerminalPaneHostView: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyPaneBackgroundColor()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Detached tabs and panes retain their sessions, but need no GPU resources.
+        terminalView.setSurfaceVisible(window != nil)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -459,8 +466,7 @@ final class TerminalPaneHostView: NSView {
     }
 
     private func insertPasteText(_ text: String) -> Bool {
-        terminalView.sendText(text)
-        return true
+        terminalView.paste(text: text)
     }
 
     private static func isPasteKeyEvent(_ event: NSEvent) -> Bool {

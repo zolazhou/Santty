@@ -13,6 +13,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
 
     private let terminalView: TerminalView
     private let terminalController: TerminalController
+    private let openURL: @MainActor (URL) -> Bool
     private let foregroundProcessIDProvider: @MainActor () -> Int32?
     private let processWorkingDirectoryProvider: (Int32) -> String?
 
@@ -90,9 +91,11 @@ final class TerminalPaneController: NSObject, PaneControlling {
         foregroundProcessIDProvider: (@MainActor () -> Int32?)? = nil,
         processWorkingDirectoryProvider: @escaping (Int32) -> String? = {
             ProcessWorkingDirectoryResolver.workingDirectory(for: $0)
-        }
+        },
+        openURL: @escaping @MainActor (URL) -> Bool = { NSWorkspace.shared.open($0) }
     ) {
         self.id = id
+        self.openURL = openURL
         currentWorkingDirectory = workingDirectory
 
         let terminalView = TerminalView(frame: NSRect(x: 0, y: 0, width: 720, height: 480))
@@ -298,8 +301,8 @@ final class TerminalPaneController: NSObject, PaneControlling {
         guard isLive else { NSSound.beep(); return false }
         terminalView.window?.makeFirstResponder(terminalView)
 
-        terminalView.sendText(prompt + "\r")
-        return true
+        guard terminalView.paste(text: prompt) else { return false }
+        return terminalView.sendKey(.enter)
     }
 
     func updateAppearance() {
@@ -403,6 +406,32 @@ private final class PromptEditorTextView: NSTextView {
     }
 }
 
+extension TerminalPaneController: TerminalSurfaceOpenURLDelegate {
+    static func linkURL(_ text: String) -> URL? {
+        guard !text.isEmpty,
+              text.rangeOfCharacter(from: .controlCharacters) == nil else { return nil }
+        if text.hasPrefix("/") { return URL(fileURLWithPath: text) }
+        guard let url = URL(string: text, encodingInvalidCharacters: false),
+              let scheme = url.scheme?.lowercased() else { return nil }
+        if ["http", "https"].contains(scheme), url.host?.isEmpty != false { return nil }
+        return url
+    }
+
+    func terminalDidRequestOpenURL(_ text: String, kind _: TerminalOpenURLKind) {
+        guard let url = Self.linkURL(text) else { NSSound.beep(); return }
+        // OSC 8 targets are producer-controlled; confirm potentially executable handlers.
+        if !["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") {
+            let alert = NSAlert()
+            alert.messageText = "Open terminal link?"
+            alert.informativeText = "This link may open a file or another application:\n\(url.absoluteString)"
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Open")
+            guard alert.runModal() == .alertSecondButtonReturn else { return }
+        }
+        if !openURL(url) { NSSound.beep() }
+    }
+}
+
 extension TerminalPaneController: TerminalSurfaceTitleDelegate {
     func terminalDidChangeTitle(_ title: String) {
         if !title.isEmpty {
@@ -419,9 +448,9 @@ extension TerminalPaneController: TerminalSurfaceResizeDelegate {
     }
 }
 
-extension TerminalPaneController: TerminalScrollViewportDelegate {
-    func terminalDidScroll(_ viewport: TerminalScrollViewport) {
-        terminalHostView.scrollModeView?.updateViewport(viewport)
+extension TerminalPaneController: TerminalSurfaceScrollbarDelegate {
+    func terminalDidUpdateScrollbar(_ scrollbar: TerminalScrollbar) {
+        terminalHostView.scrollModeView?.updateViewport(TerminalScrollViewport(scrollbar))
     }
 }
 

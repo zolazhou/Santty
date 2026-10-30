@@ -7,7 +7,7 @@ wrapper around the Ghostty terminal core, consumed through the
 ## Requirements
 
 - macOS 14.0 or later
-- Xcode with the macOS SDK installed
+- Xcode 26 or later (Swift 6.2) with the macOS SDK installed
 - [mise](https://mise.jdx.dev/) for the pinned Tuist version
 - Tuist 4.156.0, installed through `mise`
 
@@ -29,12 +29,19 @@ mise run tuist:regen
 Generated Xcode files are intentionally not committed.
 
 The mise tasks also prepare `Vendor/libghostty-spm` from the pinned upstream
-1.3.1 revision, verify its SHA-256, and apply the Swift bridges in `Patches/`.
-These expose Ghostty's text snapshots, grid metrics, scrollbar callbacks and
-native selection gestures; the C core remains the upstream precompiled
-XCFramework. Run `mise run ghostty:prepare` before invoking `tuist generate`
+2.2.2026102101 revision, verify its SHA-256, and apply the Swift bridges in `Patches/`.
+These expose Ghostty's text snapshots, grid metrics and native selection gestures,
+and keep detached sessions processing callbacks. The precompiled core is pinned
+to `1e9e14af5df1`, which includes the Ghostty 1.4 scrollback compression and hidden
+surface GPU reclamation changes, but predates the final 1.4.0 release.
+Santty reports pane attachment separately from window occlusion so hidden tabs
+release GPU resources while their processes and scrollback stay alive.
+The history budget stays at 10 MB per terminal; compression reduces its physical
+memory use without adopting upstream's higher 50 MB default.
+Run `mise run ghostty:prepare` before invoking `tuist generate`
 directly, and after editing the patches. The generated vendor directory is
-ignored by Git.
+ignored by Git. When upgrading the pin, move the old vendor directory aside
+before preparing the new version.
 
 ## Automatic Input Sources
 

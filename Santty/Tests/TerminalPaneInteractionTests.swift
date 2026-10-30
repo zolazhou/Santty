@@ -1,10 +1,140 @@
 import AppKit
-import GhosttyTerminal
+@testable import GhosttyTerminal
 import XCTest
 @testable import Santty
 
 @MainActor
 final class TerminalPaneInteractionTests: XCTestCase {
+    func testTerminalLinkValidation() {
+        for text in ["", "relative/path", "https://", "https://example.com/\n", "https://exa mple.com"] {
+            XCTAssertNil(TerminalPaneController.linkURL(text), text)
+        }
+        for text in ["https://example.com/path?q=1#anchor", "http://localhost:3000", "mailto:hello@example.com"] {
+            XCTAssertEqual(TerminalPaneController.linkURL(text)?.absoluteString, text)
+        }
+        XCTAssertEqual(TerminalPaneController.linkURL("/tmp/a b.txt")?.path, "/tmp/a b.txt")
+    }
+
+    func testCommandClickOSC8LinkOpensThroughPane() async throws {
+        var opened: [URL] = []
+        let pane = TerminalPaneController(openURL: { opened.append($0); return true })
+        let terminal = try XCTUnwrap(pane.hostView.subviews.compactMap { $0 as? TerminalView }.first)
+        let session = InMemoryTerminalSession(write: { _ in }, resize: { _ in })
+        terminal.configuration = TerminalSurfaceOptions(backend: .inMemory(session))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 240),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.contentView = pane.hostView
+        defer { window.contentView = nil }
+        pane.hostView.layoutSubtreeIfNeeded()
+        terminal.fitToSize()
+        session.receive("\u{1b}]8;;https://example.com\u{1b}\\click here\u{1b}]8;;\u{1b}\\\r\n")
+        XCTAssertTrue(session.waitForPendingOutput())
+        let grid = try XCTUnwrap(terminal.scrollModeGrid)
+        let scale = window.backingScaleFactor
+        let point = terminal.convert(NSPoint(x: 2 + CGFloat(grid.cellWidthPixels) * 4 / scale,
+            y: terminal.bounds.height - 2 - CGFloat(grid.cellHeightPixels) / (2 * scale)), to: nil)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: .command,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+            if type == .leftMouseDown { terminal.mouseDown(with: event) }
+            else { terminal.mouseUp(with: event) }
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(opened.map(\.absoluteString), ["https://example.com"])
+    }
+
+    func testSurfaceAttachUsesCurrentWindowOcclusion() {
+        let terminal = TerminalView(frame: NSRect(x: 0, y: 0, width: 480, height: 240))
+        let session = InMemoryTerminalSession(write: { _ in }, resize: { _ in })
+        terminal.configuration = TerminalSurfaceOptions(backend: .inMemory(session))
+        terminal.controller = TerminalController(configuration: TerminalDefaults.configuration)
+        let window = NSWindow(contentRect: terminal.frame, styleMask: [], backing: .buffered, defer: false)
+        window.contentView = terminal
+        defer { window.contentView = nil }
+        XCTAssertFalse(window.occlusionState.contains(.visible))
+        XCTAssertFalse(terminal.core.testHooks_isWindowVisible)
+        window.contentView = nil
+        window.contentView = terminal
+        XCTAssertFalse(terminal.core.testHooks_isWindowVisible)
+    }
+
+    func testPaneAttachmentReportsSurfaceVisibilityAcrossContainerChanges() {
+        let terminal = RecordingTerminalView(frame: .zero)
+        let host = TerminalPaneHostView(paneID: PaneID(), terminalView: terminal)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 240))
+        container.addSubview(host)
+        let window = NSWindow(contentRect: container.frame, styleMask: [], backing: .buffered, defer: false)
+        defer { window.contentView = nil }
+        XCTAssertEqual(terminal.surfaceVisibility.last, false)
+
+        window.contentView = container
+        XCTAssertEqual(terminal.surfaceVisibility.last, true)
+        window.contentView = nil
+        XCTAssertEqual(terminal.surfaceVisibility.last, false)
+        window.contentView = container
+        XCTAssertEqual(terminal.surfaceVisibility.last, true)
+    }
+
+    func testDetachedPaneKeepsProcessingOutputAndRestoresScrollback() async throws {
+        let session = InMemoryTerminalSession(write: { _ in }, resize: { _ in })
+        let titles = DetachedPaneTitleRecorder()
+        let terminal = TerminalView(frame: NSRect(x: 0, y: 0, width: 480, height: 240))
+        terminal.delegate = titles
+        terminal.configuration = TerminalSurfaceOptions(backend: .inMemory(session))
+        terminal.controller = TerminalController(configuration: TerminalDefaults.configuration)
+        let host = TerminalPaneHostView(paneID: PaneID(), terminalView: terminal)
+        let window = NSWindow(contentRect: terminal.frame, styleMask: [], backing: .buffered, defer: false)
+        window.contentView = host
+        defer { window.contentView = nil }
+        host.layoutSubtreeIfNeeded()
+        terminal.fitToSize()
+        XCTAssertNotNil(terminal.scrollModeGrid)
+        window.contentView = nil
+
+        // More title callbacks than the mailbox holds must drain even with no attached view.
+        session.receive((1...500).map { "\u{1b}]2;title-\($0)\u{7}hidden-row-\($0)\r\n" }.joined())
+        for _ in 0..<100 {
+            if titles.title == "title-500" { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(titles.title, "title-500")
+        XCTAssertTrue(session.waitForPendingOutput())
+        XCTAssertTrue(terminal.readScreenText()?.contains("hidden-row-500") == true)
+
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        terminal.fitToSize()
+        let restored = try XCTUnwrap(terminal.readScreenText())
+        XCTAssertTrue(restored.contains("hidden-row-1\n"))
+        XCTAssertTrue(restored.contains("hidden-row-500"))
+    }
+
+    func testPromptSubmissionPastesTextThenSendsEnter() async throws {
+        let input = ScrollModeInputRecorder()
+        let session = InMemoryTerminalSession(write: { input.append($0) }, resize: { _ in })
+        let pane = TerminalPaneController()
+        XCTAssertFalse(pane.submitPrompt("no surface"))
+        let terminal = try XCTUnwrap(pane.hostView.subviews.compactMap { $0 as? TerminalView }.first)
+        terminal.configuration = TerminalSurfaceOptions(backend: .inMemory(session))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 240),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.contentView = pane.hostView
+        defer { window.contentView = nil }
+        pane.hostView.layoutSubtreeIfNeeded()
+        terminal.fitToSize()
+        session.receive("\u{1b}[?2004h")
+        XCTAssertTrue(session.waitForPendingOutput())
+
+        XCTAssertTrue(pane.submitPrompt("hello\nworld"))
+        let expected = "\u{1b}[200~hello\nworld\u{1b}[201~\r"
+        for _ in 0..<100 {
+            if input.data.count >= expected.utf8.count { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(String(decoding: input.data, as: UTF8.self), expected)
+    }
+
     func testScrollWordMotionsRespectPunctuationWhitespaceAndBufferBounds() {
         let lines = [Array("  foo_bar/path.txt  next"), [], Array(" final")]
         var cursor = ScrollModeCursor(cell: .init(column: 0, row: 0), viewport: 0,
@@ -147,7 +277,7 @@ final class TerminalPaneInteractionTests: XCTestCase {
         XCTAssertTrue(backwards.contains("row 60"))
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertTrue(input.data.isEmpty, "Selection sent input to the terminal: \(input.data as NSData)")
-        terminal.sendText("probe")
+        terminal.paste(text: "probe")
         for _ in 0..<100 {
             if !input.data.isEmpty { break }
             try await Task.sleep(for: .milliseconds(10))
@@ -332,6 +462,12 @@ final class TerminalPaneInteractionTests: XCTestCase {
 }
 
 @MainActor
+private final class DetachedPaneTitleRecorder: TerminalSurfaceTitleDelegate {
+    var title = ""
+    func terminalDidChangeTitle(_ title: String) { self.title = title }
+}
+
+@MainActor
 private final class RecordingTerminalView: TerminalView {
     enum ReceivedMouseEvent: Equatable {
         case down(clickCount: Int)
@@ -340,6 +476,12 @@ private final class RecordingTerminalView: TerminalView {
     }
 
     private(set) var receivedMouseEvents: [ReceivedMouseEvent] = []
+    private(set) var surfaceVisibility: [Bool] = []
+
+    override func setSurfaceVisible(_ visible: Bool) {
+        surfaceVisibility.append(visible)
+        super.setSurfaceVisible(visible)
+    }
 
     override func mouseDown(with event: NSEvent) {
         receivedMouseEvents.append(.down(clickCount: event.clickCount))

@@ -34,6 +34,8 @@ enum TerminalDefaults {
     @MainActor
     static var configuration: TerminalConfiguration {
         TerminalConfiguration(startingFrom: .default) { builder in
+            // Preserve the previous history budget instead of 1.4's new 50 MB default.
+            builder.withCustom("scrollback-limit-bytes", "10000000")
             builder.withWindowPaddingX(Int(innerPadding))
             builder.withWindowPaddingY(Int(innerPadding))
             builder.withFontFamily(TerminalSettings.fontFamily)

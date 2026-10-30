@@ -2,8 +2,9 @@
 # Reproducible Swift-only patch; libghostty remains the upstream binary target.
 set -eu
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-revision=b0930320739324886590e865d571eb5dd7073912
-checksum=42ac24083cea7ea0f303feac738defb8347647dddd3273ec957e5dc852fd94b8
+# libghostty-spm 2.2.2026102101; prebuilt Ghostty core 1e9e14af5df1.
+revision=5b9cb63d83e687b4a66d6c3a3c2a840341c576d9
+checksum=257d234648b8951f94f20627d73e1fb374af4282604eea841d1c06d33bb5ae96
 package_dir="$repo_dir/Vendor/libghostty-spm"
 mkdir -p "$repo_dir/Vendor"
 if [ ! -d "$package_dir" ]; then
@@ -26,6 +27,9 @@ cp "$repo_dir/Patches/TerminalSurface+ReadText.swift" \
    "$package_dir/Sources/GhosttyTerminal/Surface/TerminalSurface+ReadText.swift"
 cp "$repo_dir/Patches/TerminalSurface+ScrollMode.swift" \
    "$package_dir/Sources/GhosttyTerminal/Surface/TerminalSurface+ScrollMode.swift"
-if ! grep -q 'var scrollModeViewport:' "$package_dir/Sources/GhosttyTerminal/InMemory/TerminalCallbackBridge.swift"; then
-    patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/TerminalCallbackBridge+ScrollMode.patch"
+if ! grep -q 'Santty retains detached panes' "$package_dir/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift"; then
+    patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/TerminalSurfaceCoordinator+DetachedWakeups.patch"
+fi
+if ! grep -q 'core.setWindowVisible(window?.occlusionState' "$package_dir/Sources/GhosttyTerminal/Platform/AppKit/AppTerminalView+Lifecycle.swift"; then
+    patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/AppTerminalView+Occlusion.patch"
 fi
