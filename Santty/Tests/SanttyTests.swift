@@ -7,6 +7,177 @@ import XCTest
 
 final class SanttyTests: XCTestCase {
 
+    @MainActor
+    func testAutoResizePanelTriggerChangesSliderRangesAndClampsFocusValues() throws {
+        let panel = PaneAutoResizePanelController()
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let controls = descendants(try XCTUnwrap(panel.window?.contentView))
+        let trigger = try XCTUnwrap(controls.compactMap { $0 as? NSSegmentedControl }.first)
+        let enabled = try XCTUnwrap(controls.compactMap { $0 as? NSButton }.first { $0.title == "Enable Auto Resize" })
+        let sliders = controls.compactMap { $0 as? NSSlider }
+        XCTAssertEqual(sliders.count, 2)
+        trigger.selectedSegment = 1
+        enabled.state = .on
+        enabled.sendAction(enabled.action, to: enabled.target)
+        XCTAssertEqual(trigger.selectedSegment, 1)
+        for slider in sliders {
+            XCTAssertEqual(slider.minValue, 0)
+            XCTAssertEqual(slider.maxValue, 1)
+        }
+        sliders[0].doubleValue = 0
+        sliders[1].doubleValue = 1
+        var updated: PaneAutoResizeConfiguration?
+        panel.onChange = { updated = $0 }
+        trigger.selectedSegment = 0
+        trigger.sendAction(trigger.action, to: trigger.target)
+        XCTAssertEqual(updated?.trigger, .focus)
+        XCTAssertEqual(updated?.ratios, .init(horizontal: 0.25, vertical: 0.95))
+        for slider in sliders {
+            XCTAssertEqual(slider.minValue, 0.25)
+            XCTAssertEqual(slider.maxValue, 0.95)
+        }
+        trigger.selectedSegment = 1
+        trigger.sendAction(trigger.action, to: trigger.target)
+        XCTAssertEqual(updated?.trigger, .unfocused)
+        for slider in sliders {
+            XCTAssertEqual(slider.minValue, 0)
+            XCTAssertEqual(slider.maxValue, 1)
+        }
+    }
+
+    @MainActor
+    func testAutoResizePanelAxesToggleIndependentlyAndRememberRatios() throws {
+        let panel = PaneAutoResizePanelController()
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let controls = descendants(try XCTUnwrap(panel.window?.contentView))
+        let buttons = controls.compactMap { $0 as? NSButton }
+        let enabled = try XCTUnwrap(buttons.first { $0.title == "Enable Auto Resize" })
+        let horizontal = try XCTUnwrap(buttons.first { $0.title == "Horizontal" })
+        let vertical = try XCTUnwrap(buttons.first { $0.title == "Vertical" })
+        let sliders = controls.compactMap { $0 as? NSSlider }
+        let horizontalSlider = try XCTUnwrap(sliders.first { $0.accessibilityLabel() == "Horizontal" })
+        let verticalSlider = try XCTUnwrap(sliders.first { $0.accessibilityLabel() == "Vertical" })
+        var updated: PaneAutoResizeConfiguration?
+        panel.onChange = { updated = $0 }
+        func set(_ button: NSButton, _ state: NSControl.StateValue) {
+            button.state = state
+            button.sendAction(button.action, to: button.target)
+        }
+        XCTAssertEqual(horizontal.state, .on)
+        XCTAssertEqual(vertical.state, .on)
+        XCTAssertFalse(horizontal.isEnabled)
+        XCTAssertFalse(vertical.isEnabled)
+        set(enabled, .on)
+        horizontalSlider.doubleValue = 0.8
+        verticalSlider.doubleValue = 0.6
+        horizontalSlider.sendAction(horizontalSlider.action, to: horizontalSlider.target)
+
+        set(vertical, .off)
+        XCTAssertEqual(updated?.isHorizontalEnabled, true)
+        XCTAssertEqual(updated?.isVerticalEnabled, false)
+        XCTAssertTrue(horizontalSlider.isEnabled)
+        XCTAssertFalse(verticalSlider.isEnabled)
+        XCTAssertEqual(updated?.ratios, .init(horizontal: 0.8, vertical: 0.6))
+        set(horizontal, .off)
+        XCTAssertFalse(horizontalSlider.isEnabled)
+        XCTAssertFalse(verticalSlider.isEnabled)
+        set(vertical, .on)
+        XCTAssertEqual(updated?.isHorizontalEnabled, false)
+        XCTAssertEqual(updated?.isVerticalEnabled, true)
+        XCTAssertFalse(horizontalSlider.isEnabled)
+        XCTAssertTrue(verticalSlider.isEnabled)
+
+        set(enabled, .off)
+        XCTAssertFalse(horizontal.isEnabled)
+        XCTAssertFalse(vertical.isEnabled)
+        XCTAssertFalse(verticalSlider.isEnabled)
+        set(enabled, .on)
+        XCTAssertEqual(horizontal.state, .off)
+        XCTAssertEqual(vertical.state, .on)
+        XCTAssertFalse(horizontalSlider.isEnabled)
+        XCTAssertTrue(verticalSlider.isEnabled)
+        set(horizontal, .on)
+        XCTAssertTrue(horizontalSlider.isEnabled)
+        XCTAssertTrue(verticalSlider.isEnabled)
+        XCTAssertEqual(updated?.ratios, .init(horizontal: 0.8, vertical: 0.6))
+    }
+
+    @MainActor
+    func testWindowsAndPaneControlsInheritApplicationDarkAppearance() throws {
+        XCTAssertEqual(NSApp.appearance?.name, .darkAqua)
+        let settings = SettingsWindowController()
+        let resize = PaneAutoResizePanelController()
+        let main = MainWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640), styleMask: [.titled], backing: .buffered, defer: false)
+        let palette = CommandPalettePanel(contentView: CommandPaletteView())
+        for window in [main, palette, try XCTUnwrap(settings.window), try XCTUnwrap(resize.window)] {
+            XCTAssertNil(window.appearance)
+            XCTAssertEqual(window.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua)
+        }
+        let toolbar = WorkspaceToolbarView()
+        let agents = AgentsPaneController()
+        let workspaces = SidebarListPaneController()
+        let browser = BrowserPaneController()
+        let views: [NSView] = [toolbar, toolbar.workspaceSwitcher, agents.hostView, agents.managerView,
+            workspaces.hostView, browser.hostView, browser.browserHostView.locationBar,
+            browser.browserHostView.addressField, AppAppearanceDefaults.makeVibrancyView()]
+        for view in [toolbar, agents.hostView, workspaces.hostView, browser.hostView] { main.contentView?.addSubview(view) }
+        for view in views {
+            XCTAssertNil(view.appearance)
+            XCTAssertEqual(view.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua)
+        }
+    }
+
+    @MainActor
+    func testSidebarLayersResolveInheritedAppearanceAndRefreshOnWindowChanges() throws {
+        let view = ListPaneHostView()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 280, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = view
+        defer { window.contentView = nil }
+        for name in [NSAppearance.Name.aqua, .darkAqua] {
+            let appearance = try XCTUnwrap(NSAppearance(named: name))
+            window.appearance = appearance
+            // A caller's drawing context must not override the view's inherited appearance.
+            NSAppearance(named: .aqua)?.performAsCurrentDrawingAppearance { view.updateAppearance() }
+            XCTAssertNil(view.appearance)
+            var expected: CGColor?
+            appearance.performAsCurrentDrawingAppearance { expected = NSColor.separatorColor.cgColor }
+            XCTAssertEqual(view.layer?.borderColor, expected)
+        }
+    }
+
+    @MainActor
+    func testListPanesFollowBrowserVibrancyAcrossWindowAndFloatingModes() throws {
+        let previousHidden = AppAppearanceSettings.isWindowHidden
+        defer { AppAppearanceSettings.isWindowHidden = previousHidden }
+        let browser = BrowserPaneHostView(paneID: UUID())
+        let panes: [any PaneControlling] = [SidebarListPaneController(), AgentsPaneController()]
+        let reference = try XCTUnwrap(browser.subviews.compactMap { $0 as? NSVisualEffectView }.first)
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        func tintAlpha(_ view: NSVisualEffectView) throws -> CGFloat {
+            try XCTUnwrap(view.subviews.first { $0.identifier == AppAppearanceDefaults.vibrancyTintIdentifier }?.layer?.backgroundColor).alpha
+        }
+        for hidden in [false, true] {
+            AppAppearanceSettings.isWindowHidden = hidden
+            for floating in [false, true] {
+                browser.updatePresentation(isFocused: true, isFloating: floating)
+                for pane in panes {
+                    pane.updatePresentation(isFocused: true, isFloating: floating)
+                    let effect = try XCTUnwrap(pane.hostView.subviews.compactMap { $0 as? NSVisualEffectView }.first)
+                    XCTAssertEqual(effect.isHidden, reference.isHidden)
+                    XCTAssertEqual(effect.material, reference.material)
+                    XCTAssertEqual(effect.blendingMode, reference.blendingMode)
+                    XCTAssertEqual(try tintAlpha(effect), try tintAlpha(reference), accuracy: 0.001)
+                    XCTAssertEqual(pane.hostView.layer?.backgroundColor?.alpha, browser.layer?.backgroundColor?.alpha)
+                    XCTAssertLessThan(pane.focusTargetView.layer?.backgroundColor?.alpha ?? 0, 1)
+                    for case let table as NSTableView in descendants(pane.hostView) {
+                        XCTAssertEqual(table.backgroundColor.alphaComponent, 0)
+                        XCTAssertFalse(table.isOpaque)
+                    }
+                }
+            }
+        }
+    }
+
     func testSinglePaneTraversalReturnsOnlyPane() {
         let paneID = UUID()
         let layoutNode = LayoutNode.panel(paneID)
@@ -497,7 +668,6 @@ final class SanttyTests: XCTestCase {
         XCTAssertEqual(AppAppearanceDefaults.vibrancyMaterial, .hudWindow)
         XCTAssertEqual(AppAppearanceDefaults.vibrancyBlendingMode, .behindWindow)
         XCTAssertEqual(AppAppearanceDefaults.vibrancyState, .active)
-        XCTAssertEqual(AppAppearanceDefaults.vibrancyAppearanceName, .darkAqua)
     }
 
     @MainActor
@@ -586,7 +756,7 @@ final class SanttyTests: XCTestCase {
     func testVibrancyViewDoesNotOwnDarkBackgroundLayer() {
         let view = AppAppearanceDefaults.makeVibrancyView()
 
-        XCTAssertEqual(view.appearance?.name, AppAppearanceDefaults.vibrancyAppearanceName)
+        XCTAssertNil(view.appearance)
         XCTAssertNil(view.layer?.backgroundColor)
         XCTAssertTrue(view.subviews.isEmpty)
     }
@@ -785,7 +955,7 @@ final class SanttyTests: XCTestCase {
         let picker = try XCTUnwrap(firstSubview(ofType: NSSegmentedControl.self, in: view))
         let table = try XCTUnwrap(firstSubview(ofType: NSTableView.self, in: view))
         XCTAssertEqual((0..<picker.segmentCount).map { picker.label(forSegment: $0) },
-                       ["All", "Workspace", "Tab", "Pane", "Command"])
+                       ["All", "Agents", "Workspace", "Tab", "Pane", "Command"])
         let tab = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
             windowNumber: panel.windowNumber, context: nil, characters: "\t", charactersIgnoringModifiers: "\t",
             isARepeat: false, keyCode: 48))

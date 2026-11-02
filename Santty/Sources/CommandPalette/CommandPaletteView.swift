@@ -475,7 +475,6 @@ private final class CommandPaletteSearchContainerView: NSView {
         vibrancyView.material = .popover
         vibrancyView.blendingMode = .behindWindow
         vibrancyView.state = .active
-        vibrancyView.appearance = NSAppearance(named: .darkAqua)
 
         addSubview(vibrancyView)
         pin(vibrancyView, to: self)
@@ -657,6 +656,7 @@ private final class CommandPaletteCellView: NSTableCellView {
         iconView.image =
             command.map(Self.icon(for:))
             ?? NSImage(systemSymbolName: "command", accessibilityDescription: nil)
+        iconView.contentTintColor = iconView.image?.isTemplate == true ? CommandPaletteColors.primaryText : nil
         shortcutWidthConstraint?.constant = command?.shortcut == nil ? 138 : 176
         alphaValue = command?.isEnabled == false ? 0.45 : 1
         titleLabel.textColor = CommandPaletteColors.primaryText
@@ -686,6 +686,7 @@ private final class CommandPaletteCellView: NSTableCellView {
     }
 
     private static func icon(for command: AppCommand) -> NSImage? {
+        if let image = command.brandIcon?.image() { return image }
         if let symbol = command.symbol {
             return NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         }

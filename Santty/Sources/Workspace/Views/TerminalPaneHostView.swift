@@ -95,6 +95,8 @@ final class TerminalPaneHostView: NSView {
     )
     private let statusBackgroundView = NSView()
     private let statusLabel = NSTextField(labelWithString: "")
+    private let retryButton = NSButton(title: "Retry Connection", target: nil, action: nil)
+    private var retryAction: (() -> Void)?
     private let scrollModeBackgroundView = NSView()
     private let scrollModeLabel = NSTextField(labelWithString: "SCROLL")
     private(set) var scrollModeView: TerminalScrollModeView?
@@ -146,6 +148,10 @@ final class TerminalPaneHostView: NSView {
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.isHidden = true
         addSubview(statusLabel)
+        retryButton.target = self
+        retryButton.action = #selector(retryConnection)
+        retryButton.isHidden = true
+        addSubview(retryButton)
 
         scrollModeLabel.font = .monospacedSystemFont(ofSize: 10, weight: .bold)
         scrollModeLabel.textColor = .black
@@ -185,8 +191,8 @@ final class TerminalPaneHostView: NSView {
         let labelSize = statusLabel.intrinsicContentSize
         let horizontalPadding: CGFloat = 8
         let verticalPadding: CGFloat = 4
-        let backgroundWidth = min(bounds.width - 16, labelSize.width + horizontalPadding * 2)
-        let backgroundHeight = labelSize.height + verticalPadding * 2
+        let backgroundWidth = min(bounds.width - 16, max(labelSize.width, retryButton.isHidden ? 0 : 140) + horizontalPadding * 2)
+        let backgroundHeight = labelSize.height + verticalPadding * 2 + (retryButton.isHidden ? 0 : 30)
         let topInset: CGFloat = nameBadge.isHidden ? 8 : nameBadge.intrinsicContentSize.height + 12
         let origin = NSPoint(x: 8, y: max(8, bounds.height - backgroundHeight - topInset))
 
@@ -197,10 +203,12 @@ final class TerminalPaneHostView: NSView {
 
         statusLabel.frame = NSRect(
             x: origin.x + horizontalPadding,
-            y: origin.y + verticalPadding,
+            y: origin.y + backgroundHeight - verticalPadding - labelSize.height,
             width: max(0, backgroundWidth - horizontalPadding * 2),
             height: labelSize.height
         )
+
+        retryButton.frame = NSRect(x: origin.x + horizontalPadding, y: origin.y + 2, width: 140, height: 28)
 
         let scrollModeSize = scrollModeLabel.intrinsicContentSize
         scrollModeBackgroundView.frame = NSRect(
@@ -281,8 +289,17 @@ final class TerminalPaneHostView: NSView {
         statusBackgroundView.isHidden = isLive
         statusLabel.isHidden = isLive
         statusLabel.stringValue = displayTitle
+        statusLabel.toolTip = displayTitle
         needsLayout = true
     }
+
+    func setRetryAction(_ action: (() -> Void)?) {
+        retryAction = action
+        retryButton.isHidden = action == nil
+        needsLayout = true
+    }
+
+    @objc private func retryConnection() { retryAction?() }
 
     func setScrollModeActive(_ active: Bool) {
         scrollModeBackgroundView.isHidden = !active

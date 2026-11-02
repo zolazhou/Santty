@@ -78,6 +78,7 @@ The codebase is organized into three layers that bridge AppKit to the Ghostty C 
 
 ## Important Patterns
 
+- **Appearance**: `main.swift` sets the application's dark appearance before creating UI. Windows, panes and popovers inherit it; do not add local appearance overrides. Resolve semantic `CGColor` values inside the view's `effectiveAppearance` drawing context and refresh them when that appearance changes.
 - **Concurrency**: Almost all terminal-facing code is `@MainActor`. The runtime bootstrap runs on `Task.detached` but results are delivered to the main actor. `runOnMainThread` uses `MainActor.assumeIsolated` when already on the main thread.
 - **C Pointer Safety**: Ghostty objects are stored as `nonisolated(unsafe)` raw pointers. `deinit` schedules C cleanup on the main actor via `Task { @MainActor ... }`.
 - **Vendor Dependency**: `Scripts/prepare-ghostty.sh` downloads and verifies upstream [`libghostty-spm`](https://github.com/Lakr233/libghostty-spm) 2.2.2026102101 at a pinned revision into ignored `Vendor/libghostty-spm` (requires Swift 6.2 / Xcode 26+). `Project.swift` uses this local package. The precompiled core is Ghostty `1e9e14af5df1`, including 1.4 memory optimizations but predating final 1.4.0. Keep using the original precompiled `GhosttyKit.xcframework`: do not build the C core from source. `Patches/` adds read-only snapshots and scroll selection, and keeps detached live panes draining callbacks. `TerminalPaneHostView` reports attachment through `setSurfaceVisible`; the package separately handles window occlusion. Run `mise run ghostty:prepare` before direct Tuist generation or after editing patches; mise generation tasks do this automatically. Move the old vendor directory aside when changing the pin. Preserve `TerminalView.foregroundPid` / `ttyName` for local process inspection and cwd inheritance.
@@ -88,13 +89,56 @@ The codebase is organized into three layers that bridge AppKit to the Ghostty C 
 ## Workspace Persistence
 
 - Workspace identity is a local UUID. The picker and sidebar derive their
-  entries from the current local workspaces; connection availability metadata
+  entries from the current Local and Herdr workspaces; connection availability metadata
   and duplicate directory snapshots are not stored.
 - `SavedWorkspace` reads and writes v10 only; development snapshots are not migrated.
   Preserve atomic saves, private file permissions,
   the writer lock and refusal to overwrite unreadable or unsupported files.
-- The window sidebar contains local Workspaces and Browser panes. Keep
+- Herdr integration lives in `Santty/Sources/Herdr/`: one `hc connect`
+  transport multiplexes terminal streams and events; stream credit follows Ghostty
+  parsing, not output enqueue. The GUI owns layout. Bindings include the permanent
+  core ID and local terminal address; never substitute a new terminal after an
+  identity change or blindly replay an ambiguous run. `santty-pane` labels reconcile
+  creations. Window close detaches viewers; explicit pane/tab/workspace close kills
+  terminals before removing their saved bindings. Remote workspaces select an
+  existing `hc machine` profile and route through the local core proxy using the
+  permanent remote core ID. Machine setup/login/update remains in hc. Persist a
+  pending run before sending it; retries reconcile its label without blindly
+  creating a shell. Remote reconnects reset the screen and Scroll Mode; input is
+  never replayed. Remote cwd, paths and PIDs must not use local filesystem or
+  process inspection, and remote shells must not receive the local control socket.
+  Closing a workspace never removes the shared machine profile. External agent
+  viewers persist `herdrViewer`; their explicit close only detaches and never
+  kills the shared terminal. Such viewers must always have a binding and cannot
+  create or reconcile a new program.
+  `Settings → Herdr` owns executable and attach-history preferences. Validate and
+  subscribe a replacement connection before swapping it; reconnect only Santty's
+  viewers, never the core daemon. Keep observer bindings scoped to their core ID,
+  and exclude connection commands, raw errors and environment values from copied diagnostics.
+- v10 includes optional workspace kinds and Herdr bindings; absent kinds mean
+  Local Workspace. Keep the terminal backend consistent with its owning workspace.
+- The window sidebar starts with a local terminal and supports Terminal,
+  Workspaces, Browser and Agents panes. Keep
   its state and focus independent of the selected main workspace.
+
+## Agents
+
+- `Santty/Sources/Agents/` receives root and child OSC 7501 records through the
+  existing herdr-core event subscription. Keep metadata monitoring active across
+  workspace switches without attaching a terminal or sending focus/resize/input.
+- Snapshot/reconnect/missed data establishes baselines. Only explicit `done`
+  reports produce completion messages; `turn` also changes on interruption,
+  blocked, clear and exit. Preserve unknown apps/states, unavailable entries,
+  identity isolation, deduplication, and revision-checked read acknowledgements.
+- Agents/Messages and notification clicks share safe core-bound navigation.
+  Agents panes work in the sidebar and main layout, share the same store, and
+  persist as `agents` panes. Metadata refreshes must never change first responder.
+  Each row opens its messages in a popover, filtered by the exact record ID;
+  keep root/child histories separate and preserve the trigger view across updates.
+  Existing panes retain layout; externally created terminals use viewer-only
+  panes. All Herdr agent types notify without per-agent preferences; request macOS
+  authorization before the first delivery. System permission does not affect tracking or local messages.
+  Do not install hooks or infer agent status from PID, process names or screen text.
 
 ## Automatic Updates (Sparkle)
 

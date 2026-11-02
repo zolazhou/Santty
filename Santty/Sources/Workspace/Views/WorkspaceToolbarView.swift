@@ -54,7 +54,7 @@ final class WorkspaceToolbarView: NSView {
 
     func updateWorkspaceEntries(_ entries: [WorkspaceEntry], selectedID: String?) {
         let changed = workspaceSwitcher.itemArray.count != entries.count || !zip(entries, workspaceSwitcher.itemArray).allSatisfy {
-            $0.id == $1.representedObject as? String && $0.name == $1.title
+            $0.id == $1.representedObject as? String && $0.name == $1.title && $0.detail == $1.toolTip
         }
         // Re-selecting during popup tracking can replace the user's choice before its action arrives.
         guard changed || selectedWorkspaceID != selectedID else { return }
@@ -63,14 +63,15 @@ final class WorkspaceToolbarView: NSView {
             for entry in entries {
                 workspaceSwitcher.addItem(withTitle: entry.name)
                 workspaceSwitcher.lastItem?.representedObject = entry.id
-                workspaceSwitcher.lastItem?.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: "Local Workspace")
-                workspaceSwitcher.lastItem?.toolTip = "Local Workspace"
+                workspaceSwitcher.lastItem?.image = entry.brandIcon?.image(size: 16)
+                    ?? NSImage(systemSymbolName: entry.symbol, accessibilityDescription: entry.detail)
+                workspaceSwitcher.lastItem?.toolTip = entry.detail
             }
         }
         selectedWorkspaceID = selectedID
         workspaceSwitcher.select(workspaceSwitcher.itemArray.first { $0.representedObject as? String == selectedID })
         workspaceSwitcher.isHidden = false
-        workspaceSwitcher.toolTip = workspaceSwitcher.titleOfSelectedItem
+        workspaceSwitcher.toolTip = workspaceSwitcher.selectedItem.map { $0.title + " · " + ($0.toolTip ?? "") }
         needsLayout = true
     }
 
@@ -79,6 +80,19 @@ final class WorkspaceToolbarView: NSView {
         // Keep the confirmed label while the request waits or is rejected by the operation gate.
         sender.select(selectedWorkspaceID.flatMap { selected in sender.itemArray.first { $0.representedObject as? String == selected } })
         onSelectWorkspace?(id)
+    }
+
+    let agentStatusButton = WorkspaceStatusButtonView()
+    private var agentCounts: (Int, Int)?
+
+    func updateAgents(count: Int, unread: Int) {
+        if let previous = agentCounts, previous.0 == count, previous.1 == unread { return }
+        agentCounts = (count, unread)
+        agentStatusButton.isHidden = count == 0 && unread == 0
+        agentStatusButton.badgeText = unread > 0 ? (unread > 99 ? "99+" : String(unread)) : nil
+        agentStatusButton.setAccessibilityLabel("Agents, \(count) sessions, \(unread) unread messages")
+        agentStatusButton.toolTip = "Show Agents"
+        needsLayout = true
     }
 
     private let statusStackView = WorkspaceToolbarStackView()
@@ -197,6 +211,7 @@ final class WorkspaceToolbarView: NSView {
         for button in detachedPaneButtons.values {
             button.updateAppearance()
         }
+        agentStatusButton.updateAppearance()
     }
 
     func detachedPaneCellFrame(for paneID: PaneID) -> NSRect? {
@@ -220,6 +235,10 @@ final class WorkspaceToolbarView: NSView {
         statusStackView.alignment = .centerY
         statusStackView.distribution = .fill
         statusStackView.spacing = spacing
+        agentStatusButton.title = "Agents"
+        agentStatusButton.symbolName = "sparkles"
+        agentStatusButton.isHidden = true
+        statusStackView.addArrangedSubview(agentStatusButton)
 
         workspaceSwitcher.cell = WorkspacePickerCell(textCell: "", pullsDown: false)
         addSubview(workspaceSwitcher)
@@ -228,8 +247,6 @@ final class WorkspaceToolbarView: NSView {
         workspaceSwitcherBackground.layer?.masksToBounds = true
         addSubview(workspaceSwitcherBackground, positioned: .below, relativeTo: workspaceSwitcher)
         workspaceSwitcherBackground.isHidden = !AppAppearanceSettings.isWindowHidden
-        // Santty chrome stays dark even when macOS uses the light appearance.
-        workspaceSwitcher.appearance = NSAppearance(named: AppAppearanceDefaults.vibrancyAppearanceName)
         workspaceSwitcher.controlSize = .regular
         workspaceSwitcher.bezelStyle = .roundRect
         workspaceSwitcher.heightAnchor.constraint(equalToConstant: toolbarHeight).isActive = true

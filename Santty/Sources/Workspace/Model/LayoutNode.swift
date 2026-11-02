@@ -214,14 +214,16 @@ indirect enum LayoutNode: Codable, Sendable, Equatable {
         switch self {
         case .panel:
             return panelMinimumSize
-        case .split(let axis, let children, _):
-            let minimumSizes = children.map {
+        case .split(let axis, let children, let fractions):
+            let visibleChildren = zip(children, fractions).filter { $0.1 > 0 }.map(\.0)
+            guard !visibleChildren.isEmpty else { return .zero }
+            let minimumSizes = visibleChildren.map {
                 $0.minimumSize(
                     panelMinimumSize: panelMinimumSize,
                     dividerThickness: dividerThickness
                 )
             }
-            let dividerCount = max(0, children.count - 1)
+            let dividerCount = max(0, visibleChildren.count - 1)
 
             switch axis {
             case .horizontal:
@@ -385,7 +387,8 @@ indirect enum LayoutNode: Codable, Sendable, Equatable {
         _ proposedFractions: [CGFloat],
         in availableSize: NSSize,
         panelMinimumSize: NSSize = WorkspaceLayoutMetrics.minimumPaneSize,
-        dividerThickness: CGFloat = WorkspaceLayoutMetrics.dividerThickness
+        dividerThickness: CGFloat = WorkspaceLayoutMetrics.dividerThickness,
+        collapsedChildIndices: Set<Int> = []
     ) -> [CGFloat] {
         guard case .split(let axis, let children, _) = self,
             children.count == proposedFractions.count
@@ -396,14 +399,15 @@ indirect enum LayoutNode: Codable, Sendable, Equatable {
         let totalPrimaryLength = max(
             0,
             (axis == .horizontal ? availableSize.width : availableSize.height)
-                - (dividerThickness * CGFloat(max(0, children.count - 1)))
+                - (dividerThickness * CGFloat(max(0, children.count - collapsedChildIndices.count - 1)))
         )
 
         guard totalPrimaryLength > 0 else {
             return Self.normalizedFractions(proposedFractions, count: proposedFractions.count)
         }
 
-        let minimumFractions = children.map { child in
+        let minimumFractions = children.enumerated().map { index, child -> CGFloat in
+            guard !collapsedChildIndices.contains(index) else { return 0 }
             let minimumSize = child.minimumSize(
                 panelMinimumSize: panelMinimumSize,
                 dividerThickness: dividerThickness

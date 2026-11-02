@@ -29,6 +29,64 @@ final class WorkspaceTilingViewTests: XCTestCase {
 
     // MARK: - TilingLayout: Horizontal Split
 
+    func testCollapsedNestedBranchConsumesNoSpaceOrDividers() {
+        let ids = (0..<3).map { _ in PaneID() }
+        for axis in [SplitAxis.horizontal, .vertical] {
+            let layout = TilingLayout.compute(
+                node: .split(axis: axis, children: [
+                    .split(axis: axis == .horizontal ? .vertical : .horizontal,
+                        children: [.panel(ids[0]), .panel(ids[1])], fractions: [0.5, 0.5]),
+                    .panel(ids[2]),
+                ], fractions: [0, 1]),
+                rect: NSRect(x: 0, y: 0, width: 1000, height: 600))
+            XCTAssertTrue(layout.panePlacements[0].frame.isEmpty)
+            XCTAssertTrue(layout.panePlacements[1].frame.isEmpty)
+            XCTAssertEqual(layout.panePlacements[2].frame, NSRect(x: 0, y: 0, width: 1000, height: 600))
+            XCTAssertTrue(layout.dividerPlacements.isEmpty)
+        }
+    }
+
+    func testCollapsedMiddlePaneHidesWithoutZeroResizeAndDividerDragSkipsIt() throws {
+        let ids = (0..<3).map { _ in PaneID() }
+        let views = Dictionary(uniqueKeysWithValues: ids.map { ($0, NSView()) })
+        let tiling = WorkspaceTilingView()
+        tiling.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+        let original = LayoutNode.split(axis: .horizontal, children: ids.map(LayoutNode.panel), fractions: [0.34, 0.33, 0.33])
+        tiling.setLayoutNode(original, paneViews: views)
+        let middleFrame = try XCTUnwrap(views[ids[1]]).frame
+        var commits: [[CGFloat]] = []
+        tiling.onFractionsChange = { _, fractions, _ in commits.append(fractions) }
+        tiling.setLayoutNode(.split(axis: .horizontal, children: ids.map(LayoutNode.panel), fractions: [0.5, 0, 0.5]),
+            paneViews: views, animated: true, isTransient: true)
+        XCTAssertTrue(try XCTUnwrap(views[ids[1]]).isHidden)
+        XCTAssertEqual(views[ids[1]]?.frame, middleFrame)
+        XCTAssertTrue(try XCTUnwrap(tiling.debugPaneFrame(paneID: ids[1])).isEmpty)
+        XCTAssertEqual(try XCTUnwrap(tiling.debugPaneFrame(paneID: ids[2])).maxX, 1000, accuracy: 0.0001)
+        XCTAssertTrue(commits.isEmpty)
+
+        tiling.debugApplyDragForDivider(at: [], dividerIndex: 0, location: NSPoint(x: 600, y: 300))
+        let fractions = try XCTUnwrap(commits.last)
+        XCTAssertEqual(fractions[0], 600 / 994, accuracy: 0.0001)
+        XCTAssertEqual(fractions[1], 0)
+        XCTAssertEqual(fractions[2], 394 / 994, accuracy: 0.0001)
+        tiling.setLayoutNode(original, paneViews: views)
+        XCTAssertFalse(try XCTUnwrap(views[ids[1]]).isHidden)
+        XCTAssertTrue(tiling.collapsedPaneIDs.isEmpty)
+    }
+
+    func testTransientMinimumSizeClampsDoNotPublishModelChanges() {
+        let ids = [PaneID(), PaneID()]
+        let tiling = WorkspaceTilingView()
+        tiling.frame = NSRect(x: 0, y: 0, width: 1000, height: 600)
+        var commits = 0
+        tiling.onFractionsChange = { _, _, _ in commits += 1 }
+        tiling.setLayoutNode(.split(axis: .horizontal, children: ids.map(LayoutNode.panel), fractions: [0.01, 0.99]),
+            paneViews: Dictionary(uniqueKeysWithValues: ids.map { ($0, NSView()) }),
+            animated: false, isTransient: true)
+        XCTAssertEqual(commits, 0)
+        XCTAssertEqual(tiling.debugPaneFrame(paneID: ids[0])?.width ?? 0, 240, accuracy: 0.0001)
+    }
+
     func testHorizontalSplitTwoPanesEqualFractions() {
         let paneA = PaneID()
         let paneB = PaneID()

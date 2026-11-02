@@ -16,8 +16,31 @@ struct PaneFocusRatios: Codable, Sendable, Equatable {
 }
 
 struct PaneAutoResizeConfiguration: Codable, Sendable, Equatable {
+    enum Trigger: String, Codable, Sendable {
+        case focus
+        case unfocused
+
+        var ratioRange: ClosedRange<Double> {
+            self == .focus ? 0.25...0.95 : 0...1
+        }
+    }
+
     var isEnabled: Bool
     var ratios: PaneFocusRatios
+    var trigger: Trigger = .focus
+    var isHorizontalEnabled: Bool = true
+    var isVerticalEnabled: Bool = true
+}
+
+extension PaneAutoResizeConfiguration {
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
+        ratios = try container.decode(PaneFocusRatios.self, forKey: .ratios)
+        trigger = try container.decodeIfPresent(Trigger.self, forKey: .trigger) ?? .focus
+        isHorizontalEnabled = try container.decodeIfPresent(Bool.self, forKey: .isHorizontalEnabled) ?? true
+        isVerticalEnabled = try container.decodeIfPresent(Bool.self, forKey: .isVerticalEnabled) ?? true
+    }
 }
 
 enum WorkspaceFocusZoomConfiguration {
@@ -143,18 +166,28 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     private var workspaceSaveTask: Task<Void, Never>?
     private(set) var workspacePersistenceError: String?
     private var workspaceEntries: [WorkspaceEntry] = []
+    private var closingHerdrPaneIDs: Set<PaneID> = []
+    var herdrCoreClient = HerdrCoreClient.shared
+    private var agentObserver: NSObjectProtocol?
+    private var agentPopover: AgentManagerPopoverController?
+    private var agentNavigationTask: Task<Void, Never>?
+
     private struct LocalWorkspaceState {
         let id: UUID
         let name: String
+        var kind: WorkspaceKind = .local
+        var remote: HerdrRemote? = nil
         var tabs: [WorkspaceTabState]
         var selectedTabID: UUID?
-        var pickerID: String { "local." + id.uuidString }
+        var pickerID: String { kind.rawValue + "." + id.uuidString }
     }
     private var localWorkspaceID = UUID()
     private var localWorkspaceName = "Default"
+    private var workspaceKind: WorkspaceKind = .local
+    private var workspaceRemote: HerdrRemote?
     private var otherLocalWorkspaces: [LocalWorkspaceState] = []
     private var localWorkspaceStates: [LocalWorkspaceState] {
-        let current = LocalWorkspaceState(id: localWorkspaceID, name: localWorkspaceName,
+        let current = LocalWorkspaceState(id: localWorkspaceID, name: localWorkspaceName, kind: workspaceKind, remote: workspaceRemote,
             tabs: tabs, selectedTabID: selectedTabID)
         return ([current] + otherLocalWorkspaces).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
@@ -172,9 +205,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
                     panes: tab.paneControllers.values.sorted { $0.id.uuidString < $1.id.uuidString }.map { pane in
                         let terminal = pane as? TerminalPaneController
                         return CLIPane(id: pane.id, title: pane.displayTitle, name: pane.name,
-                            kind: terminal != nil ? "terminal" : "browser",
+                            kind: terminal != nil ? "terminal" : pane is AgentsPaneController ? "agents" : pane is SidebarListPaneController ? "workspaces" : "browser",
                             cwd: terminal?.workingDirectoryForNewPane,
-                            foregroundProcessGroupID: terminal?.foregroundProcessID,
+                            foregroundProcessGroupID: terminal?.herdrSession?.remote == nil ? terminal?.foregroundProcessID : nil,
                             isFocused: tab.focusedPaneID == pane.id, isLive: pane.isLive,
                             isDetached: tab.isPaneDetached(pane.id))
                     })
@@ -243,7 +276,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private var canSplitFocusedPane: Bool {
-        !sidebarIsFocused && focusedPaneIsTiled && focusedPaneController != nil
+        focusedPaneIsTiled && focusedPaneController != nil
             && focusedTerminalPaneController.map({ $0.isLive }) != false
 
     }
@@ -275,11 +308,16 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         }
         sidebarMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             MainActor.assumeIsolated {
-                guard let self, self.sidebar.isVisible, event.window === self.view.window else { return }
+                guard let self, event.window === self.view.window else { return }
                 let point = self.view.convert(event.locationInWindow, from: nil)
-                for pane in self.sidebar.tab.paneControllers.values {
+                for pane in self.sidebar.tab.paneControllers.values where self.sidebar.isVisible {
                     let frame = pane.hostView.convert(pane.hostView.bounds, to: self.view)
-                    if frame.contains(point) { self.focusSidebarPane(pane.id); break }
+                    if frame.contains(point) { self.focusSidebarPane(pane.id); return }
+                }
+                for case let pane as AgentsPaneController in self.selectedTabState?.paneControllers.values ?? [:].values {
+                    guard pane.hostView.window === event.window else { continue }
+                    let frame = pane.hostView.convert(pane.hostView.bounds, to: self.view)
+                    if frame.contains(point) { self.handlePaneFocusRequest(withID: pane.id); return }
                 }
             }
             return event
@@ -297,6 +335,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         rootView.tabStripView.onMoveTab = { [weak self] tabID, destinationIndex in
             self?.moveTab(withID: tabID, to: destinationIndex)
         }
+        configureAgents()
         rootView.toolbarView.onSelectWorkspace = { [weak self] in self?.selectWorkspace($0) }
         if let initialSavedWorkspace {
             do { try restoreWorkspace(initialSavedWorkspace) }
@@ -342,6 +381,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
     deinit {
         MainActor.assumeIsolated {
+            if let agentObserver { NotificationCenter.default.removeObserver(agentObserver) }
+            agentNavigationTask?.cancel()
             if let sidebarMouseMonitor { NSEvent.removeMonitor(sidebarMouseMonitor) }
             workspaceSaveTask?.cancel()
             paneNameRevealTask?.cancel()
@@ -366,6 +407,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             if let selectedTabState {
                 startPaneControllersIfNeeded(in: selectedTabState)
             }
+            if sidebar.isVisible { startPaneControllersIfNeeded(in: sidebar.tab) }
         }
 
         applyFocusedPaneResponder()
@@ -415,16 +457,16 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if sidebarIsFocused, [#selector(toggleFloatingPane(_:)), #selector(detachPane(_:)),
+        if sidebarIsFocused, [#selector(detachPane(_:)),
             #selector(attachDetachedPane(_:)), #selector(showAutoResizeSettings(_:)),
             #selector(convertFocusedPaneToTerminal(_:)), #selector(convertFocusedPaneToBrowser(_:))].contains(menuItem.action) { return false }
         if let keyWindow = NSApp.keyWindow, keyWindow is NSPanel, !keyWindow.canBecomeMain {
             return false
         }
         return switch menuItem.action {
-        case #selector(splitPaneHorizontally(_:)), #selector(splitPaneVertically(_:)):
+        case #selector(splitPaneHorizontally(_:)), #selector(splitPaneVertically(_:)), #selector(newTerminalPane(_:)):
             canSplitFocusedPane
-        case #selector(newBrowserPane(_:)):
+        case #selector(newBrowserPane(_:)), #selector(newAgentsPane(_:)), #selector(newWorkspacesPane(_:)):
             focusedPaneController != nil && focusedPaneIsTiled
         case #selector(focusBrowserLocationBar(_:)):
             focusedBrowserPaneController != nil
@@ -450,7 +492,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             canMovePane(.left)
         case #selector(movePaneRight(_:)):
             canMovePane(.right)
-        case #selector(newWorkspace(_:)):
+        case #selector(newWorkspace(_:)), #selector(newHerdrWorkspace(_:)), #selector(newRemoteHerdrWorkspace(_:)):
             canCreateLocalWorkspace
         case #selector(closeWorkspace(_:)), #selector(renameWorkspace(_:)):
             canCloseWorkspace
@@ -529,9 +571,21 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     @objc func newBrowserPane(_: Any?) {
-        splitFocusedPane(along: .horizontal) {
+        splitFocusedPane(along: automaticSplitAxis(for: focusedPaneController)) {
             self.makeBrowserPaneController()
         }
+    }
+
+    @objc func newAgentsPane(_: Any?) {
+        splitFocusedPane(along: automaticSplitAxis(for: focusedPaneController)) { self.makeAgentsPaneController() }
+    }
+
+    @objc func newWorkspacesPane(_: Any?) {
+        splitFocusedPane(along: automaticSplitAxis(for: focusedPaneController)) { self.makeWorkspacesPaneController() }
+    }
+
+    @objc func newTerminalPane(_: Any?) {
+        splitFocusedPane(along: automaticSplitAxis(for: focusedPaneController))
     }
 
     @objc func focusBrowserLocationBar(_: Any?) {
@@ -645,8 +699,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     @objc func toggleFloatingPane(_: Any?) {
-        guard !sidebarIsFocused else { return }
-        guard let tabState = selectedTabState else {
+        guard let tabState = activePaneTab else {
             NSSound.beep()
             return
         }
@@ -870,8 +923,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         focusTab(at: index)
     }
 
-    private func createInitialTab() {
-        let initialTabState = makeTabState(startImmediately: false)
+    private func createInitialTab(terminal: TerminalPaneController? = nil) {
+        let initialTabState = makeTabState(startImmediately: false, terminal: terminal)
         tabs = [initialTabState]
         selectedTabID = initialTabState.id
         workspacePersistenceActivated = true
@@ -879,8 +932,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         scheduleWorkspaceSave()
     }
 
-    private func makeTabState(startImmediately: Bool) -> WorkspaceTabState {
-        let paneController: any PaneControlling = makeTerminalPaneController()
+    private func makeTabState(startImmediately: Bool, terminal: TerminalPaneController? = nil) -> WorkspaceTabState {
+        let paneController: any PaneControlling = terminal ?? makeTerminalPaneController()
         let tabState = WorkspaceTabState(
             layoutNode: .panel(paneController.id),
             paneControllers: [paneController.id: paneController],
@@ -899,9 +952,16 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
     private func makeTerminalPaneController(
         id: PaneID = UUID(),
-        workingDirectory: String? = nil
+        workingDirectory: String? = nil,
+        kind: WorkspaceKind? = nil,
+        binding: HerdrTerminalBinding? = nil,
+        remote: HerdrRemote? = nil,
+        runPending: Bool = false,
+        viewerOnly: Bool = false
     ) -> TerminalPaneController {
-        let paneController = TerminalPaneController(id: id, workingDirectory: workingDirectory)
+        let herdr = (kind ?? workspaceKind) == .herdr ? HerdrTerminalSession(paneID: id, cwd: workingDirectory, binding: binding, remote: kind == nil ? workspaceRemote : remote, runPending: runPending, viewerOnly: viewerOnly, client: herdrCoreClient) : nil
+        herdr?.beforeRun = { [weak self] in try await self?.flushWorkspaceState() }
+        let paneController = TerminalPaneController(id: id, workingDirectory: workingDirectory, herdrSession: herdr)
         paneController.updateAppearance()
 
         paneController.onFocusRequest = { [weak self] paneID in
@@ -910,6 +970,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
         paneController.onTitleChange = { [weak self] paneID in
             self?.handleTitleChange(for: paneID)
+            self?.scheduleWorkspaceSave()
         }
 
         paneController.onExit = { [weak self] paneID in
@@ -929,9 +990,26 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
         paneController.onTitleChange = { [weak self] paneID in
             self?.handleTitleChange(for: paneID)
+            self?.scheduleWorkspaceSave()
         }
 
         return paneController
+    }
+
+    private func makeAgentsPaneController(id: PaneID = UUID()) -> AgentsPaneController {
+        let pane = AgentsPaneController(id: id)
+        let store = herdrCoreClient.agents
+        pane.onFocusRequest = { [weak self] in self?.handlePaneFocusRequest(withID: $0) }
+        pane.managerView.onFocusPane = { [weak self, weak store] session in
+            store?.acknowledge(session)
+            self?.navigateToAgent(session.binding)
+        }
+        pane.managerView.onCancel = { [weak self] in
+            guard let self, self.sidebar.tab.containsPane(withID: id) else { return }
+            self.focusMainRegion()
+        }
+        pane.update(sessions: store.snapshots, messages: store.messageSnapshots)
+        return pane
     }
 
     private func applyTerminalSettingsToPanes() {
@@ -945,8 +1023,14 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
     }
 
+    private func automaticSplitAxis(for pane: (any PaneControlling)?) -> SplitAxis {
+        view.layoutSubtreeIfNeeded()
+        let size = pane?.hostView.bounds.size ?? .zero
+        return size.width >= size.height ? .horizontal : .vertical
+    }
+
     private func splitFocusedPane(along axis: SplitAxis) {
-        guard !sidebarIsFocused, canSplitFocusedPane else {
+        guard canSplitFocusedPane else {
             NSSound.beep()
             return
         }
@@ -959,12 +1043,13 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
             splitFocusedPane(along: axis) {
                 self.makeTerminalPaneController(
-                    workingDirectory: focusedTerminalPaneController.workingDirectoryForNewPane
+                    workingDirectory: focusedTerminalPaneController.workingDirectoryForNewPane,
+                    kind: self.sidebarIsFocused ? .local : nil
                 )
             }
         } else {
             splitFocusedPane(along: axis) {
-                self.makeTerminalPaneController()
+                self.makeTerminalPaneController(kind: self.sidebarIsFocused ? .local : nil)
             }
         }
     }
@@ -1026,6 +1111,13 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             return
         }
 
+        if let previous = tabState.focusedPaneController, closeHerdrPanes([previous], then: { [weak self, weak tabState] in
+            guard let self, let tabState else { return }
+            if self.selectedTabState === tabState, tabState.focusedPaneID == focusedPaneID {
+                self.replaceFocusedPane(with: newPaneController)
+            } else { self.performClosePane(withID: focusedPaneID, in: tabState) }
+        }) { return }
+
         leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
         clearActiveAutoZoomState(in: tabState, restoreLayout: false, animated: false)
 
@@ -1056,11 +1148,10 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
         leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
         clearActiveAutoZoomState(in: tabState, restoreLayout: false, animated: false)
-        tabState.layoutNode = layoutNode.equalizingSplitFractions()
-        for paneID in tabState.paneControllers.keys {
-            tabState.paneAutoResizeConfigurations[paneID]?.isEnabled = false
-        }
-        rebuildPaneContainer(tabState)
+        let equalizedLayout = layoutNode.equalizingSplitFractions()
+        tabState.layoutNode = equalizedLayout
+        let activeTilingView = tabState === sidebar.tab ? windowContentView.sidebarView : tilingView
+        activeTilingView?.setLayoutNode(equalizedLayout, paneViews: buildPaneViewsDictionary(for: tabState))
         scheduleWorkspaceSave()
     }
 
@@ -1076,8 +1167,14 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             return
         }
 
+        let target = focusedResizeTarget(for: direction.axis)
+        if target == nil, sidebarIsFocused, direction.axis == .horizontal {
+            windowContentView.moveSidebarDivider(by: direction == .left ? -0.05 : 0.05)
+            return
+        }
+
         guard
-            let target = focusedResizeTarget(for: direction.axis),
+            let target,
             let targetFractions = movedDividerFractions(
                 in: target.context,
                 direction: direction
@@ -1125,6 +1222,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             return true
         }
         return focusedResizeTarget(for: direction.axis) != nil
+            || sidebarIsFocused && direction.axis == .horizontal
     }
 
     private func movePane(_ direction: PaneMoveDirection) {
@@ -1184,6 +1282,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         in tabState: WorkspaceTabState,
         direction: PaneDividerMoveDirection
     ) {
+        let rootView = floatingRootView(for: tabState)
         let activePaneID: PaneID
         let floatingState = tabState.activeFloatingPaneState
         if let state = floatingState {
@@ -1305,8 +1404,14 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func performClosePane(withID paneID: PaneID, in tabState: WorkspaceTabState) {
+        if let pane = tabState.paneControllers[paneID], closeHerdrPanes([pane], then: { [weak self, weak tabState] in
+            guard let self, let tabState else { return }
+            self.performClosePane(withID: paneID, in: tabState)
+        }) { return }
+
         if tabState === sidebar.tab {
             guard let result = tabState.layoutNode?.closingPane(paneID) else { return }
+            leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
             removePaneControllerState(for: paneID, in: tabState)
             tabState.layoutNode = result.root
             tabState.focusedPaneID = result.promotedPaneID ?? result.root?.firstPaneID
@@ -1365,6 +1470,28 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         }
 
         closeTab(withID: tabState.id, bypassTabConfirmation: true)
+    }
+
+    private func closeHerdrPanes(_ panes: [any PaneControlling], then completion: @escaping @MainActor () -> Void) -> Bool {
+        let terminals = panes.compactMap { $0 as? TerminalPaneController }.filter { $0.herdrSession != nil && $0.herdrSession?.state != .finished }
+        guard !terminals.isEmpty else { return false }
+        let ids = Set(terminals.map(\.id))
+        guard closingHerdrPaneIDs.isDisjoint(with: ids) else { return true }
+        closingHerdrPaneIDs.formUnion(ids)
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.closingHerdrPaneIDs.subtract(ids) }
+            do {
+                for terminal in terminals { try await terminal.herdrSession?.closeTerminal() }
+                completion()
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Could Not Close Herdr Terminal"
+                alert.informativeText = error.localizedDescription
+                alert.runModal()
+            }
+        }
+        return true
     }
 
     private func removePaneControllerState(for paneID: PaneID, in tabState: WorkspaceTabState) {
@@ -1429,7 +1556,6 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
         }
         hideActiveDetachedPane(in: tabState, animated: false, reapplyAutoZoom: false)
-        restoreActiveAutoZoom(in: tabState, animated: true)
 
         tabState.focusedPaneID = paneID
         tabState.markPaneFocused(paneID)
@@ -1463,7 +1589,20 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         direction: PaneFocusDirection,
         in tabState: WorkspaceTabState, acrossWindow: Bool = false
     ) -> PaneID? {
-        guard let focusedFrame = renderedPaneFrame(for: focusedPaneID, in: tabState) else {
+        var unfoldedFrames: [PaneID: NSRect] = [:]
+        if let tilingView, !tilingView.collapsedPaneIDs.isEmpty,
+            let layoutNode = selectedTabState?.layoutNode
+        {
+            let layout = TilingLayout.compute(
+                node: layoutNode, rect: tilingView.bounds,
+                dividerThickness: AppAppearanceSettings.workspaceDividerThickness)
+            unfoldedFrames = Dictionary(uniqueKeysWithValues: layout.panePlacements.map {
+                ($0.paneID, tilingView.convert($0.frame, to: view))
+            })
+        }
+        guard let focusedFrame = unfoldedFrames[focusedPaneID]
+            ?? renderedPaneFrame(for: focusedPaneID, in: tabState)
+        else {
             return nil
         }
 
@@ -1472,7 +1611,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             .compactMap { paneID, owner -> DirectionalPaneCandidate? in
                 guard paneID != focusedPaneID,
                     owner.isPaneTiled(paneID),
-                    let candidateFrame = renderedPaneFrame(for: paneID, in: owner)
+                    let candidateFrame = unfoldedFrames[paneID]
+                        ?? renderedPaneFrame(for: paneID, in: owner)
                 else {
                     return nil
                 }
@@ -1502,7 +1642,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
     private func renderedPaneFrame(for paneID: PaneID, in tabState: WorkspaceTabState) -> NSRect? {
         guard let hostView = tabState.paneControllers[paneID]?.hostView,
-            hostView.superview != nil
+            hostView.superview != nil, !hostView.isHidden
         else {
             return nil
         }
@@ -1522,7 +1662,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             return nil
         }
 
-        return rootView.floatingPaneFrame(for: hostView)
+        return floatingRootView(for: tabState).floatingPaneFrame(for: hostView)
     }
 
     private func directionalFocusScore(
@@ -1675,6 +1815,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             return
         }
         if tabs.count == 1 {
+            if !bypassTabConfirmation, tabState.paneControllers.values.contains(where: { ($0 as? TerminalPaneController)?.herdrSession != nil }),
+               !confirmCloseTabIfNeeded(tabState) { return }
+            if closeHerdrPanes(Array(tabState.paneControllers.values), then: { [weak self] in self?.closeTab(withID: tabID, bypassTabConfirmation: true) }) { return }
             guard confirmCloseWindowIfNeeded() else {
                 return
             }
@@ -1690,6 +1833,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         if !bypassTabConfirmation, !confirmCloseTabIfNeeded(tabState) {
             return
         }
+
+        if closeHerdrPanes(Array(tabState.paneControllers.values), then: { [weak self] in self?.closeTab(withID: tabID, bypassTabConfirmation: true) }) { return }
 
         let wasSelected = selectedTabID == tabID
         if wasSelected {
@@ -1733,11 +1878,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             return
         }
 
-        tabState.paneControllers[paneID]?.updatePresentation(
-            isFocused: paneID == tabState.focusedPaneID,
-            isFloating: tabState.activeFloatingPaneState?.paneID == paneID
-                || tabState.activeDetachedPaneID == paneID
-        )
+        updatePanePresentation(in: tabState)
 
         updateTabStrip()
 
@@ -1779,8 +1920,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func canToggleFloatingPane() -> Bool {
-        if sidebarIsFocused { return false }
-        guard let tabState = selectedTabState else {
+        guard let tabState = activePaneTab else {
             return false
         }
 
@@ -2071,9 +2211,10 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func enterFloatingPane(in tabState: WorkspaceTabState, animated: Bool) {
+        let rootView = floatingRootView(for: tabState)
 
         guard
-            tabState.id == selectedTabID,
+            tabState.id == selectedTabID || tabState === sidebar.tab && sidebar.isVisible,
             tabState.activeFloatingPaneState == nil,
             let paneID = tabState.focusedPaneID,
             let paneController = tabState.paneControllers[paneID]
@@ -2097,16 +2238,20 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             initialFrame: sourceFrame,
             animated: animated
         )
-        rebuildWorkspaceLayout(applyAutoZoomAnimated: false, restoreFloatingPresentation: false)
+        if tabState === sidebar.tab {
+            rebuildSidebar(restoreFloatingPresentation: false)
+        } else {
+            rebuildWorkspaceLayout(applyAutoZoomAnimated: false, restoreFloatingPresentation: false)
+        }
 
         let targetFrame = rootView.floatingPaneTargetFrame()
         if animated {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = WorkspaceFloatingPaneConfiguration.animationDuration
                 rootView.animateFloatingPaneFrame(to: targetFrame)
-            } completionHandler: { [weak self] in
+            } completionHandler: { [weak self, weak rootView] in
                 Task { @MainActor in
-                    self?.rootView.finishFloatingPaneAnimation()
+                    rootView?.finishFloatingPaneAnimation()
                     self?.applyFocusedPaneResponder()
                 }
             }
@@ -2122,9 +2267,10 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         animated: Bool,
         reapplyAutoZoom: Bool
     ) {
+        let rootView = floatingRootView(for: tabState)
 
         guard
-            tabState.id == selectedTabID,
+            tabState.id == selectedTabID || tabState === sidebar.tab && sidebar.isVisible,
             let floatingPaneState = tabState.activeFloatingPaneState,
             let paneController = tabState.paneControllers[floatingPaneState.paneID]
         else {
@@ -2132,9 +2278,12 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             return
         }
 
-        let destinationFrame =
-            rootView.placeholderFrame(for: floatingPaneState.paneID)
-            ?? paneController.hostView.frame
+        let destinationFrame: NSRect
+        if tabState === sidebar.tab, let placeholder = windowContentView.sidebarView.paneViews[floatingPaneState.paneID] {
+            destinationFrame = rootView.floatingPaneFrame(for: placeholder) ?? paneController.hostView.frame
+        } else {
+            destinationFrame = rootView.placeholderFrame(for: floatingPaneState.paneID) ?? paneController.hostView.frame
+        }
 
         if animated {
             rootView.beginFloatingPaneAnimation()
@@ -2160,6 +2309,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         in tabState: WorkspaceTabState,
         reapplyAutoZoom: Bool
     ) {
+        let rootView = floatingRootView(for: tabState)
         if let floatingState = tabState.activeFloatingPaneState,
             let size = floatingState.size
         {
@@ -2167,7 +2317,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         }
 
         tabState.activeFloatingPaneState = nil
-        rebuildWorkspaceLayout(applyAutoZoomAnimated: reapplyAutoZoom)
+        if tabState === sidebar.tab { rebuildSidebar() }
+        else { rebuildWorkspaceLayout(applyAutoZoomAnimated: reapplyAutoZoom) }
         rootView.removeFloatingPaneView()
         applyFocusedPaneResponder()
     }
@@ -2176,6 +2327,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         in tabState: WorkspaceTabState,
         reapplyAutoZoom: Bool
     ) {
+        let rootView = floatingRootView(for: tabState)
 
         if let floatingState = tabState.activeFloatingPaneState,
             let paneController = tabState.paneControllers[floatingState.paneID],
@@ -2185,7 +2337,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         }
 
         tabState.activeFloatingPaneState = nil
-        rebuildWorkspaceLayout(applyAutoZoomAnimated: reapplyAutoZoom)
+        if tabState === sidebar.tab { rebuildSidebar() }
+        else { rebuildWorkspaceLayout(applyAutoZoomAnimated: reapplyAutoZoom) }
         rootView.removeFloatingPaneView()
         applyFocusedPaneResponder()
     }
@@ -2241,11 +2394,13 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func suspendActiveFloatingPresentation(in tabState: WorkspaceTabState) {
+        let rootView = floatingRootView(for: tabState)
         captureFloatingPaneSizes(in: tabState)
         rootView.removeFloatingPaneView()
     }
 
     private func captureFloatingPaneSizes(in tabState: WorkspaceTabState) {
+        let rootView = floatingRootView(for: tabState)
         if var floatingState = tabState.activeFloatingPaneState,
             let paneController = tabState.paneControllers[floatingState.paneID],
             let size = rootView.floatingPaneFrame(for: paneController.hostView)?.size
@@ -2265,6 +2420,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func restoreActiveFloatingPresentation(in tabState: WorkspaceTabState) {
+        let rootView = floatingRootView(for: tabState)
         if let floatingState = tabState.activeFloatingPaneState {
             restoreFloatingPane(
                 withID: floatingState.paneID,
@@ -2288,7 +2444,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         in tabState: WorkspaceTabState,
         size: NSSize?
     ) {
-        guard tabState.id == selectedTabID,
+        let rootView = floatingRootView(for: tabState)
+        guard tabState.id == selectedTabID || tabState === sidebar.tab && sidebar.isVisible,
             let paneController = tabState.paneControllers[paneID]
         else {
             rootView.removeFloatingPaneView()
@@ -2341,27 +2498,20 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             tabState.activeAutoZoomState = nil
         }
 
-        if changeSource == .userDrag {
-            disableAutoResizeForPanesAffectedBySplit(at: path, in: tabState)
+        var savedFractions = fractions
+        if changeSource == .userDrag,
+            case .split(_, _, let originalFractions) = layoutNode.node(at: path),
+            fractions.contains(0)
+        {
+            let foldedBudget = fractions.indices.filter { fractions[$0] == 0 }
+                .reduce(CGFloat.zero) { $0 + originalFractions[$1] }
+            savedFractions = fractions.indices.map {
+                fractions[$0] == 0 ? originalFractions[$0] : fractions[$0] * (1 - foldedBudget)
+            }
         }
-
-        tabState.layoutNode = layoutNode.replacingFractions(at: path, with: fractions)
+        tabState.layoutNode = layoutNode.replacingFractions(at: path, with: savedFractions)
         updateWindowMinimumSize()
         scheduleWorkspaceSave()
-    }
-
-    private func disableAutoResizeForPanesAffectedBySplit(
-        at path: [LayoutPathComponent],
-        in tabState: WorkspaceTabState
-    ) {
-        guard let affectedPaneIDs = tabState.layoutNode?.node(at: path)?.paneIDsInTraversalOrder
-        else {
-            return
-        }
-
-        for paneID in affectedPaneIDs {
-            tabState.paneAutoResizeConfigurations[paneID]?.isEnabled = false
-        }
     }
 
     private func restoreActiveAutoZoom(in tabState: WorkspaceTabState, animated: Bool) {
@@ -2399,8 +2549,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
         guard
             let focusedPaneID = tabState.focusedPaneID,
-            let autoResizeConfiguration = tabState.paneAutoResizeConfigurations[focusedPaneID],
-            autoResizeConfiguration.isEnabled
+            tabState.isPaneTiled(focusedPaneID)
         else {
             tabState.activeAutoZoomState = nil
             return
@@ -2409,6 +2558,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         let targetStates = autoZoomTargetStates(for: focusedPaneID, in: tabState)
         guard !targetStates.isEmpty else {
             tabState.activeAutoZoomState = nil
+            applyAutoZoomTargetStates([], animated: animated)
             return
         }
 
@@ -2448,31 +2598,61 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     ) -> [(ParentSplitContext, [CGFloat])] {
         guard
             let layoutNode = tabState.layoutNode,
-            let autoResizeConfiguration = tabState.paneAutoResizeConfigurations[focusedPaneID],
-            autoResizeConfiguration.isEnabled,
             let tilingView
         else {
             return []
         }
 
-        return layoutNode.ancestorSplitContexts(for: focusedPaneID).compactMap {
-            context -> (ParentSplitContext, [CGFloat])? in
-            guard let splitNode = layoutNode.node(at: context.splitPath) else {
-                return nil
+        let paneIDs = layoutNode.paneIDsInTraversalOrder
+        var seenPaths: Set<[LayoutPathComponent]> = []
+        let contexts = paneIDs.flatMap { layoutNode.ancestorSplitContexts(for: $0) }
+            .filter { seenPaths.insert($0.splitPath).inserted }
+        var targetNode = layoutNode
+
+        func applyRatios(for paneID: PaneID, configuration: PaneAutoResizeConfiguration) {
+            for context in targetNode.ancestorSplitContexts(for: paneID) {
+                let axisIsEnabled = context.axis == .horizontal
+                    ? configuration.isHorizontalEnabled : configuration.isVerticalEnabled
+                guard axisIsEnabled,
+                    let splitNode = targetNode.node(at: context.splitPath)
+                else { continue }
+                if configuration.trigger == .unfocused,
+                    case .split(_, let children, _) = splitNode,
+                    children[context.focusedChildIndex].path(to: focusedPaneID) != nil
+                { continue }
+                let ratio = configuration.ratios[context.axis]
+                let proposedFractions = context.replacingFocusedChildFraction(ratio)
+                let targetFractions = splitNode.clampedFractions(
+                    proposedFractions,
+                    in: tilingView.bounds.size,
+                    dividerThickness: AppAppearanceSettings.workspaceDividerThickness,
+                    collapsedChildIndices: Set(context.fractions.indices.filter {
+                        proposedFractions[$0] == 0
+                            && (context.fractions[$0] == 0 || $0 == context.focusedChildIndex && ratio == 0)
+                    }))
+                if let updated = targetNode.replacingFractions(at: context.splitPath, with: targetFractions) {
+                    targetNode = updated
+                }
             }
+        }
 
-            let focusedRatio = autoResizeConfiguration.ratios[context.axis]
-            let proposedFractions = context.replacingFocusedChildFraction(focusedRatio)
-            let targetFractions = splitNode.clampedFractions(
-                proposedFractions,
-                in: tilingView.bounds.size,
-                dividerThickness: AppAppearanceSettings.workspaceDividerThickness
-            )
-
-            guard targetFractions != context.fractions else {
-                return nil
+        for paneID in paneIDs where paneID != focusedPaneID {
+            if let config = tabState.paneAutoResizeConfigurations[paneID],
+                config.isEnabled, config.trigger == .unfocused
+            {
+                applyRatios(for: paneID, configuration: config)
             }
+        }
+        if let config = tabState.paneAutoResizeConfigurations[focusedPaneID],
+            config.isEnabled, config.trigger == .focus
+        {
+            applyRatios(for: focusedPaneID, configuration: config)
+        }
 
+        return contexts.compactMap { context in
+            guard case .split(_, _, let targetFractions) = targetNode.node(at: context.splitPath),
+                targetFractions != context.fractions
+            else { return nil }
             return (context, targetFractions)
         }
     }
@@ -2500,7 +2680,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         }
 
         let paneViews = buildPaneViewsDictionary(for: tabState)
-        tilingView.setLayoutNode(autoZoomedNode, paneViews: paneViews, animated: animated)
+        tilingView.setLayoutNode(
+            autoZoomedNode, paneViews: paneViews, animated: animated,
+            isTransient: !targetStates.isEmpty)
     }
 
     private func updatePanePresentation(in tabState: WorkspaceTabState) {
@@ -2516,6 +2698,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
     private func updateTabStrip() {
         scheduleWorkspaceSave()
+        updateAgentPresentation()
         rootView.updateTabItems(
             tabs.map { tabState in
                 WorkspaceTabStripItem(
@@ -2546,6 +2729,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func updateAppearance() {
+        windowContentView.needsLayout = true
         rootView.updateAppearance()
         windowContentView.sidebarView.updateDividerThickness(AppAppearanceSettings.workspaceDividerThickness)
         updatePanePresentation(in: sidebar.tab)
@@ -2575,13 +2759,17 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
     var commandPaletteCommands: [AppCommand] {
         [
-            AppCommand(id: "sidebar.toggle", title: sidebar.isVisible ? "Hide Sidebar" : "Show Sidebar", shortcut: KeybindingSettings.displayShortcut(for: .toggleSidebar), isEnabled: true, perform: { [weak self] in self?.toggleSidebar(nil) }),
+            AppCommand(id: "sidebar.toggle", title: KeybindingAction.toggleSidebar.title, shortcut: KeybindingSettings.displayShortcut(for: .toggleSidebar), isEnabled: true, perform: { [weak self] in self?.toggleSidebar(nil) }),
             AppCommand(id: "sidebar.left", title: "Move Sidebar Left", shortcut: nil, isEnabled: true, perform: { [weak self] in self?.moveSidebarLeft(nil) }),
             AppCommand(id: "sidebar.right", title: "Move Sidebar Right", shortcut: nil, isEnabled: true, perform: { [weak self] in self?.moveSidebarRight(nil) }),
             AppCommand(id: "sidebar.browser", title: "Add Browser to Sidebar", shortcut: nil, isEnabled: true, perform: { [weak self] in self?.addSidebarBrowser(nil) }),
             AppCommand(id: "sidebar.workspaces", title: "Add Workspaces to Sidebar", shortcut: nil, isEnabled: true, perform: { [weak self] in self?.addSidebarWorkspaces(nil) }),
-            AppCommand(id: "workspace.new", title: "New Workspace", shortcut: KeybindingSettings.displayShortcut(for: .newWorkspace), isEnabled: canCreateLocalWorkspace, perform: { [weak self] in self?.newWorkspace(nil) }),
+            AppCommand(id: "sidebar.agents", title: "Add Agents to Sidebar", shortcut: nil, isEnabled: true, perform: { [weak self] in self?.addSidebarAgents(nil) }),
+            AppCommand(id: "agents.show", title: KeybindingAction.showAgents.title, shortcut: KeybindingSettings.displayShortcut(for: .showAgents), isEnabled: !isClosingWindow, perform: { [weak self] in self?.showAgentManager(nil) }),
+            AppCommand(id: "workspace.new", title: "New Local Workspace", shortcut: KeybindingSettings.displayShortcut(for: .newWorkspace), isEnabled: canCreateLocalWorkspace, perform: { [weak self] in self?.newWorkspace(nil) }),
             AppCommand(id: "workspace.rename", title: "Rename Workspace", shortcut: KeybindingSettings.displayShortcut(for: .renameWorkspace), isEnabled: canCloseWorkspace, perform: { [weak self] in self?.renameWorkspace(nil) }),
+            AppCommand(id: "workspace.new.herdr.remote", title: "New Remote Herdr Workspace…", shortcut: nil, isEnabled: canCreateLocalWorkspace, perform: { [weak self] in self?.newRemoteHerdrWorkspace(nil) }),
+            AppCommand(id: "workspace.new.herdr", title: "New Herdr Workspace", shortcut: nil, isEnabled: canCreateLocalWorkspace, perform: { [weak self] in self?.newHerdrWorkspace(nil) }),
             AppCommand(id: "workspace.close", title: "Close Workspace", shortcut: KeybindingSettings.displayShortcut(for: .closeWorkspace), isEnabled: canCloseWorkspace, perform: { [weak self] in self?.closeWorkspace(nil) }),
 
             AppCommand(
@@ -2604,6 +2792,27 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
                 shortcut: KeybindingSettings.displayShortcut(for: .splitPaneVertically),
                 isEnabled: canSplitFocusedPane,
                 perform: { [weak self] in self?.splitPaneVertically(nil) }
+            ),
+            AppCommand(
+                id: "pane.terminal.new",
+                title: "New Terminal Pane",
+                shortcut: nil,
+                isEnabled: canSplitFocusedPane,
+                perform: { [weak self] in self?.newTerminalPane(nil) }
+            ),
+            AppCommand(
+                id: "pane.workspaces.new",
+                title: "New Workspaces Pane",
+                shortcut: nil,
+                isEnabled: focusedPaneController != nil && focusedPaneIsTiled,
+                perform: { [weak self] in self?.newWorkspacesPane(nil) }
+            ),
+            AppCommand(
+                id: "pane.agents.new",
+                title: "New Agents Pane",
+                shortcut: nil,
+                isEnabled: focusedPaneController != nil && focusedPaneIsTiled,
+                perform: { [weak self] in self?.newAgentsPane(nil) }
             ),
             AppCommand(
                 id: "pane.browser.new",
@@ -2830,24 +3039,23 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
     private func updateWindowMinimumSize() {
         let tabChromeHeight =
-            AppAppearanceSettings.workspaceEdgePadding * 2
-            + WorkspaceLayoutMetrics.workspaceSectionSpacing
+            WorkspaceLayoutMetrics.workspaceSectionSpacing
             + WorkspaceLayoutMetrics.tabStripHeight
 
         var minimumSize = selectedTabState?.layoutNode?.minimumSize(
             dividerThickness: AppAppearanceSettings.workspaceDividerThickness
         ) ?? WorkspaceLayoutMetrics.minimumPaneSize
-        let mainMinimumWidth = minimumSize.width + AppAppearanceSettings.workspaceEdgePadding * 2
+        let mainMinimumWidth = minimumSize.width
         let sidebarMinimum = sidebar.tab.layoutNode?.minimumSize(dividerThickness: AppAppearanceSettings.workspaceDividerThickness)
             ?? WorkspaceLayoutMetrics.minimumPaneSize
         windowContentView.updateMinimumWidths(main: mainMinimumWidth, sidebar: sidebarMinimum.width)
         if sidebar.isVisible {
             minimumSize.width += sidebarMinimum.width + AppAppearanceSettings.workspaceDividerThickness
-            minimumSize.height = max(minimumSize.height, sidebarMinimum.height - tabChromeHeight)
+            minimumSize.height = max(minimumSize.height, sidebarMinimum.height)
         }
         let paddedMinimumSize = NSSize(
             width: minimumSize.width + AppAppearanceSettings.workspaceEdgePadding * 2,
-            height: minimumSize.height + tabChromeHeight
+            height: minimumSize.height + tabChromeHeight + AppAppearanceSettings.workspaceEdgePadding * 2
         )
         view.window?.contentMinSize = NSSize(
             width: max(
@@ -2904,12 +3112,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             return
         }
 
-        restoreActiveAutoZoom(in: tabState, animated: true)
         tabState.paneAutoResizeConfigurations[paneID] = configuration
-
-        if paneID == tabState.focusedPaneID {
-            applyAutoZoomToFocusedPane(in: tabState, animated: true)
-        }
+        applyAutoZoomToFocusedPane(in: tabState, animated: true)
+        scheduleWorkspaceSave()
     }
 
     private func startPaneControllersIfNeeded(in tabState: WorkspaceTabState) {
@@ -2921,7 +3126,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func confirmCloseWindowIfNeeded() -> Bool {
-        guard paneOwnerTabs.flatMap({ Array($0.paneControllers.values) }).contains(where: { $0.isLive })
+        guard paneOwnerTabs.flatMap({ Array($0.paneControllers.values) }).contains(where: { ($0 as? TerminalPaneController)?.herdrSession == nil && $0.isLive })
         else {
             return true
         }
@@ -2929,7 +3134,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Close Window?"
-        alert.informativeText = "Local terminal processes will close."
+        alert.informativeText = "Local terminal processes will close. Herdr terminals will keep running."
         alert.addButton(withTitle: "Close Window")
         alert.addButton(withTitle: "Cancel")
 
@@ -2944,7 +3149,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Close Tab?"
-        alert.informativeText = "Local terminal processes will close."
+        alert.informativeText = "Terminal processes in this tab will end. External agent viewers only detach."
         alert.addButton(withTitle: "Close Tab")
         alert.addButton(withTitle: "Cancel")
 
@@ -2969,6 +3174,129 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             window.performClose(nil)
         }
     }
+}
+
+extension WorkspaceViewController {
+    private func configureAgents() {
+        let store = herdrCoreClient.agents
+        store.context = { [weak self] binding in self?.agentContext(binding) }
+        store.isTargetVisible = { [weak self] binding in self?.agentIsVisible(binding) == true }
+        rootView.toolbarView.agentStatusButton.target = self
+        rootView.toolbarView.agentStatusButton.action = #selector(showAgentManager(_:))
+        agentObserver = NotificationCenter.default.addObserver(forName: AgentSessionStore.didChangeNotification,
+            object: store, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updateAgentPresentation() }
+            }
+        for name in [NSWindow.didBecomeKeyNotification, NSApplication.didBecomeActiveNotification] {
+            paneNameFocusObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updateAgentPresentation() }
+            })
+        }
+    }
+
+    private func agentLocation(_ binding: HerdrTerminalBinding) -> (UUID, WorkspaceTabState, TerminalPaneController)? {
+        for workspace in localWorkspaceStates {
+            for tab in workspace.tabs {
+                for pane in tab.paneControllers.values {
+                    if let terminal = pane as? TerminalPaneController, let owned = terminal.herdrSession?.binding,
+                       owned.coreID == binding.coreID, owned.address == binding.address,
+                       (owned.remote == true) == (binding.remote == true) { return (workspace.id, tab, terminal) }
+                }
+            }
+        }
+        return nil
+    }
+
+    private func agentContext(_ binding: HerdrTerminalBinding) -> String? {
+        if let (workspaceID, tab, pane) = agentLocation(binding), let workspace = localWorkspaceStates.first(where: { $0.id == workspaceID }) {
+            return [workspace.name, tab.displayTitle, pane.name ?? pane.displayTitle].joined(separator: " › ")
+        }
+        let machine = binding.remote == true ? herdrCoreClient.machines.first { $0.id == binding.coreID }?.name ?? "Remote" : "Local herdr-core"
+        return machine + " › " + binding.address
+    }
+
+    private func agentIsVisible(_ binding: HerdrTerminalBinding) -> Bool {
+        guard view.window?.isKeyWindow == true, NSApp.isActive,
+              let (workspace, tab, pane) = agentLocation(binding), workspace == localWorkspaceID,
+              tab.id == selectedTabID, pane.herdrSession?.state == .live else { return false }
+        return tab.isPaneTiled(pane.id) || tab.activeDetachedPaneID == pane.id
+    }
+
+    private func updateAgentPresentation() {
+        let store = herdrCoreClient.agents
+        let sessions = store.snapshots
+        rootView.toolbarView.updateAgents(count: sessions.count, unread: store.unreadCount)
+        agentPopover?.updateSessions(sessions, messages: store.messageSnapshots)
+        for tab in paneOwnerTabs {
+            for case let pane as AgentsPaneController in tab.paneControllers.values {
+                pane.update(sessions: sessions, messages: store.messageSnapshots)
+            }
+        }
+        let visible = sessions.filter { $0.isUnread && agentIsVisible($0.binding) }
+        guard !visible.isEmpty else { return }
+        Task { @MainActor [weak self, weak store] in
+            await Task.yield()
+            guard let self, let store else { return }
+            store.markViewed(visible.filter { self.agentIsVisible($0.binding) })
+        }
+    }
+
+    @objc func showAgentManager(_: Any?) {
+        guard !isClosingWindow, view.window != nil else { return }
+        herdrCoreClient.startAgentMonitoring()
+        if agentPopover?.isShown == true { agentPopover?.close(); return }
+        let store = herdrCoreClient.agents
+        let popover = AgentManagerPopoverController(sessions: store.snapshots,
+            previousFirstResponder: view.window?.firstResponder,
+            onFocusPane: { [weak self, weak store] session in
+                store?.acknowledge(session)
+                self?.navigateToAgent(session.binding)
+            },
+            onClose: { [weak self] in self?.agentPopover = nil })
+        agentPopover = popover
+        popover.updateSessions(store.snapshots, messages: store.messageSnapshots)
+        let anchor = rootView.toolbarView.agentStatusButton.isHidden ? rootView.toolbarView : rootView.toolbarView.agentStatusButton
+        popover.show(relativeTo: anchor)
+    }
+
+    func navigateToAgent(_ binding: HerdrTerminalBinding) {
+        agentNavigationTask?.cancel()
+        agentNavigationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let terminal = try await herdrCoreClient.terminal(binding)
+                try Task.checkCancellation()
+                guard !isClosingWindow, closingHerdrPaneIDs.isEmpty else { throw CLIError("Finish the current close operation before opening an agent") }
+                if let (workspace, tab, pane) = agentLocation(binding) {
+                    navigateFromPalette(workspaceID: workspace, tabID: tab.id, paneID: pane.id)
+                } else {
+                    guard terminal.state == "live" else { throw CLIError("This agent terminal has ended") }
+                    let remote: HerdrRemote?
+                    if binding.remote == true {
+                        guard let machine = herdrCoreClient.machines.first(where: { $0.id == binding.coreID }) else { throw CLIError("This agent's remote core is not configured") }
+                        remote = machine.reference
+                    } else { remote = nil }
+                    if let workspace = localWorkspaceStates.first(where: { $0.kind == .herdr && $0.remote?.id == remote?.id }) {
+                        guard allWorkspaceTabs.count < 64 else { throw CLIError("Workspace tab limit reached") }
+                        selectLocalWorkspace(workspace.id)
+                        let pane = makeTerminalPaneController(workingDirectory: terminal.cwd, binding: binding, viewerOnly: true)
+                        let tab = makeTabState(startImmediately: false, terminal: pane)
+                        tabs.append(tab); selectedTabID = tab.id
+                        finishLocalWorkspaceSwitch()
+                    } else {
+                        guard canCreateLocalWorkspace else { throw CLIError("Workspace limit reached") }
+                        createWorkspace(kind: .herdr, remote: remote, viewer: binding)
+                    }
+                }
+                rootView.toolbarView.showNavigationStatus(nil)
+                updateAgentPresentation()
+            } catch is CancellationError { }
+            catch { rootView.toolbarView.showNavigationStatus("Agent unavailable: " + error.localizedDescription) }
+        }
+    }
+
+    var canSendAgentNotifications: Bool { workspaceStore?.canWrite != false }
+    var debugAgentSnapshots: [AgentSessionSnapshot] { herdrCoreClient.agents.snapshots }
 }
 
 extension WorkspaceViewController {
@@ -3287,7 +3615,7 @@ extension WorkspaceViewController {
     }
 
     func debugToggleFloatingPane(animated: Bool = false) {
-        guard let tabState = selectedTabState else {
+        guard let tabState = activePaneTab else {
             return
         }
 
@@ -3343,9 +3671,9 @@ extension WorkspaceViewController {
 extension WorkspaceViewController {
 
     private func refreshWorkspacePicker() {
-        workspaceEntries = localWorkspaceStates.map { .init(reference: $0.id, name: $0.name) }
-        rootView.toolbarView.updateWorkspaceEntries(workspaceEntries, selectedID: "local." + localWorkspaceID.uuidString)
-        updateSidebarLists()
+        workspaceEntries = localWorkspaceStates.map { .init(reference: $0.id, name: $0.name, kind: $0.kind, remote: $0.remote) }
+        rootView.toolbarView.updateWorkspaceEntries(workspaceEntries, selectedID: workspaceKind.rawValue + "." + localWorkspaceID.uuidString)
+        updateWorkspaceLists()
     }
 
     @objc func renameWorkspace(_: Any?) {
@@ -3376,23 +3704,68 @@ extension WorkspaceViewController {
 
     }
 
-    @objc func newWorkspace(_: Any?) {
+    @objc func newWorkspace(_: Any?) { createWorkspace(kind: .local) }
+
+    @objc func newHerdrWorkspace(_: Any?) { createWorkspace(kind: .herdr) }
+
+    @objc func newRemoteHerdrWorkspace(_: Any?) {
+        guard canCreateLocalWorkspace else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let machines = try await self.herdrCoreClient.configuredMachines().sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                guard self.canCreateLocalWorkspace else { return }
+                let alert = NSAlert()
+                alert.messageText = "New Remote Herdr Workspace"
+                guard !machines.isEmpty else {
+                    alert.informativeText = "No machines configured. Add one with hc machine add, then try again."
+                    alert.runModal()
+                    return
+                }
+                alert.informativeText = "Choose a machine configured in herdr-core. Manage connections with hc machine."
+                alert.addButton(withTitle: "Create Workspace"); alert.addButton(withTitle: "Cancel")
+                let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 28), pullsDown: false)
+                picker.setAccessibilityLabel("Remote Machine")
+                for machine in machines { picker.addItem(withTitle: machine.name + " — " + machine.status) }
+                alert.accessoryView = picker
+                guard alert.runModal() == .alertFirstButtonReturn, machines.indices.contains(picker.indexOfSelectedItem) else { return }
+                self.createRemoteHerdrWorkspace(machines[picker.indexOfSelectedItem].reference)
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Could Not Load Herdr Machines"
+                alert.informativeText = error.localizedDescription
+                alert.runModal()
+            }
+        }
+    }
+
+    @discardableResult
+    func createRemoteHerdrWorkspace(_ remote: HerdrRemote) -> Bool {
+        guard canCreateLocalWorkspace else { return false }
+        createWorkspace(kind: .herdr, remote: remote)
+        return true
+    }
+
+    private func createWorkspace(kind: WorkspaceKind, remote: HerdrRemote? = nil, viewer: HerdrTerminalBinding? = nil) {
         guard canCreateLocalWorkspace else { return }
         sidebarIsFocused = false
         updatePanePresentation(in: sidebar.tab)
         suspendLocalWorkspacePresentation()
-        otherLocalWorkspaces.append(.init(id: localWorkspaceID, name: localWorkspaceName, tabs: tabs, selectedTabID: selectedTabID))
+        otherLocalWorkspaces.append(.init(id: localWorkspaceID, name: localWorkspaceName, kind: workspaceKind, remote: workspaceRemote, tabs: tabs, selectedTabID: selectedTabID))
         let names = Set(otherLocalWorkspaces.map(\.name))
         var number = 1
-        while names.contains("Workspace \(number)") { number += 1 }
+        let prefix = remote.map { "Herdr · " + $0.name } ?? (kind == .herdr ? "Herdr" : "Workspace")
+        while names.contains("\(prefix) \(number)") { number += 1 }
         localWorkspaceID = UUID()
-        localWorkspaceName = "Workspace \(number)"
-        createInitialTab()
+        localWorkspaceName = "\(prefix) \(number)"
+        workspaceKind = kind
+        workspaceRemote = remote
+        createInitialTab(terminal: viewer.map { makeTerminalPaneController(binding: $0, viewerOnly: true) })
         finishLocalWorkspaceSwitch()
     }
 
     private var canCreateLocalWorkspace: Bool {
-        !isClosingWindow
+        !isClosingWindow && closingHerdrPaneIDs.isEmpty
             && otherLocalWorkspaces.count < 63 && allWorkspaceTabs.count < 64
     }
 
@@ -3405,7 +3778,7 @@ extension WorkspaceViewController {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Close Workspace?"
-        alert.informativeText = "This closes \(localWorkspaceName) and ends all its local terminal processes."
+        alert.informativeText = "This closes \(localWorkspaceName) and ends its terminal processes. External agent viewers only detach."
         alert.addButton(withTitle: "Close Workspace"); alert.addButton(withTitle: "Cancel")
         return alert
     }
@@ -3424,19 +3797,25 @@ extension WorkspaceViewController {
     }
 
     private func removeCurrentLocalWorkspace() {
+        let currentID = localWorkspaceID
+        if closeHerdrPanes(tabs.flatMap { Array($0.paneControllers.values) }, then: { [weak self] in
+            guard let self, self.localWorkspaceID == currentID else { return }
+            self.removeCurrentLocalWorkspace()
+        }) { return }
         suspendLocalWorkspacePresentation()
         if let next = otherLocalWorkspaces.first {
             otherLocalWorkspaces.removeFirst()
-            localWorkspaceID = next.id; localWorkspaceName = next.name
+            localWorkspaceID = next.id; localWorkspaceName = next.name; workspaceKind = next.kind; workspaceRemote = next.remote
             tabs = next.tabs; selectedTabID = next.selectedTabID
         } else {
-            localWorkspaceID = UUID(); localWorkspaceName = "Default"
+            localWorkspaceID = UUID(); localWorkspaceName = "Default"; workspaceKind = .local; workspaceRemote = nil
             createInitialTab()
         }
         finishLocalWorkspaceSwitch()
     }
 
     func selectLocalWorkspace(_ id: UUID) {
+        guard closingHerdrPaneIDs.isEmpty else { return }
         guard id == localWorkspaceID || otherLocalWorkspaces.contains(where: { $0.id == id }) else { return }
         sidebarIsFocused = false
         updatePanePresentation(in: sidebar.tab)
@@ -3444,8 +3823,8 @@ extension WorkspaceViewController {
               let index = otherLocalWorkspaces.firstIndex(where: { $0.id == id }) else { return }
         suspendLocalWorkspacePresentation()
         let next = otherLocalWorkspaces.remove(at: index)
-        otherLocalWorkspaces.append(.init(id: localWorkspaceID, name: localWorkspaceName, tabs: tabs, selectedTabID: selectedTabID))
-        localWorkspaceID = next.id; localWorkspaceName = next.name
+        otherLocalWorkspaces.append(.init(id: localWorkspaceID, name: localWorkspaceName, kind: workspaceKind, remote: workspaceRemote, tabs: tabs, selectedTabID: selectedTabID))
+        localWorkspaceID = next.id; localWorkspaceName = next.name; workspaceKind = next.kind; workspaceRemote = next.remote
         tabs = next.tabs; selectedTabID = next.selectedTabID
         finishLocalWorkspaceSwitch()
     }
@@ -3486,8 +3865,10 @@ extension WorkspaceViewController {
         var document = savedWorkspaceTabs(tabs, selected: selectedTabID)
         document.localWorkspaceID = localWorkspaceID
         document.localWorkspaceName = localWorkspaceName
+        document.workspaceKind = workspaceKind == .herdr ? .herdr : nil
+        document.herdrRemote = workspaceRemote
         document.otherLocalWorkspaces = otherLocalWorkspaces.isEmpty ? nil : otherLocalWorkspaces.map {
-            .init(id: $0.id, name: $0.name, selectedTabID: $0.selectedTabID,
+            .init(id: $0.id, name: $0.name, kind: $0.kind == .herdr ? .herdr : nil, herdrRemote: $0.remote, selectedTabID: $0.selectedTabID,
                   tabs: savedWorkspaceTabs($0.tabs, selected: $0.selectedTabID).tabs)
         }
         document.sidebar = .init(side: sidebar.side, preferredWidth: sidebar.preferredWidth,
@@ -3505,11 +3886,16 @@ extension WorkspaceViewController {
             let panes = tab.paneControllers.values.sorted { $0.id.uuidString < $1.id.uuidString }.map { pane -> SavedWorkspace.Pane in
                 if let placeholder = pane as? RestoredPanePlaceholderController { return placeholder.savedPane }
                 if let terminal = pane as? TerminalPaneController {
-                    return .init(id: pane.id, kind: .localTerminal,
-                        name: pane.name, title: terminal.lastKnownTitle, cwd: terminal.currentWorkingDirectory)
+                    return .init(id: pane.id, kind: terminal.herdrSession == nil ? .localTerminal : .herdrTerminal,
+                        name: pane.name, title: terminal.lastKnownTitle, cwd: terminal.currentWorkingDirectory,
+                        herdr: terminal.herdrSession?.binding, herdrRunPending: terminal.herdrSession?.createResultUnknown == true ? true : nil,
+                        herdrViewer: terminal.herdrSession?.viewerOnly == true ? true : nil)
                 }
                 if let browser = pane as? BrowserPaneController {
                     return .init(id: pane.id, kind: .browser, name: pane.name, title: pane.displayTitle, browserURL: browser.restorationURL)
+                }
+                if pane is AgentsPaneController {
+                    return .init(id: pane.id, kind: .agents, name: pane.name, title: pane.displayTitle)
                 }
                 precondition(pane is SidebarListPaneController, "Unsupported pane type")
                 return .init(id: pane.id, kind: .workspaces, name: pane.name, title: pane.displayTitle)
@@ -3568,7 +3954,7 @@ extension WorkspaceViewController {
         try document.validate()
         suppressWorkspaceSaving = true
         defer { suppressWorkspaceSaving = false }
-        func restoreTabs(_ savedTabs: [SavedWorkspace.Tab]) -> [WorkspaceTabState] {
+        func restoreTabs(_ savedTabs: [SavedWorkspace.Tab], remote: HerdrRemote? = nil) -> [WorkspaceTabState] {
             var restoredTabs: [WorkspaceTabState] = []
             for saved in savedTabs {
                 var controllers: [PaneID: any PaneControlling] = [:]
@@ -3581,15 +3967,19 @@ extension WorkspaceViewController {
                         placeholder.onFocusRequest = { [weak self] in self?.handlePaneFocusRequest(withID: $0) }
                         placeholder.onActivate = { [weak self] in
                             guard let self else { return }
-                            self.replaceRestoredPane(pane.id, with: self.makeTerminalPaneController(id: pane.id, workingDirectory: pane.cwd))
+                            self.replaceRestoredPane(pane.id, with: self.makeTerminalPaneController(id: pane.id, workingDirectory: pane.cwd, kind: .local))
                         }
                         controller = placeholder
+                    case .herdrTerminal:
+                        controller = makeTerminalPaneController(id: pane.id, workingDirectory: pane.cwd, kind: .herdr, binding: pane.herdr, remote: remote, runPending: pane.herdrRunPending == true, viewerOnly: pane.herdrViewer == true)
                     case .browser:
                         let browser = makeBrowserPaneController(id: pane.id)
                         if let url = pane.browserURL, let scheme = URL(string: url)?.scheme?.lowercased(), ["http", "https"].contains(scheme) { browser.loadURLString(url) }
                         controller = browser
                     case .workspaces:
-                        controller = makeSidebarListPane(id: pane.id)
+                        controller = makeWorkspacesPaneController(id: pane.id)
+                    case .agents:
+                        controller = makeAgentsPaneController(id: pane.id)
                     }
                     controller.name = pane.name
                     controllers[pane.id] = controller
@@ -3617,10 +4007,12 @@ extension WorkspaceViewController {
         rebuildSidebar()
         localWorkspaceID = document.localWorkspaceID ?? UUID()
         localWorkspaceName = document.localWorkspaceName ?? "Default"
+        workspaceKind = document.workspaceKind ?? .local
+        workspaceRemote = document.herdrRemote
         otherLocalWorkspaces = (document.otherLocalWorkspaces ?? []).map {
-            .init(id: $0.id, name: $0.name, tabs: restoreTabs($0.tabs), selectedTabID: $0.selectedTabID ?? $0.tabs.first?.id)
+            .init(id: $0.id, name: $0.name, kind: $0.kind ?? .local, remote: $0.herdrRemote, tabs: restoreTabs($0.tabs, remote: $0.herdrRemote), selectedTabID: $0.selectedTabID ?? $0.tabs.first?.id)
         }
-        tabs = restoreTabs(document.tabs)
+        tabs = restoreTabs(document.tabs, remote: document.herdrRemote)
         selectedTabID = document.selectedTabID ?? tabs.first?.id
         workspacePersistenceActivated = !tabs.isEmpty
         if tabs.isEmpty { createInitialTab() }
@@ -3631,9 +4023,10 @@ extension WorkspaceViewController {
     private func replaceRestoredPane(_ id: PaneID, with controller: any PaneControlling) {
         guard let tab = tabState(containing: id), tab.paneControllers[id] is RestoredPanePlaceholderController else { return }
         tab.paneControllers[id] = controller
-        if tab.id == selectedTabID { rebuildWorkspaceLayout() }
+        if tab === sidebar.tab { rebuildPaneContainer(tab) }
+        else if tab.id == selectedTabID { rebuildWorkspaceLayout() }
         else { updateTabStrip() }
-        if hasAppeared, tab.id == selectedTabID { controller.startIfNeeded() }
+        if hasAppeared, tab.id == selectedTabID || tab === sidebar.tab && sidebar.isVisible { controller.startIfNeeded() }
     }
 
     var debugRestoredPlaceholderCount: Int { tabs.flatMap { $0.paneControllers.values }.filter { $0 is RestoredPanePlaceholderController }.count }
@@ -3659,17 +4052,23 @@ extension WorkspaceViewController {
 
 extension WorkspaceViewController {
     var paletteNavigationItems: [AppCommand] {
-        var items: [AppCommand] = []
+        var items: [AppCommand] = herdrCoreClient.agents.snapshots.map { session in
+            AppCommand(id: "navigate.Agents." + session.id, title: session.agent.displayName,
+                shortcut: nil, isEnabled: !isClosingWindow, kind: .agent,
+                subtitle: [session.paneTitle, session.statusText, session.message].compactMap { $0 }.joined(separator: " · "),
+                symbol: "sparkles", brandIcon: session.agent.brandIcon,
+                perform: { [weak self] in self?.navigateToAgent(session.binding) })
+        }
         func item(_ id: String, _ title: String, _ kind: PaletteItemKind, _ subtitle: String,
-                  _ symbol: String, current: Bool, inWorkspace: Bool, workspaceID: UUID, tabID: UUID? = nil, paneID: PaneID? = nil) {
+                  _ symbol: String, brandIcon: BrandIcon? = nil, current: Bool, inWorkspace: Bool, workspaceID: UUID, tabID: UUID? = nil, paneID: PaneID? = nil) {
             items.append(AppCommand(id: "navigate." + kind.rawValue + "." + id, title: title, shortcut: nil, isEnabled: !isClosingWindow,
-                kind: kind, subtitle: subtitle, symbol: symbol, isCurrent: current, isInCurrentWorkspace: inWorkspace,
+                kind: kind, subtitle: subtitle, symbol: symbol, brandIcon: brandIcon, isCurrent: current, isInCurrentWorkspace: inWorkspace,
                 perform: { [weak self] in self?.navigateFromPalette(workspaceID: workspaceID, tabID: tabID, paneID: paneID) }))
         }
         for workspace in localWorkspaceStates {
             let isSelected = workspace.id == localWorkspaceID
-            item(workspace.pickerID, workspace.name, .workspace, "Local Workspace", "desktopcomputer",
-                 current: isSelected, inWorkspace: isSelected, workspaceID: workspace.id)
+            item(workspace.pickerID, workspace.name, .workspace, workspace.remote.map { "Herdr · " + $0.name } ?? workspace.kind.title, workspace.remote == nil ? workspace.kind.symbol : "network",
+                 brandIcon: workspace.kind.brandIcon, current: isSelected, inWorkspace: isSelected, workspaceID: workspace.id)
             for (index, tab) in workspace.tabs.enumerated() {
                 item(tab.id.uuidString, tab.displayTitle, .tab, "\(workspace.name) › Tab \(index + 1)", "rectangle.on.rectangle",
                      current: isSelected && tab.id == selectedTabID, inWorkspace: isSelected,
@@ -3691,11 +4090,11 @@ extension WorkspaceViewController {
     }
 
     private func palettePaneSymbol(_ pane: any PaneControlling) -> String {
-        pane is BrowserPaneController ? "globe" : "terminal"
+        pane is AgentsPaneController ? "sparkles" : pane is BrowserPaneController ? "globe" : pane is SidebarListPaneController ? "list.bullet" : "terminal"
     }
 
     private func palettePaneSubtitle(_ pane: any PaneControlling, tab: WorkspaceTabState, workspace: String) -> String {
-        let kind = pane is BrowserPaneController ? "Browser" : "Terminal"
+        let kind = pane is AgentsPaneController ? "Agents" : pane is BrowserPaneController ? "Browser" : pane is SidebarListPaneController ? "Workspaces" : "Terminal"
         let presentation = tab.activeFloatingPaneState?.paneID == pane.id ? " · Floating" : tab.isPaneDetached(pane.id) ? " · Hidden" : ""
         return "\(workspace) › \(tab.displayTitle) · \(kind)\(presentation)"
     }
@@ -3725,6 +4124,9 @@ extension WorkspaceViewController {
 
     private func focusSidebarPane(_ paneID: PaneID) {
         guard sidebar.isVisible, sidebar.tab.containsPane(withID: paneID), view.window?.attachedSheet == nil else { return }
+        if let floating = sidebar.tab.activeFloatingPaneState, floating.paneID != paneID {
+            clearFloatingPaneImmediately(in: sidebar.tab, reapplyAutoZoom: false)
+        }
         let changed = !sidebarIsFocused || sidebar.tab.focusedPaneID != paneID
         sidebarIsFocused = true
         sidebar.tab.focusedPaneID = paneID
@@ -3746,7 +4148,10 @@ extension WorkspaceViewController {
     @objc func toggleSidebar(_: Any?) {
         sidebar.isVisible.toggle()
         if sidebar.isVisible && sidebar.tab.layoutNode == nil { createDefaultSidebar() }
-        if !sidebar.isVisible { focusMainRegion() }
+        if !sidebar.isVisible {
+            clearFloatingPaneImmediately(in: sidebar.tab, reapplyAutoZoom: false)
+            focusMainRegion()
+        }
         rebuildSidebar()
     }
 
@@ -3761,13 +4166,16 @@ extension WorkspaceViewController {
 
     @objc func addSidebarBrowser(_: Any?) { addSidebarPane(makeBrowserPaneController()) }
 
-    @objc func addSidebarWorkspaces(_: Any?) { addSidebarPane(makeSidebarListPane()) }
+    @objc func addSidebarWorkspaces(_: Any?) { addSidebarPane(makeWorkspacesPaneController()) }
 
-    private func makeSidebarListPane(id: PaneID = UUID()) -> SidebarListPaneController {
+    @objc func addSidebarAgents(_: Any?) { addSidebarPane(makeAgentsPaneController()) }
+
+    private func makeWorkspacesPaneController(id: PaneID = UUID()) -> SidebarListPaneController {
         let pane = SidebarListPaneController(id: id)
         pane.onFocusRequest = { [weak self] in self?.handlePaneFocusRequest(withID: $0) }
         pane.onSelectWorkspace = { [weak self] reference in self?.navigateFromSidebar(to: reference) }
         pane.onCancel = { [weak self] in self?.focusMainRegion() }
+        pane.update(entries: workspaceEntries, selected: localWorkspaceID)
         return pane
     }
 
@@ -3778,22 +4186,23 @@ extension WorkspaceViewController {
     }
 
     private func createDefaultSidebar() {
-        let workspaces = makeSidebarListPane()
-        sidebar.tab.paneControllers = [workspaces.id: workspaces]
-        sidebar.tab.layoutNode = .panel(workspaces.id)
-        sidebar.tab.focusedPaneID = workspaces.id
+        let terminal = makeTerminalPaneController(kind: .local)
+        sidebar.tab.paneControllers = [terminal.id: terminal]
+        sidebar.tab.layoutNode = .panel(terminal.id)
+        sidebar.tab.focusedPaneID = terminal.id
     }
 
     private func addSidebarPane(_ pane: any PaneControlling) {
         sidebar.isVisible = true
+        windowContentView.updateSidebar(sidebar)
         let tab = sidebar.tab
+        leaveFloatingPane(in: tab, animated: false, reapplyAutoZoom: false)
         if let layout = tab.layoutNode, let anchor = tab.focusedPaneID ?? layout.firstPaneID {
-            tab.layoutNode = layout.insertingSplit(for: anchor, axis: .vertical, newPaneID: pane.id)
+            tab.layoutNode = layout.insertingSplit(for: anchor, axis: automaticSplitAxis(for: tab.paneControllers[anchor]), newPaneID: pane.id)
         } else { tab.layoutNode = .panel(pane.id) }
         tab.paneControllers[pane.id] = pane
         tab.focusedPaneID = pane.id
         rebuildSidebar()
-        pane.startIfNeeded()
         focusSidebarPane(pane.id)
     }
 
@@ -3806,20 +4215,26 @@ extension WorkspaceViewController {
         let tiling = windowContentView.sidebarView
         guard sidebar.isVisible, tiling.bounds.width > 0, tiling.bounds.height > 0,
               let layout = sidebar.tab.layoutNode else { return }
-        tiling.setLayoutNode(layout, paneViews: sidebar.tab.paneControllers.mapValues { $0.hostView })
+        tiling.setLayoutNode(layout, paneViews: buildPaneViewsDictionary(for: sidebar.tab))
     }
 
-    private func rebuildSidebar() {
+    private func floatingRootView(for tab: WorkspaceTabState) -> WorkspaceRootView {
+        tab === sidebar.tab ? windowContentView.sidebarFloatingView : rootView
+    }
+
+    private func rebuildSidebar(restoreFloatingPresentation: Bool = true) {
         windowContentView.updateSidebar(sidebar)
         renderSidebar()
-        updateSidebarLists()
+        if restoreFloatingPresentation { restoreActiveFloatingPresentation(in: sidebar.tab) }
+        updateWorkspaceLists()
         updatePanePresentation(in: sidebar.tab)
         updateWindowMinimumSize()
         scheduleWorkspaceSave()
+        if hasAppeared, sidebar.isVisible { startPaneControllersIfNeeded(in: sidebar.tab) }
     }
 
-    private func updateSidebarLists() {
-        for case let pane as SidebarListPaneController in sidebar.tab.paneControllers.values {
+    private func updateWorkspaceLists() {
+        for case let pane as SidebarListPaneController in paneOwnerTabs.flatMap({ Array($0.paneControllers.values) }) {
             pane.update(entries: workspaceEntries, selected: localWorkspaceID)
         }
     }

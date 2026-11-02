@@ -7,10 +7,11 @@ let isRunningSwiftUIPreviews =
 private final class MinimalAppDelegate: NSObject, NSApplicationDelegate {}
 
 MainActor.assumeIsolated {
+    let app = NSApplication.shared
+    app.appearance = NSAppearance(named: .darkAqua)
     let shouldUseMinimalAppDelegate = isRunningTests || isRunningSwiftUIPreviews
     let delegate: NSApplicationDelegate =
         shouldUseMinimalAppDelegate ? MinimalAppDelegate() : AppDelegate()
-    let app = NSApplication.shared
     app.setActivationPolicy(isRunningSwiftUIPreviews ? .prohibited : .regular)
     app.delegate = delegate
     app.run()

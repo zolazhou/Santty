@@ -9,7 +9,6 @@ enum AppAppearanceDefaults {
     static let floatingPaneVibrancyMaterial: NSVisualEffectView.Material = .popover
     static let floatingPaneVibrancyBlendingMode: NSVisualEffectView.BlendingMode = .withinWindow
     static let vibrancyState: NSVisualEffectView.State = .active
-    static let vibrancyAppearanceName = NSAppearance.Name.darkAqua
     static let vibrancyTintIdentifier = NSUserInterfaceItemIdentifier("Santty.VibrancyTintView")
     private static let rootVibrancyIdentifier = NSUserInterfaceItemIdentifier(
         "Santty.RootVibrancyView")
@@ -29,7 +28,6 @@ enum AppAppearanceDefaults {
         view.material = vibrancyMaterial
         view.blendingMode = vibrancyBlendingMode
         view.state = vibrancyState
-        view.appearance = NSAppearance(named: vibrancyAppearanceName)
 
         if let tintViewAlpha, tintViewAlpha > 0 {
             let tintView = makeVibrancyTintView(alpha: tintViewAlpha)

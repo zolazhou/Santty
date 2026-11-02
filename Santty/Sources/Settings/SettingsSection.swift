@@ -4,6 +4,7 @@ enum SettingsSection: String, CaseIterable, Hashable, Identifiable {
     case general
     case appearance
     case terminal
+    case herdr
     case keybindings
 
     var id: Self { self }
@@ -16,6 +17,8 @@ enum SettingsSection: String, CaseIterable, Hashable, Identifiable {
             "Appearance"
         case .terminal:
             "Terminal"
+        case .herdr:
+            "Herdr"
         case .keybindings:
             "Keybindings"
         }
@@ -29,6 +32,8 @@ enum SettingsSection: String, CaseIterable, Hashable, Identifiable {
             "paintpalette"
         case .terminal:
             "terminal"
+        case .herdr:
+            "network"
         case .keybindings:
             "keyboard"
         }

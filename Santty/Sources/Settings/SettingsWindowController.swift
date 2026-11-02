@@ -26,8 +26,8 @@ final class SettingsWindowController: NSWindowController {
         nil
     }
 
-    func show(relativeTo parentWindow: NSWindow?) {
-        settingsViewController.reload()
+    func show(relativeTo parentWindow: NSWindow?, createHerdrWorkspace: @escaping (HerdrRemote) -> Bool) {
+        settingsViewController.reload(createHerdrWorkspace: createHerdrWorkspace)
 
         if let parentWindow, window?.isVisible == false {
             window?.center(relativeTo: parentWindow)
@@ -63,7 +63,7 @@ private final class SettingsHostingController: NSHostingController<SettingsView>
         nil
     }
 
-    func reload() {
-        rootView = SettingsView()
+    func reload(createHerdrWorkspace: @escaping (HerdrRemote) -> Bool) {
+        rootView = SettingsView(createHerdrWorkspace: createHerdrWorkspace)
     }
 }

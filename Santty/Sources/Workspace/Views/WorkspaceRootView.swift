@@ -73,6 +73,8 @@ private final class WorkspaceFloatingPaneContainerView: NSView {
 
 @MainActor
 final class WorkspaceRootView: NSView {
+    var isFloatingOverlayOnly = false
+    let contentLayoutView = NSView()
     let contentContainerView = NSView()
     let toolbarView = WorkspaceToolbarView()
     var tabStripView: WorkspaceTabStripView {
@@ -87,7 +89,9 @@ final class WorkspaceRootView: NSView {
     private var isFloatingPaneAnimating = false
     var debugIsFloatingPaneAnimating: Bool { isFloatingPaneAnimating }
     private var customFloatingPaneSize: NSSize?
-    private var contentFrame = NSRect.zero
+    private var contentFrame: NSRect {
+        contentContainerView.convert(contentContainerView.bounds, to: self)
+    }
     private var toolbarFrame = NSRect.zero
 
     override var acceptsFirstResponder: Bool {
@@ -98,7 +102,8 @@ final class WorkspaceRootView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         applyWindowBackgroundColor()
-        addSubview(contentContainerView)
+        addSubview(contentLayoutView)
+        contentLayoutView.addSubview(contentContainerView)
         addSubview(toolbarView)
         addSubview(floatingOverlayView)
 
@@ -122,6 +127,9 @@ final class WorkspaceRootView: NSView {
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         layoutSubtreeIfNeeded()
+        if isFloatingOverlayOnly {
+            return floatingOverlayView.hitTest(floatingOverlayView.convert(point, from: superview))
+        }
         return super.hitTest(point)
     }
 
@@ -130,21 +138,14 @@ final class WorkspaceRootView: NSView {
 
     override func layout() {
         super.layout()
-        let edgePadding = AppAppearanceSettings.workspaceEdgePadding
-        let paddedBounds = NSRect(
-            x: edgePadding,
-            y: edgePadding,
-            width: max(0, bounds.width - edgePadding * 2),
-            height: max(0, bounds.height - edgePadding * 2)
-        )
-        let showToolbar = !tabItems.isEmpty || !toolbarView.workspaceSwitcher.isHidden
+        let showToolbar = !isFloatingOverlayOnly && (!tabItems.isEmpty || !toolbarView.workspaceSwitcher.isHidden)
         if showToolbar {
             toolbarView.isHidden = false
             toolbarFrame = NSRect(
-                x: paddedBounds.minX,
-                y: paddedBounds.minY,
-                width: paddedBounds.width,
-                height: min(toolbarHeight, paddedBounds.height)
+                x: bounds.minX,
+                y: bounds.minY,
+                width: bounds.width,
+                height: min(toolbarHeight, bounds.height)
             )
             toolbarView.frame = toolbarFrame
         } else {
@@ -154,17 +155,20 @@ final class WorkspaceRootView: NSView {
 
         let contentHeight: CGFloat
         if showToolbar {
-            contentHeight = max(0, paddedBounds.height - toolbarFrame.height - sectionSpacing)
+            contentHeight = max(0, bounds.height - toolbarFrame.height - sectionSpacing)
         } else {
-            contentHeight = max(0, paddedBounds.height)
+            contentHeight = max(0, bounds.height)
         }
-        contentFrame = NSRect(
-            x: paddedBounds.minX,
-            y: showToolbar ? toolbarFrame.maxY + sectionSpacing : paddedBounds.minY,
-            width: paddedBounds.width,
+        contentLayoutView.frame = NSRect(
+            x: bounds.minX,
+            y: showToolbar ? toolbarFrame.maxY + sectionSpacing : bounds.minY,
+            width: bounds.width,
             height: contentHeight
         )
-        contentContainerView.frame = contentFrame
+        if contentContainerView.superview === contentLayoutView {
+            contentContainerView.frame = contentLayoutView.bounds
+        }
+        contentLayoutView.layoutSubtreeIfNeeded()
         floatingOverlayView.frame = bounds
         renderedContentView?.frame = contentContainerView.bounds
         if let floatingPaneView, !isFloatingPaneAnimating {

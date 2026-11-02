@@ -33,7 +33,6 @@ final class BrowserLocationBarView: NSView, NSTextFieldDelegate {
         layer?.masksToBounds = true
         layer?.borderWidth = 1
         layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.45).cgColor
-        appearance = NSAppearance(named: .darkAqua)
 
         // The bar floats above web content, so blend within the window rather
         // than with the desktop behind it.
@@ -48,7 +47,6 @@ final class BrowserLocationBarView: NSView, NSTextFieldDelegate {
         textField.focusRingType = .none
         textField.font = .systemFont(ofSize: 13)
         textField.lineBreakMode = .byTruncatingMiddle
-        textField.appearance = NSAppearance(named: .darkAqua)
         textField.target = self
         textField.action = #selector(submitAddress(_:))
         textField.delegate = self

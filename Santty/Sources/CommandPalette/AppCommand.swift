@@ -1,6 +1,7 @@
 import AppKit
 
 enum PaletteItemKind: String, CaseIterable {
+    case agent = "Agent"
     case workspace = "Workspace"
     case tab = "Tab"
     case pane = "Pane"
@@ -15,6 +16,7 @@ struct AppCommand {
     var kind: PaletteItemKind = .command
     var subtitle: String? = nil
     var symbol: String? = nil
+    var brandIcon: BrandIcon? = nil
     var isCurrent: Bool = false
     var isInCurrentWorkspace: Bool = false
     let perform: @MainActor () -> Void
@@ -28,6 +30,7 @@ struct AppCommandSnapshot: Equatable {
     var kind: PaletteItemKind = .command
     var subtitle: String? = nil
     var symbol: String? = nil
+    var brandIcon: BrandIcon? = nil
     var isCurrent: Bool = false
     var isInCurrentWorkspace: Bool = false
 }
@@ -36,7 +39,7 @@ extension AppCommand {
     var paletteSnapshot: AppCommandSnapshot {
         .init(
             id: id, title: title, shortcut: shortcut, isEnabled: isEnabled, kind: kind,
-            subtitle: subtitle, symbol: symbol, isCurrent: isCurrent,
+            subtitle: subtitle, symbol: symbol, brandIcon: brandIcon, isCurrent: isCurrent,
             isInCurrentWorkspace: isInCurrentWorkspace)
     }
 }

@@ -1,0 +1,48 @@
+{
+  "date": "2026-11-01",
+  "assets": [
+    {
+      "id": "herdr",
+      "name": "Herdr Workspace",
+      "note": "Herdr 官方应用标志",
+      "url": "https://raw.githubusercontent.com/herdrdev/herdr-app/1581a587919dddd6f1efd5f78eb542c4b2b02cb5/assets/icons/herdr-ui-icon-clean.svg",
+      "source": "https://github.com/herdrdev/herdr-app/blob/1581a587919dddd6f1efd5f78eb542c4b2b02cb5/assets/icons/herdr-ui-icon-clean.svg"
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "note": "Herdr App 采用的 LobeHub 图标",
+      "url": "https://raw.githubusercontent.com/herdrdev/herdr-app/1581a587919dddd6f1efd5f78eb542c4b2b02cb5/defaults/icons/codex.svg",
+      "source": "https://github.com/herdrdev/herdr-app/blob/1581a587919dddd6f1efd5f78eb542c4b2b02cb5/defaults/icons/codex.svg"
+    },
+    {
+      "id": "claude-code",
+      "name": "Claude Code",
+      "note": "像素小螃蟹 · Herdr App 图标",
+      "url": "https://raw.githubusercontent.com/herdrdev/herdr-app/1581a587919dddd6f1efd5f78eb542c4b2b02cb5/defaults/icons/claude.svg",
+      "source": "https://github.com/herdrdev/herdr-app/blob/1581a587919dddd6f1efd5f78eb542c4b2b02cb5/defaults/icons/claude.svg"
+    },
+    {
+      "id": "pi",
+      "name": "pi",
+      "note": "pi.dev 官方当前彩色标志",
+      "url": "https://pi.dev/logo.svg",
+      "source": "https://pi.dev/logo.svg"
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "note": "官方 Brand 资源 · 深色主题版本",
+      "url": "https://raw.githubusercontent.com/anomalyco/opencode/01276f906198db08d2ec7563c17ef202d3909705/packages/console/app/src/asset/brand/opencode-logo-dark.svg",
+      "source": "https://opencode.ai/brand"
+    },
+    {
+      "id": "github-copilot",
+      "name": "GitHub Copilot",
+      "note": "GitHub 官方 Octicons · Copilot 24",
+      "url": "https://raw.githubusercontent.com/primer/octicons/main/icons/copilot-24.svg",
+      "source": "https://github.com/primer/octicons/blob/main/icons/copilot-24.svg",
+      "mono": true
+    }
+  ]
+}

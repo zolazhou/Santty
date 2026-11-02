@@ -3,6 +3,31 @@ import XCTest
 @testable import Santty
 
 final class WorkspaceStoreTests: XCTestCase {
+    func testAutoResizeTriggerDefaultsForExistingSnapshotsAndRoundTripsEndpoints() throws {
+        let old = Data(#"{"isEnabled":true,"ratios":{"horizontal":0.7,"vertical":0.7}}"#.utf8)
+        let decoded = try JSONDecoder().decode(PaneAutoResizeConfiguration.self, from: old)
+        XCTAssertEqual(decoded.trigger, .focus)
+        XCTAssertTrue(decoded.isHorizontalEnabled)
+        XCTAssertTrue(decoded.isVerticalEnabled)
+        var saved = document()
+        let id = saved.tabs[0].panes[0].id
+        let config = PaneAutoResizeConfiguration(
+            isEnabled: true, ratios: .init(horizontal: 0, vertical: 1), trigger: .unfocused,
+            isHorizontalEnabled: true, isVerticalEnabled: false)
+        saved.tabs[0].autoResize[id] = config
+        try saved.validate()
+        XCTAssertEqual(try JSONDecoder().decode(SavedWorkspace.self, from: JSONEncoder().encode(saved)), saved)
+        saved.tabs[0].autoResize[id]?.trigger = .focus
+        XCTAssertThrowsError(try saved.validate())
+        saved.tabs[0].autoResize[id]?.trigger = .unfocused
+        for invalid in [CGFloat(-0.1), 1.1, .infinity, .nan] {
+            saved.tabs[0].autoResize[id]?.ratios.horizontal = invalid
+            XCTAssertThrowsError(try saved.validate())
+        }
+        let unknown = Data(#"{"isEnabled":true,"ratios":{"horizontal":0.7,"vertical":0.7},"trigger":"unknown"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(PaneAutoResizeConfiguration.self, from: unknown))
+    }
+
     private func location() throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("workspace-test-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -170,6 +195,25 @@ final class WorkspaceRestorationTests: XCTestCase {
         try await workspace.flushWorkspaceState()
         let flushed = try JSONDecoder().decode(SavedWorkspace.self, from: Data(contentsOf: url))
         XCTAssertEqual(flushed.localWorkspaceName, "Tools")
+    }
+
+    func testSavedSplitFractionsSurviveStartupLayout() async throws {
+        let url = try location()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let saved = document()
+        do {
+            let store = try WorkspaceStore(url: url)
+            try await store.save(saved)
+        }
+
+        let workspace = WorkspaceViewController()
+        await workspace.prepareWorkspacePersistence(url: url)
+        workspace.debugLoadForTesting()
+        XCTAssertEqual(workspace.debugLayoutNode, saved.tabs[0].layout)
+        XCTAssertEqual(workspace.savedWorkspace().tabs[0].layout, saved.tabs[0].layout)
+        try await workspace.flushWorkspaceState()
+        let persisted = try JSONDecoder().decode(SavedWorkspace.self, from: Data(contentsOf: url))
+        XCTAssertEqual(persisted.tabs[0].layout, saved.tabs[0].layout)
     }
 
     func testLocalWorkspaceSwitchingPaletteAndRestorationKeepIndependentTabs() async throws {

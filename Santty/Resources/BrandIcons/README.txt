@@ -1,0 +1,2 @@
+Original brand SVGs and source/license notices. App images are vector PDF imagesets in Assets.xcassets.
+PDFs were exported at 18pt square, preserving brand colors. The Pi viewBox was trimmed to its existing paths. OpenCode uses CairoSVG with its redundant full-canvas mask removed to preserve vector paths in PDF. Other PDFs were exported with Chromium. Original SVGs are unchanged. Copilot is rendered as a template image by the asset catalog.

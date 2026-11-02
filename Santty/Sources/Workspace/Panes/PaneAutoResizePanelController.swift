@@ -5,7 +5,13 @@ final class PaneAutoResizePanelController: NSWindowController {
     var onChange: ((PaneAutoResizeConfiguration) -> Void)?
 
     private let enabledButton = NSButton(
-        checkboxWithTitle: "Enable Focus Auto Resize", target: nil, action: nil)
+        checkboxWithTitle: "Enable Auto Resize", target: nil, action: nil)
+    private let triggerControl = NSSegmentedControl(
+        labels: ["Focus", "Unfocused"], trackingMode: .selectOne, target: nil, action: nil)
+    private let horizontalEnabledButton = NSButton(
+        checkboxWithTitle: "Horizontal", target: nil, action: nil)
+    private let verticalEnabledButton = NSButton(
+        checkboxWithTitle: "Vertical", target: nil, action: nil)
     private let horizontalSlider = NSSlider(
         value: 0.7, minValue: 0.25, maxValue: 0.95, target: nil, action: nil)
     private let verticalSlider = NSSlider(
@@ -18,7 +24,7 @@ final class PaneAutoResizePanelController: NSWindowController {
 
     init() {
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 196),
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 234),
             styleMask: [.titled, .closable, .utilityWindow],
             backing: .buffered,
             defer: false
@@ -54,11 +60,28 @@ final class PaneAutoResizePanelController: NSWindowController {
     private func installContent() {
         enabledButton.target = self
         enabledButton.action = #selector(controlChanged(_:))
+        triggerControl.target = self
+        triggerControl.action = #selector(controlChanged(_:))
+        triggerControl.setAccessibilityLabel("Trigger")
+        for button in [horizontalEnabledButton, verticalEnabledButton] {
+            button.target = self
+            button.action = #selector(controlChanged(_:))
+        }
+        horizontalEnabledButton.setAccessibilityLabel("Enable Horizontal Resize")
+        verticalEnabledButton.setAccessibilityLabel("Enable Vertical Resize")
 
         horizontalSlider.target = self
         horizontalSlider.action = #selector(controlChanged(_:))
+        horizontalSlider.setAccessibilityLabel("Horizontal")
         verticalSlider.target = self
         verticalSlider.action = #selector(controlChanged(_:))
+        verticalSlider.setAccessibilityLabel("Vertical")
+
+        let triggerLabel = NSTextField(labelWithString: "Trigger")
+        triggerLabel.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        let triggerRow = NSStackView(views: [triggerLabel, triggerControl])
+        triggerRow.alignment = .centerY
+        triggerRow.spacing = 10
 
         let doneButton = NSButton(title: "Done", target: self, action: #selector(done(_:)))
         doneButton.bezelStyle = .rounded
@@ -68,9 +91,10 @@ final class PaneAutoResizePanelController: NSWindowController {
 
         let stackView = NSStackView(views: [
             enabledButton,
+            triggerRow,
             sliderRow(
-                title: "Horizontal", slider: horizontalSlider, valueLabel: horizontalValueLabel),
-            sliderRow(title: "Vertical", slider: verticalSlider, valueLabel: verticalValueLabel),
+                enabledButton: horizontalEnabledButton, slider: horizontalSlider, valueLabel: horizontalValueLabel),
+            sliderRow(enabledButton: verticalEnabledButton, slider: verticalSlider, valueLabel: verticalValueLabel),
             buttonRow(doneButton),
         ])
         stackView.orientation = .vertical
@@ -87,17 +111,17 @@ final class PaneAutoResizePanelController: NSWindowController {
             stackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
             stackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
         ])
+        updateControls()
     }
 
-    private func sliderRow(title: String, slider: NSSlider, valueLabel: NSTextField) -> NSStackView
+    private func sliderRow(enabledButton: NSButton, slider: NSSlider, valueLabel: NSTextField) -> NSStackView
     {
-        let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.widthAnchor.constraint(equalToConstant: 76).isActive = true
+        enabledButton.widthAnchor.constraint(equalToConstant: 100).isActive = true
         valueLabel.alignment = .right
         valueLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
-        slider.widthAnchor.constraint(equalToConstant: 190).isActive = true
+        slider.widthAnchor.constraint(equalToConstant: 166).isActive = true
 
-        let row = NSStackView(views: [titleLabel, slider, valueLabel])
+        let row = NSStackView(views: [enabledButton, slider, valueLabel])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 10
@@ -119,12 +143,18 @@ final class PaneAutoResizePanelController: NSWindowController {
             return
         }
 
+        let trigger: PaneAutoResizeConfiguration.Trigger =
+            triggerControl.selectedSegment == 1 ? .unfocused : .focus
+        let range = trigger.ratioRange
         configuration = PaneAutoResizeConfiguration(
             isEnabled: enabledButton.state == .on,
             ratios: PaneFocusRatios(
-                horizontal: CGFloat(horizontalSlider.doubleValue),
-                vertical: CGFloat(verticalSlider.doubleValue)
-            )
+                horizontal: CGFloat(min(max(horizontalSlider.doubleValue, range.lowerBound), range.upperBound)),
+                vertical: CGFloat(min(max(verticalSlider.doubleValue, range.lowerBound), range.upperBound))
+            ),
+            trigger: trigger,
+            isHorizontalEnabled: horizontalEnabledButton.state == .on,
+            isVerticalEnabled: verticalEnabledButton.state == .on
         )
         updateControls()
         onChange?(configuration)
@@ -145,12 +175,22 @@ final class PaneAutoResizePanelController: NSWindowController {
     private func updateControls() {
         isUpdatingControls = true
         enabledButton.state = configuration.isEnabled ? .on : .off
+        triggerControl.selectedSegment = configuration.trigger == .focus ? 0 : 1
+        triggerControl.isEnabled = configuration.isEnabled
+        horizontalEnabledButton.state = configuration.isHorizontalEnabled ? .on : .off
+        verticalEnabledButton.state = configuration.isVerticalEnabled ? .on : .off
+        horizontalEnabledButton.isEnabled = configuration.isEnabled
+        verticalEnabledButton.isEnabled = configuration.isEnabled
+        for slider in [horizontalSlider, verticalSlider] {
+            slider.minValue = configuration.trigger.ratioRange.lowerBound
+            slider.maxValue = configuration.trigger.ratioRange.upperBound
+        }
         horizontalSlider.doubleValue = Double(configuration.ratios.horizontal)
         verticalSlider.doubleValue = Double(configuration.ratios.vertical)
         horizontalValueLabel.stringValue = percentageString(for: configuration.ratios.horizontal)
         verticalValueLabel.stringValue = percentageString(for: configuration.ratios.vertical)
-        horizontalSlider.isEnabled = configuration.isEnabled
-        verticalSlider.isEnabled = configuration.isEnabled
+        horizontalSlider.isEnabled = configuration.isEnabled && configuration.isHorizontalEnabled
+        verticalSlider.isEnabled = configuration.isEnabled && configuration.isVerticalEnabled
         isUpdatingControls = false
     }
 

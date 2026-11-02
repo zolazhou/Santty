@@ -67,26 +67,20 @@ struct TilingLayout: Equatable {
 
         case .split(let axis, let children, let fractions):
             let primaryLength = axis == .horizontal ? rect.width : rect.height
-            let dividerCount = max(0, children.count - 1)
+            let visibleIndices = fractions.indices.filter { fractions[$0] > 0 }
+            let dividerCount = rect.isEmpty ? 0 : max(0, visibleIndices.count - 1)
             let usablePrimaryLength = max(
                 0,
                 primaryLength - dividerThickness * CGFloat(dividerCount)
             )
 
-            let clampedFractions: [CGFloat]
-            if usablePrimaryLength > 0 {
-                clampedFractions = node.clampedFractions(
-                    fractions,
-                    in: rect.size,
-                    panelMinimumSize: minimumPaneSize,
-                    dividerThickness: dividerThickness
-                )
-            } else {
-                clampedFractions = Array(
-                    repeating: 1.0 / CGFloat(max(1, children.count)),
-                    count: children.count
-                )
-            }
+            let clampedFractions = rect.isEmpty ? fractions : node.clampedFractions(
+                fractions,
+                in: rect.size,
+                panelMinimumSize: minimumPaneSize,
+                dividerThickness: dividerThickness,
+                collapsedChildIndices: Set(fractions.indices.filter { fractions[$0] == 0 })
+            )
 
             effectiveFractions[path] = clampedFractions
 
@@ -114,7 +108,9 @@ struct TilingLayout: Equatable {
 
                 cursor += childPrimaryLength
 
-                if index < children.count - 1 {
+                if !rect.isEmpty, clampedFractions[index] > 0,
+                    index != visibleIndices.last
+                {
                     let divRect = Self.dividerRect(
                         in: rect,
                         axis: axis,
@@ -199,6 +195,8 @@ final class WorkspaceTilingView: NSView {
     private var currentLayout: TilingLayout?
     private var dividerThickness: CGFloat
     private let minimumPaneSize: NSSize
+    private var isTransientLayout = false
+    private(set) var collapsedPaneIDs: Set<PaneID> = []
     var animationGeneration = 0
 
     override var mouseDownCanMoveWindow: Bool { false }
@@ -246,14 +244,17 @@ final class WorkspaceTilingView: NSView {
     func setLayoutNode(
         _ node: LayoutNode,
         paneViews: [PaneID: NSView],
-        animated: Bool
+        animated: Bool,
+        isTransient: Bool = false
     ) {
+        isTransientLayout = isTransient
         let oldPaneIDs = Set(self.layoutNode?.paneIDsInTraversalOrder ?? [])
         let newPaneIDs = Set(node.paneIDsInTraversalOrder)
         let structureChanged = oldPaneIDs != newPaneIDs
 
         // Remove views for panes no longer in the tree
         for (paneID, view) in self.paneViews where !newPaneIDs.contains(paneID) {
+            if collapsedPaneIDs.remove(paneID) != nil { view.isHidden = false }
             view.removeFromSuperview()
             self.paneViews.removeValue(forKey: paneID)
         }
@@ -336,7 +337,15 @@ final class WorkspaceTilingView: NSView {
     func applyPaneFrames(_ layout: TilingLayout) {
         for placement in layout.panePlacements {
             if let view = paneViews[placement.paneID] {
-                view.frame = placement.frame
+                if placement.frame.isEmpty {
+                    collapsedPaneIDs.insert(placement.paneID)
+                    view.isHidden = true
+                    view.layer?.removeAnimation(forKey: "santty.paneResize.flip")
+                } else {
+                    // Keep a folded terminal's last usable size instead of sending a zero PTY resize.
+                    view.frame = placement.frame
+                    if collapsedPaneIDs.remove(placement.paneID) != nil { view.isHidden = false }
+                }
             }
         }
     }
@@ -360,7 +369,9 @@ final class WorkspaceTilingView: NSView {
             layoutNode = layoutNode?.replacingFractions(
                 at: path, with: effectiveFractions
             )
-            onFractionsChange?(path, effectiveFractions, .layoutClamp)
+            if !isTransientLayout {
+                onFractionsChange?(path, effectiveFractions, .layoutClamp)
+            }
         }
 
         for (index, child) in children.enumerated() {
@@ -411,6 +422,7 @@ final class WorkspaceTilingView: NSView {
         }
 
         for (paneID, view) in paneViews {
+            guard !collapsedPaneIDs.contains(paneID) else { continue }
             guard let oldFrame = oldFrames[paneID],
                   let newFrame = newFrames[paneID]
             else {
@@ -563,7 +575,10 @@ final class WorkspaceTilingView: NSView {
     ) -> [CGFloat] {
         let primaryLength =
             axis == .horizontal ? splitRect.width : splitRect.height
-        let dividerCount = max(0, children.count - 1)
+        guard let trailingIndex = fractions.indices.first(where: {
+            $0 > dividerIndex && fractions[$0] > 0
+        }) else { return fractions }
+        let dividerCount = max(0, fractions.filter { $0 > 0 }.count - 1)
         let usablePrimaryLength = max(
             0,
             primaryLength - dividerThickness * CGFloat(dividerCount)
@@ -574,7 +589,7 @@ final class WorkspaceTilingView: NSView {
         let leadingMinSize = children[dividerIndex].minimumSize(
             panelMinimumSize: minimumPaneSize, dividerThickness: dividerThickness
         )
-        let trailingMinSize = children[dividerIndex + 1].minimumSize(
+        let trailingMinSize = children[trailingIndex].minimumSize(
             panelMinimumSize: minimumPaneSize, dividerThickness: dividerThickness
         )
         let minimumLeadingLength =
@@ -584,18 +599,18 @@ final class WorkspaceTilingView: NSView {
 
         let combinedPrimaryLength =
             usablePrimaryLength * fractions[dividerIndex]
-            + usablePrimaryLength * fractions[dividerIndex + 1]
+            + usablePrimaryLength * fractions[trailingIndex]
 
         let proposedLeadingLength: CGFloat
         switch axis {
         case .horizontal:
             proposedLeadingLength = location.x - splitRect.minX
                 - fractions.prefix(dividerIndex).reduce(0) {
-                    $0 + usablePrimaryLength * $1 + dividerThickness
+                    $0 + ($1 > 0 ? usablePrimaryLength * $1 + dividerThickness : 0)
                 }
         case .vertical:
             let leadingOrigin = fractions.prefix(dividerIndex).reduce(0) {
-                $0 + usablePrimaryLength * $1 + dividerThickness
+                $0 + ($1 > 0 ? usablePrimaryLength * $1 + dividerThickness : 0)
             }
             let leadingTop = splitRect.maxY - leadingOrigin
             proposedLeadingLength = leadingTop - location.y
@@ -609,7 +624,7 @@ final class WorkspaceTilingView: NSView {
 
         var updated = fractions
         updated[dividerIndex] = clampedLeadingLength / usablePrimaryLength
-        updated[dividerIndex + 1] = clampedTrailingLength / usablePrimaryLength
+        updated[trailingIndex] = clampedTrailingLength / usablePrimaryLength
         return updated
     }
 

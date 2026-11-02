@@ -323,7 +323,8 @@ final class WorkspaceViewControllerTests: XCTestCase {
             hostView.frame = NSRect(x: 0, y: 0, width: 640, height: 400)
             hostView.layoutSubtreeIfNeeded()
 
-            XCTAssertEqual(hostView.appearance?.name, .darkAqua)
+            XCTAssertNil(hostView.appearance)
+            XCTAssertEqual(hostView.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua)
             XCTAssertTrue(hostView.webView.isHidden)
             XCTAssertEqual(hostView.webView.frame, hostView.bounds)
 
@@ -587,8 +588,8 @@ final class WorkspaceViewControllerTests: XCTestCase {
             let tabStripFrame = controller.debugTabStripFrame
 
             XCTAssertEqual(tabStripFrame.height, WorkspaceLayoutMetrics.tabStripHeight, accuracy: 0.0001)
-            XCTAssertEqual(tabStripFrame.minY, WorkspaceLayoutMetrics.workspaceEdgePadding, accuracy: 0.0001)
-            XCTAssertEqual(contentFrame.maxY, controller.view.bounds.height - WorkspaceLayoutMetrics.workspaceEdgePadding, accuracy: 0.0001)
+            XCTAssertEqual(tabStripFrame.minY, 0, accuracy: 0.0001)
+            XCTAssertEqual(contentFrame.maxY, (controller.view as? WindowContentView)?.mainView.bounds.height ?? 0, accuracy: 0.0001)
             XCTAssertGreaterThan(contentFrame.minY, tabStripFrame.maxY)
             XCTAssertEqual(controller.debugRenderedContentFrame, contentFrame)
             XCTAssertGreaterThan(controller.debugRenderedContentFrame.width, 0)
@@ -597,9 +598,12 @@ final class WorkspaceViewControllerTests: XCTestCase {
     }
 
     @MainActor
-    func testWorkspaceSwitcherRemainsLegibleOnDarkChromeWithLightSystemAppearance() throws {
+    func testWorkspaceSwitcherInheritsDarkWindowAppearance() throws {
         let toolbar = WorkspaceToolbarView(frame: NSRect(x: 0, y: 0, width: 640, height: 32))
-        toolbar.appearance = NSAppearance(named: .aqua)
+        let window = NSWindow(contentRect: toolbar.bounds, styleMask: [.titled], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentView = toolbar
+        defer { window.contentView = nil }
         let first = UUID(), second = UUID()
         toolbar.updateWorkspaceEntries([
             .init(reference: first, name: "Santty"),
@@ -607,10 +611,12 @@ final class WorkspaceViewControllerTests: XCTestCase {
         ], selectedID: "local." + first.uuidString)
         toolbar.layoutSubtreeIfNeeded()
         let button = toolbar.workspaceSwitcher
+        XCTAssertNil(toolbar.appearance)
+        XCTAssertNil(button.appearance)
         XCTAssertFalse(button.isHidden)
         XCTAssertEqual(button.titleOfSelectedItem, "Santty")
         XCTAssertEqual(button.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]), .darkAqua,
-            "Light system appearance must not draw black workspace text on Santty's dark chrome")
+            "Workspace controls must inherit the window's dark appearance")
         XCTAssertGreaterThanOrEqual(button.frame.height, 30)
         XCTAssertGreaterThan(button.frame.width, 0)
         XCTAssertTrue(toolbar.bounds.contains(button.convert(button.bounds, to: toolbar)))
@@ -626,6 +632,25 @@ final class WorkspaceViewControllerTests: XCTestCase {
         button.selectItem(at: 1)
         XCTAssertTrue(button.sendAction(button.action, to: button.target))
         XCTAssertEqual(selected, "local." + second.uuidString)
+    }
+
+    @MainActor
+    func testAgentsButtonRestoresCapsuleAndUnreadBadge() throws {
+        let toolbar = WorkspaceToolbarView(frame: NSRect(x: 0, y: 0, width: 640, height: 32))
+        toolbar.updateAgents(count: 2, unread: 100)
+        toolbar.layoutSubtreeIfNeeded()
+        let button = toolbar.agentStatusButton
+        XCTAssertFalse(button.isHidden)
+        XCTAssertEqual(button.title, "Agents")
+        XCTAssertEqual(button.badgeText, "99+")
+        XCTAssertEqual(button.intrinsicContentSize.height, 32)
+        XCTAssertEqual(button.layer?.cornerRadius, 16)
+        XCTAssertGreaterThan(try XCTUnwrap(button.layer?.backgroundColor).alpha, 0)
+        XCTAssertLessThanOrEqual(button.debugBadgeFrame.maxX, button.bounds.maxX)
+        toolbar.updateAgents(count: 2, unread: 0)
+        XCTAssertNil(button.badgeText)
+        toolbar.updateAgents(count: 0, unread: 0)
+        XCTAssertTrue(button.isHidden)
     }
 
     @MainActor
@@ -861,6 +886,198 @@ final class WorkspaceViewControllerTests: XCTestCase {
 
             XCTAssertNil(controller.debugActiveAutoZoomState)
             assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.5, 0.5], accuracy: 0.0001)
+        }
+    }
+
+    func testUnfocusedAutoResizeCollapsesAndKeyboardFocusRestoresOriginalLayout() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            let first = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugSplitFocusedPane(along: .horizontal)
+            let second = try XCTUnwrap(controller.debugFocusedPaneID)
+            let original = controller.debugLayoutNode
+            controller.debugSetPaneAutoResizeConfiguration(.init(
+                isEnabled: true, ratios: .init(horizontal: 0, vertical: 0), trigger: .unfocused), for: first)
+            controller.debugFocusPane(withID: first)
+            XCTAssertNil(controller.debugActiveAutoZoomState)
+            controller.debugFocusPane(withID: second)
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0, 1], accuracy: 0.0001)
+            XCTAssertTrue(try XCTUnwrap(controller.debugRenderedSplitChildFrame(at: [], childIndex: 0)).isEmpty)
+            XCTAssertEqual(controller.debugLayoutNode, original)
+            try controller.savedWorkspace().validate()
+
+            controller.debugFocusPane(in: .left)
+            XCTAssertEqual(controller.debugFocusedPaneID, first)
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.5, 0.5], accuracy: 0.0001)
+            controller.debugFocusPane(withID: second)
+            controller.focusNextPane(nil)
+            XCTAssertEqual(controller.debugFocusedPaneID, first)
+            XCTAssertEqual(controller.debugLayoutNode, original)
+        }
+    }
+
+    func testUnfocusedAutoResizeUsesRatiosAndKeepsFocusedSiblingVisibleAtOneHundredPercent() async throws {
+        try await MainActor.run {
+            for axis in [SplitAxis.horizontal, .vertical] {
+                let controller = Self.makeController()
+                let first = try XCTUnwrap(controller.debugFocusedPaneID)
+                controller.debugSplitFocusedPane(along: axis)
+                let second = try XCTUnwrap(controller.debugFocusedPaneID)
+                controller.debugSetPaneAutoResizeConfiguration(.init(
+                    isEnabled: true, ratios: .init(
+                        horizontal: axis == .horizontal ? 0.35 : 0,
+                        vertical: axis == .vertical ? 0.65 : 0), trigger: .unfocused), for: first)
+                controller.debugFocusPane(withID: first)
+                controller.debugFocusPane(withID: second)
+                let ratio: CGFloat = axis == .horizontal ? 0.35 : 0.65
+                assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [ratio, 1 - ratio], accuracy: 0.0001)
+
+                controller.debugSetPaneAutoResizeConfiguration(.init(
+                    isEnabled: true, ratios: .init(horizontal: 1, vertical: 1), trigger: .unfocused), for: first)
+                controller.debugFocusPane(withID: first)
+                controller.debugFocusPane(withID: second)
+                let fractions = try XCTUnwrap(controller.debugRenderedSplitFractions(at: []))
+                XCTAssertLessThan(fractions[0], 1)
+                XCTAssertGreaterThan(fractions[1], 0)
+                XCTAssertFalse(try XCTUnwrap(controller.debugRenderedSplitChildFrame(at: [], childIndex: 1)).isEmpty)
+                try controller.savedWorkspace().validate()
+            }
+        }
+    }
+
+    func testFocusAutoResizeOverridesConflictingUnfocusedCollapse() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            let first = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugSplitFocusedPane(along: .horizontal)
+            let second = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugSetPaneAutoResizeConfiguration(.init(
+                isEnabled: true, ratios: .init(horizontal: 0, vertical: 0), trigger: .unfocused), for: first)
+            controller.debugSetPaneAutoResizeConfiguration(.init(
+                isEnabled: true, ratios: .init(horizontal: 0.7, vertical: 0.7),
+                isHorizontalEnabled: false), for: second)
+            controller.debugFocusPane(withID: first)
+            controller.debugFocusPane(withID: second)
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0, 1], accuracy: 0.0001)
+            Self.enableAutoResize(for: second, in: controller)
+            controller.debugFocusPane(withID: first)
+            controller.debugFocusPane(withID: second)
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.3, 0.7], accuracy: 0.0001)
+            XCTAssertFalse(try XCTUnwrap(controller.debugRenderedSplitChildFrame(at: [], childIndex: 0)).isEmpty)
+        }
+    }
+
+    func testAutoResizeAxesCanBeEnabledIndependentlyForBothTriggers() async throws {
+        try await MainActor.run {
+            for trigger in [PaneAutoResizeConfiguration.Trigger.focus, .unfocused] {
+                for (horizontal, vertical) in [(true, false), (false, true), (true, true), (false, false)] {
+                    let controller = Self.makeController()
+                    let outside = try XCTUnwrap(controller.debugFocusedPaneID)
+                    controller.debugSplitFocusedPane(along: .horizontal)
+                    let configured = try XCTUnwrap(controller.debugFocusedPaneID)
+                    controller.debugSplitFocusedPane(along: .vertical)
+                    controller.debugUpdateSplitFractions(at: [.child(1)], to: [0.35, 0.65])
+                    let original = controller.debugLayoutNode
+                    controller.debugSetPaneAutoResizeConfiguration(.init(
+                        isEnabled: true,
+                        ratios: trigger == .focus ? .init(horizontal: 0.65, vertical: 0.6) : .init(horizontal: 0, vertical: 0),
+                        trigger: trigger, isHorizontalEnabled: horizontal, isVerticalEnabled: vertical), for: configured)
+                    controller.debugFocusPane(withID: outside)
+                    controller.debugFocusPane(withID: configured)
+                    if trigger == .unfocused { controller.debugFocusPane(withID: outside) }
+
+                    let horizontalFractions: [CGFloat] = horizontal
+                        ? (trigger == .focus ? [0.35, 0.65] : [1, 0]) : [0.5, 0.5]
+                    let verticalFractions: [CGFloat] = vertical
+                        ? (trigger == .focus ? [0.6, 0.4] : [0, 1]) : [0.35, 0.65]
+                    assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), horizontalFractions, accuracy: 0.0001)
+                    assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [.child(1)])), verticalFractions, accuracy: 0.0001)
+                    XCTAssertEqual(controller.debugLayoutNode, original)
+                    try controller.savedWorkspace().validate()
+
+                    controller.debugFocusPane(withID: trigger == .focus ? outside : configured)
+                    assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.5, 0.5], accuracy: 0.0001)
+                    assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [.child(1)])), [0.35, 0.65], accuracy: 0.0001)
+                }
+            }
+        }
+    }
+
+    func testUnfocusedZeroCollapsesMatchingAncestorAxisAndRestoresWholeBranch() async throws {
+        try await MainActor.run {
+            for axis in [SplitAxis.horizontal, .vertical] {
+                let controller = Self.makeController()
+                let outside = try XCTUnwrap(controller.debugFocusedPaneID)
+                controller.debugSplitFocusedPane(along: axis)
+                let configured = try XCTUnwrap(controller.debugFocusedPaneID)
+                controller.debugSplitFocusedPane(along: axis == .horizontal ? .vertical : .horizontal)
+                let sibling = try XCTUnwrap(controller.debugFocusedPaneID)
+                let original = controller.debugLayoutNode
+                controller.debugSetPaneAutoResizeConfiguration(.init(
+                    isEnabled: true, ratios: .init(
+                        horizontal: axis == .horizontal ? 0 : 0.6,
+                        vertical: axis == .vertical ? 0 : 0.6), trigger: .unfocused), for: configured)
+
+                controller.debugFocusPane(withID: configured)
+                controller.debugFocusPane(withID: outside)
+                assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [1, 0], accuracy: 0.0001)
+                assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [.child(1)])), [0.6, 0.4], accuracy: 0.0001)
+                for index in 0...1 {
+                    let frame = try XCTUnwrap(controller.debugRenderedSplitChildFrame(at: [.child(1)], childIndex: index))
+                    XCTAssertEqual(axis == .horizontal ? frame.width : frame.height, 0)
+                    XCTAssertGreaterThan(axis == .horizontal ? frame.height : frame.width, 0)
+                }
+                XCTAssertEqual(controller.debugLayoutNode, original)
+                try controller.savedWorkspace().validate()
+
+                controller.debugFocusPane(in: axis == .horizontal ? .right : .below)
+                XCTAssertEqual(controller.debugFocusedPaneID, configured)
+                assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.5, 0.5], accuracy: 0.0001)
+                assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [.child(1)])), [0.5, 0.5], accuracy: 0.0001)
+
+                controller.debugFocusPane(withID: outside)
+                controller.debugFocusPane(withID: sibling)
+                assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.5, 0.5], accuracy: 0.0001)
+                assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [.child(1)])), [0.6, 0.4], accuracy: 0.0001)
+
+                Self.enableAutoResize(for: outside, in: controller)
+                controller.debugFocusPane(withID: outside)
+                assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.7, 0.3], accuracy: 0.0001)
+                XCTAssertFalse(try XCTUnwrap(controller.debugRenderedSplitChildFrame(at: [], childIndex: 1)).isEmpty)
+                XCTAssertEqual(controller.debugLayoutNode, original)
+                try controller.savedWorkspace().validate()
+            }
+        }
+    }
+
+    func testMultipleUnfocusedPanesCollapseAndManualDragNeverPersistsZeroFractions() async throws {
+        try await MainActor.run {
+            let controller = Self.makeController()
+            controller.debugSplitFocusedPane(along: .horizontal)
+            controller.debugSplitFocusedPane(along: .horizontal)
+            let ids = controller.debugPaneIDsInTraversalOrder
+            for id in ids.prefix(2) {
+                controller.debugSetPaneAutoResizeConfiguration(.init(
+                    isEnabled: true, ratios: .init(horizontal: 0, vertical: 0), trigger: .unfocused), for: id)
+            }
+            controller.debugFocusPane(withID: ids[0])
+            controller.debugFocusPane(withID: ids[2])
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0, 0, 1], accuracy: 0.0001)
+            controller.debugSetPaneAutoResizeConfiguration(WorkspaceFocusZoomConfiguration.defaultAutoResizeConfiguration, for: ids[1])
+            controller.debugFocusPane(withID: ids[1])
+            controller.debugFocusPane(withID: ids[2])
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            let tiling = try XCTUnwrap(descendants(controller.view).compactMap { $0 as? WorkspaceTilingView }
+                .first { $0.paneViews[ids[0]] != nil })
+            let usableWidth = tiling.bounds.width - AppAppearanceSettings.workspaceDividerThickness
+            tiling.debugApplyDragForDivider(at: [], dividerIndex: 1, location: NSPoint(x: usableWidth * 0.55, y: 300))
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0, 0.55, 0.45], accuracy: 0.0001)
+            XCTAssertEqual(controller.debugPaneAutoResizeConfiguration(for: ids[0])?.isEnabled, true)
+            controller.debugFocusPane(withID: ids[0])
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.5, 0.275, 0.225], accuracy: 0.0001)
+            controller.debugFocusPane(withID: ids[2])
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0, 0.55, 0.45], accuracy: 0.0001)
+            try controller.savedWorkspace().validate()
         }
     }
 
@@ -1178,7 +1395,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
         }
     }
 
-    func testDraggingActiveAutoZoomSplitDisablesAffectedPaneAutoResize() async throws {
+    func testDraggingActiveAutoZoomSplitPreservesPaneAutoResizeAndReappliesOnFocus() async throws {
         try await MainActor.run {
             let controller = Self.makeController()
             let firstPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
@@ -1189,25 +1406,64 @@ final class WorkspaceViewControllerTests: XCTestCase {
             Self.enableAutoResize(for: secondPaneID, in: controller)
             controller.debugFocusPane(withID: firstPaneID)
             controller.debugFocusPane(withID: secondPaneID)
+            let configurations = controller.savedWorkspace().tabs[0].autoResize
 
-            controller.debugUpdateSplitFractions(at: [], to: [0.42, 0.58])
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            let tiling = try XCTUnwrap(descendants(controller.view).compactMap { $0 as? WorkspaceTilingView }
+                .first { $0.paneViews[firstPaneID] != nil })
+            let usableWidth = tiling.bounds.width - AppAppearanceSettings.workspaceDividerThickness
+            tiling.debugApplyDragForDivider(at: [], dividerIndex: 0, location: NSPoint(x: usableWidth * 0.42, y: 300))
 
             XCTAssertNil(controller.debugActiveAutoZoomState)
-            XCTAssertEqual(controller.debugPaneAutoResizeConfiguration(for: firstPaneID)?.isEnabled, false)
-            XCTAssertEqual(controller.debugPaneAutoResizeConfiguration(for: secondPaneID)?.isEnabled, false)
-            XCTAssertEqual(
-                controller.debugLayoutNode?.node(at: []),
-                .split(
-                    axis: .horizontal,
-                    children: [.panel(firstPaneID), .panel(secondPaneID)],
-                    fractions: [0.42, 0.58]
-                )
-            )
+            XCTAssertEqual(controller.savedWorkspace().tabs[0].autoResize, configurations)
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.42, 0.58], accuracy: 0.0001)
+            let manualLayout = controller.debugLayoutNode
 
             controller.debugFocusPane(withID: firstPaneID)
 
-            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.42, 0.58], accuracy: 0.0001)
-            XCTAssertNil(controller.debugActiveAutoZoomState)
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.7, 0.3], accuracy: 0.0001)
+            controller.debugFocusPane(withID: secondPaneID)
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.3, 0.7], accuracy: 0.0001)
+            XCTAssertEqual(controller.debugLayoutNode, manualLayout)
+            XCTAssertEqual(controller.savedWorkspace().tabs[0].autoResize, configurations)
+            try controller.savedWorkspace().validate()
+        }
+    }
+
+    func testResizeCommandsKeepAutoResizeSettingsAndManualLayoutUntilFocusChanges() async throws {
+        try await MainActor.run {
+            for trigger in [PaneAutoResizeConfiguration.Trigger.focus, .unfocused] {
+                for command in ["pane.resize.left", "pane.resize.equalize"] {
+                    let controller = Self.makeController()
+                    let first = try XCTUnwrap(controller.debugFocusedPaneID)
+                    controller.debugSplitFocusedPane(along: .horizontal)
+                    let second = try XCTUnwrap(controller.debugFocusedPaneID)
+                    controller.debugSetPaneAutoResizeConfiguration(.init(
+                        isEnabled: true,
+                        ratios: .init(horizontal: trigger == .focus ? 0.7 : 0.3, vertical: 0.6),
+                        trigger: trigger, isVerticalEnabled: false),
+                        for: trigger == .focus ? second : first)
+                    controller.debugFocusPane(withID: first)
+                    controller.debugFocusPane(withID: second)
+                    assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.3, 0.7], accuracy: 0.0001)
+                    let configurations = controller.savedWorkspace().tabs[0].autoResize
+
+                    controller.debugPerformCommand(withID: command)
+                    let fractions: [CGFloat] = command == "pane.resize.left" ? [0.45, 0.55] : [0.5, 0.5]
+                    assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), fractions, accuracy: 0.0001)
+                    XCTAssertEqual(controller.savedWorkspace().tabs[0].autoResize, configurations)
+                    XCTAssertNil(controller.debugActiveAutoZoomState)
+                    let manualLayout = controller.debugLayoutNode
+
+                    controller.debugFocusPane(withID: first)
+                    assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), fractions, accuracy: 0.0001)
+                    controller.debugFocusPane(withID: second)
+                    assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.3, 0.7], accuracy: 0.0001)
+                    XCTAssertEqual(controller.debugLayoutNode, manualLayout)
+                    XCTAssertEqual(controller.savedWorkspace().tabs[0].autoResize, configurations)
+                    try controller.savedWorkspace().validate()
+                }
+            }
         }
     }
 
@@ -1761,11 +2017,12 @@ final class WorkspaceViewControllerTests: XCTestCase {
                 XCTAssertEqual(
                     controller.debugCommandSnapshots.map(\.id),
                     [
-                        "sidebar.toggle", "sidebar.left", "sidebar.right", "sidebar.browser", "sidebar.workspaces",
-                        "workspace.new", "workspace.rename", "workspace.close", "pane.rename",
+                        "sidebar.toggle", "sidebar.left", "sidebar.right", "sidebar.browser", "sidebar.workspaces", "sidebar.agents",
+                        "agents.show", "workspace.new", "workspace.rename", "workspace.new.herdr.remote", "workspace.new.herdr", "workspace.close", "pane.rename",
                         "pane.split.horizontal",
                         "pane.split.vertical",
-                        "pane.browser.new",
+                        "pane.terminal.new", "pane.workspaces.new",
+                        "pane.agents.new", "pane.browser.new",
                         "pane.browser.location",
                         "pane.browser.convert",
                         "pane.terminal.convert",
@@ -2209,6 +2466,66 @@ private func assertColorEqual(
 
 extension WorkspaceViewControllerTests {
     @MainActor
+    func testCommandBTogglesSidebarThroughMenuAndPalette() throws {
+        try Self.withRestoredKeybindingUserDefaults {
+            let action = KeybindingAction.toggleSidebar
+            KeybindingSettings.resetShortcut(for: action)
+            XCTAssertEqual(action.defaultShortcut, .init(.b, modifiers: [.command]))
+            let controller = Self.makeController()
+            let menu = NSMenu()
+            let item = NSMenuItem(title: action.title, action: #selector(WorkspaceViewController.toggleSidebar(_:)), keyEquivalent: "")
+            item.target = controller
+            KeybindingSettings.applyShortcut(for: action, to: item)
+            menu.addItem(item)
+            XCTAssertEqual(item.keyEquivalent, "b")
+            XCTAssertEqual(item.keyEquivalentModifierMask, [.command])
+            let event = try XCTUnwrap(Self.makeKeyEvent("b", modifiers: [.command], keyCode: UInt16(KeyboardShortcuts.Key.b.rawValue)))
+            XCTAssertEqual(KeybindingSettings.action(matching: event), .toggleSidebar)
+            XCTAssertFalse(controller.debugSidebarVisible)
+            XCTAssertTrue(AppMenuKeyEquivalents.perform(event, in: menu))
+            XCTAssertTrue(controller.debugSidebarVisible)
+            let command = try XCTUnwrap(controller.commandPaletteCommands.first { $0.id == "sidebar.toggle" })
+            XCTAssertEqual(command.title, "Toggle Sidebar")
+            XCTAssertEqual(command.shortcut, KeybindingSettings.displayShortcut(for: action))
+            command.perform()
+            XCTAssertFalse(controller.debugSidebarVisible)
+        }
+    }
+
+    @MainActor
+    func testTitleUpdatesKeepSidebarAndWorkspaceSelectionExclusive() throws {
+        let controller = Self.makeController()
+        let main = try XCTUnwrap(controller.debugFocusedPaneID)
+        controller.toggleSidebar(nil)
+        let sidebar = try XCTUnwrap(controller.debugSidebarPaneIDs.first)
+        let mainBadge = try XCTUnwrap(controller.debugPaneNameBadge(for: main))
+        let sidebarBadge = try XCTUnwrap(controller.debugPaneNameBadge(for: sidebar))
+
+        for focusSidebar in [false, true, false, true] {
+            if focusSidebar { controller.debugFocusSidebarPane(sidebar) }
+            else { controller.debugFocusPane(withID: main) }
+            for paneID in [main, sidebar] {
+                controller.debugSetPaneTitle("Updated shell title", for: paneID)
+                XCTAssertEqual(controller.debugSidebarFocused, focusSidebar)
+                XCTAssertEqual(mainBadge.isFocused, !focusSidebar)
+                XCTAssertEqual(sidebarBadge.isFocused, focusSidebar)
+            }
+        }
+
+        controller.toggleSidebar(nil)
+        controller.debugSetPaneTitle("Hidden sidebar title", for: sidebar)
+        XCTAssertTrue(mainBadge.isFocused)
+        XCTAssertFalse(sidebarBadge.isFocused)
+
+        controller.debugNewTab()
+        let activeBadge = try XCTUnwrap(controller.debugPaneNameBadge(for: try XCTUnwrap(controller.debugFocusedPaneID)))
+        controller.debugSetPaneTitle("Background tab title", for: main)
+        XCTAssertTrue(activeBadge.isFocused)
+        XCTAssertFalse(mainBadge.isFocused)
+        XCTAssertFalse(sidebarBadge.isFocused)
+    }
+
+    @MainActor
     func testSidebarFocusCrossesBothSidesWithoutSelectingItsTab() throws {
         let controller = Self.makeController()
         let main = try XCTUnwrap(controller.debugFocusedPaneID)
@@ -2226,7 +2543,7 @@ extension WorkspaceViewControllerTests {
         controller.moveSidebarRight(nil)
         let outer = try XCTUnwrap(controller.view as? WindowContentView)
         controller.view.layoutSubtreeIfNeeded()
-        let mainFrame = outer.mainView.convert(outer.mainView.bounds, to: outer)
+        let mainFrame = outer.mainView.contentContainerView.convert(outer.mainView.contentContainerView.bounds, to: outer)
         let sideFrame = outer.sidebarView.convert(outer.sidebarView.bounds, to: outer)
         XCTAssertLessThanOrEqual(mainFrame.maxX, sideFrame.minX, "main=\(mainFrame) sidebar=\(sideFrame)")
         controller.focusRightPane(nil)
@@ -2282,6 +2599,166 @@ extension WorkspaceViewControllerTests {
     }
 
     @MainActor
+    func testSidebarHorizontalResizeShortcutsMoveOuterDividerOnEitherSide() throws {
+        for (side, splitVertically) in [(SidebarSide.left, false), (.right, false), (.left, true), (.right, true)] {
+            let controller = Self.makeController()
+            if side == .left { controller.moveSidebarLeft(nil) }
+            else { controller.moveSidebarRight(nil) }
+            controller.debugFocusSidebarPane(try XCTUnwrap(controller.debugSidebarPaneIDs.first))
+            if splitVertically { controller.splitPaneVertically(nil) }
+            let outer = try XCTUnwrap(controller.view as? WindowContentView)
+            let mainLayout = controller.debugLayoutNode
+            let sidebarLayout = controller.savedWorkspace().sidebar?.tab.layout
+            let width = outer.sidebarView.frame.width
+            let grow: KeybindingAction = side == .left ? .movePaneDividerRight : .movePaneDividerLeft
+            let shrink: KeybindingAction = side == .left ? .movePaneDividerLeft : .movePaneDividerRight
+            let item = NSMenuItem(title: "Resize", action: side == .left ? #selector(WorkspaceViewController.movePaneDividerRight(_:)) : #selector(WorkspaceViewController.movePaneDividerLeft(_:)), keyEquivalent: "")
+            XCTAssertTrue(controller.validateMenuItem(item))
+            XCTAssertTrue(controller.performKeybindingAction(grow))
+            XCTAssertGreaterThan(outer.sidebarView.frame.width, width)
+            XCTAssertEqual(try XCTUnwrap(controller.savedWorkspace().sidebar?.preferredWidth), outer.sidebarView.frame.width, accuracy: 0.01)
+            XCTAssertTrue(controller.performKeybindingAction(shrink))
+            XCTAssertEqual(outer.sidebarView.frame.width, width, accuracy: 0.01)
+            for _ in 0..<30 { controller.performKeybindingAction(grow) }
+            XCTAssertGreaterThanOrEqual(outer.mainView.contentContainerView.frame.width, WorkspaceLayoutMetrics.minimumPaneSize.width)
+            for _ in 0..<30 { controller.performKeybindingAction(shrink) }
+            XCTAssertEqual(outer.sidebarView.frame.width, WorkspaceLayoutMetrics.minimumPaneSize.width, accuracy: 0.01)
+            XCTAssertEqual(controller.debugLayoutNode, mainLayout)
+            XCTAssertEqual(controller.savedWorkspace().sidebar?.tab.layout, sidebarLayout)
+            XCTAssertTrue(controller.debugSidebarFocused)
+            try controller.savedWorkspace().validate()
+        }
+    }
+
+    @MainActor
+    func testSidebarHorizontalResizePrefersInternalSplitAndFloatingPane() throws {
+        let controller = Self.makeController()
+        controller.toggleSidebar(nil)
+        controller.debugFocusSidebarPane(try XCTUnwrap(controller.debugSidebarPaneIDs.first))
+        let outer = try XCTUnwrap(controller.view as? WindowContentView)
+        outer.moveSidebarDivider(by: 0.4)
+        controller.splitPaneHorizontally(nil)
+        let width = outer.sidebarView.frame.width
+        XCTAssertTrue(controller.performKeybindingAction(.movePaneDividerLeft))
+        let layout = try XCTUnwrap(controller.savedWorkspace().sidebar?.tab.layout)
+        guard case let .split(_, _, fractions) = layout else { return XCTFail("Expected internal split") }
+        assertFractionsEqual(fractions, [0.45, 0.55], accuracy: 0.0001)
+        XCTAssertEqual(outer.sidebarView.frame.width, width, accuracy: 0.01)
+        controller.debugToggleFloatingPane()
+        let floatingWidth = outer.sidebarFloatingView.floatingPaneTargetFrame().width
+        XCTAssertTrue(controller.performKeybindingAction(.movePaneDividerLeft))
+        XCTAssertEqual(outer.sidebarFloatingView.floatingPaneTargetFrame().width, floatingWidth - WorkspaceFloatingPaneConfiguration.resizeStep, accuracy: 0.01)
+        XCTAssertEqual(outer.sidebarView.frame.width, width, accuracy: 0.01)
+        XCTAssertEqual(controller.savedWorkspace().sidebar?.tab.layout, layout)
+        try controller.savedWorkspace().validate()
+    }
+
+    @MainActor
+    func testSidebarPaneKindsFloatAtWindowCenterAndReturnToTheirLayout() throws {
+        for addPane: (WorkspaceViewController) -> Void in [
+            { $0.toggleSidebar(nil) }, { $0.addSidebarBrowser(nil) },
+            { $0.addSidebarWorkspaces(nil) }, { $0.addSidebarAgents(nil) },
+        ] {
+            let controller = Self.makeController()
+            let mainLayout = controller.debugLayoutNode
+            addPane(controller)
+            let id = try XCTUnwrap(controller.debugSidebarFocusedPaneID)
+            controller.debugFocusSidebarPane(id)
+            let outer = try XCTUnwrap(controller.view as? WindowContentView)
+            let pane = try XCTUnwrap(controller.debugSidebarPane(id))
+            let originalFrame = pane.hostView.convert(pane.hostView.bounds, to: outer)
+            let layout = controller.savedWorkspace().sidebar?.tab.layout
+            let menu = NSMenuItem(title: "Float", action: #selector(WorkspaceViewController.toggleFloatingPane(_:)), keyEquivalent: "")
+            XCTAssertTrue(controller.validateMenuItem(menu))
+            XCTAssertEqual(controller.debugCommandSnapshots.first { $0.id == "pane.floating.toggle" }?.isEnabled, true)
+
+            controller.debugToggleFloatingPane()
+            outer.layoutSubtreeIfNeeded()
+            let frame = pane.hostView.convert(pane.hostView.bounds, to: outer)
+            XCTAssertEqual(frame.midX, outer.bounds.midX, accuracy: 0.01)
+            XCTAssertEqual(frame.midY, outer.bounds.midY, accuracy: 0.01)
+            XCTAssertTrue(outer.sidebarView.paneViews[id] is TerminalPanePlaceholderView)
+            XCTAssertTrue(outer.sidebarFloatingView.debugHitIsInsideFloatingPane(at: outer.sidebarFloatingView.convert(NSPoint(x: frame.midX, y: frame.midY), from: outer)))
+            let outside = NSPoint(x: outer.sidebarFloatingView.frame.minX + 1, y: outer.sidebarFloatingView.frame.minY + 1)
+            XCTAssertNil(outer.sidebarFloatingView.hitTest(outside))
+            outer.needsLayout = true
+            outer.layoutSubtreeIfNeeded()
+            XCTAssertTrue(pane.hostView.isDescendant(of: outer.sidebarFloatingView))
+            XCTAssertTrue(controller.debugSidebarFocused)
+            XCTAssertEqual(controller.savedWorkspace().sidebar?.tab.floating?.paneID, id)
+            XCTAssertEqual(controller.savedWorkspace().sidebar?.tab.layout, layout)
+            XCTAssertEqual(controller.debugLayoutNode, mainLayout)
+            try controller.savedWorkspace().validate()
+
+            controller.debugToggleFloatingPane()
+            XCTAssertNil(outer.sidebarFloatingView.debugFloatingPaneFrame)
+            XCTAssertTrue(outer.sidebarView.paneViews[id] === pane.hostView)
+            assertRectsEqual(pane.hostView.convert(pane.hostView.bounds, to: outer), originalFrame, accuracy: 0.01)
+            XCTAssertTrue(controller.debugSidebarPane(id) === pane)
+            try controller.savedWorkspace().validate()
+        }
+    }
+
+    @MainActor
+    func testSidebarFloatingSizeAndPresentationRestoreAcrossMainTabsAndSnapshots() throws {
+        let controller = Self.makeController()
+        controller.addSidebarBrowser(nil)
+        let id = try XCTUnwrap(controller.debugSidebarFocusedPaneID)
+        controller.debugToggleFloatingPane()
+        controller.movePaneDividerRight(nil)
+        let size = try XCTUnwrap(controller.savedWorkspace().sidebar?.tab.floating?.size)
+        let pane = try XCTUnwrap(controller.debugSidebarPane(id))
+        controller.debugNewTab()
+        controller.newWorkspace(nil)
+        XCTAssertTrue(controller.debugSidebarPane(id) === pane)
+        let outer = try XCTUnwrap(controller.view as? WindowContentView)
+        XCTAssertTrue(pane.hostView.isDescendant(of: outer.sidebarFloatingView))
+        let document = try JSONDecoder().decode(SavedWorkspace.self, from: JSONEncoder().encode(controller.savedWorkspace()))
+        try document.validate()
+        let restored = Self.makeController()
+        try restored.restoreWorkspace(document)
+        let restoredOuter = try XCTUnwrap(restored.view as? WindowContentView)
+        let restoredPane = try XCTUnwrap(restored.debugSidebarPane(id))
+        XCTAssertTrue(restoredPane.hostView.isDescendant(of: restoredOuter.sidebarFloatingView))
+        XCTAssertEqual(restored.savedWorkspace().sidebar?.tab.floating?.size, size)
+        restored.debugFocusSidebarPane(id)
+        restored.debugToggleFloatingPane()
+        restored.debugToggleFloatingPane()
+        XCTAssertEqual(restored.savedWorkspace().sidebar?.tab.floating?.size, size)
+        try restored.savedWorkspace().validate()
+    }
+
+    @MainActor
+    func testSidebarFloatingPaneClearsOnFocusSplitHideAndClose() throws {
+        let controller = Self.makeController()
+        controller.addSidebarBrowser(nil)
+        let first = try XCTUnwrap(controller.debugSidebarFocusedPaneID)
+        controller.addSidebarAgents(nil)
+        let second = try XCTUnwrap(controller.debugSidebarFocusedPaneID)
+        let outer = try XCTUnwrap(controller.view as? WindowContentView)
+        controller.debugToggleFloatingPane()
+        controller.debugFocusSidebarPane(first)
+        XCTAssertNil(outer.sidebarFloatingView.debugFloatingPaneFrame)
+        XCTAssertNil(controller.savedWorkspace().sidebar?.tab.floating)
+        controller.debugToggleFloatingPane()
+        controller.splitPaneVertically(nil)
+        XCTAssertNil(outer.sidebarFloatingView.debugFloatingPaneFrame)
+        XCTAssertNil(controller.savedWorkspace().sidebar?.tab.floating)
+        controller.debugFocusSidebarPane(first)
+        controller.debugToggleFloatingPane()
+        controller.toggleSidebar(nil)
+        XCTAssertNil(outer.sidebarFloatingView.debugFloatingPaneFrame)
+        XCTAssertFalse(controller.debugSidebarFocused)
+        controller.toggleSidebar(nil)
+        controller.debugFocusSidebarPane(second)
+        controller.debugToggleFloatingPane()
+        controller.closePane(nil)
+        XCTAssertNil(outer.sidebarFloatingView.debugFloatingPaneFrame)
+        XCTAssertNil(controller.debugSidebarPane(second))
+        try controller.savedWorkspace().validate()
+    }
+
+    @MainActor
     func testSidebarClosingLastPaneHidesAndReopensDefaults() throws {
         let controller = Self.makeController()
         controller.toggleSidebar(nil)
@@ -2295,6 +2772,7 @@ extension WorkspaceViewControllerTests {
         try controller.savedWorkspace().validate()
         controller.toggleSidebar(nil)
         XCTAssertEqual(controller.debugSidebarPaneIDs.count, 1)
+        XCTAssertTrue(controller.debugSidebarPane(controller.debugSidebarPaneIDs[0]) is TerminalPaneController)
     }
 
     @MainActor
@@ -2335,6 +2813,10 @@ extension WorkspaceViewControllerTests {
         invalid.sidebarIsFocused = true
         XCTAssertThrowsError(try invalid.validate())
         invalid = original
+        let sidebarPane = try XCTUnwrap(original.sidebar?.tab.panes.first)
+        invalid.sidebar?.tab.panes = [.init(id: sidebarPane.id, kind: .herdrTerminal, title: "Remote")]
+        XCTAssertThrowsError(try invalid.validate())
+        invalid = original
         invalid.version = 7
         XCTAssertThrowsError(try invalid.validate())
 
@@ -2356,6 +2838,197 @@ extension WorkspaceViewControllerTests {
 
 extension WorkspaceViewControllerTests {
     @MainActor
+    func testNewWorkspacesPaneNavigatesRefreshesAndRestoresInMainArea() throws {
+        let controller = Self.makeController()
+        let original = controller.debugSelectedWorkspace
+        let command = try XCTUnwrap(controller.commandPaletteCommands.first { $0.id == "pane.workspaces.new" })
+        XCTAssertEqual(command.title, "New Workspaces Pane")
+        XCTAssertTrue(command.isEnabled)
+        command.perform()
+        let paneID = try XCTUnwrap(controller.debugFocusedPaneID)
+        XCTAssertEqual(try controller.handleCLIRequest(.init(command: "list")).tabs?.flatMap(\.panes).first { $0.id == paneID }?.kind, "workspaces")
+        XCTAssertTrue(controller.paletteNavigationItems.contains { $0.kind == .pane && $0.title == "Workspaces" && $0.symbol == "list.bullet" })
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let list = try XCTUnwrap(descendants(controller.view).first { $0.accessibilityLabel() == "Workspace list" })
+        controller.newWorkspace(nil)
+        let other = controller.debugSelectedWorkspace
+        controller.selectLocalWorkspace(original)
+        let down = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 125))
+        let enter = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 36))
+        list.keyDown(with: down)
+        list.keyDown(with: enter)
+        XCTAssertEqual(controller.debugSelectedWorkspace, other)
+        let saved = try JSONDecoder().decode(SavedWorkspace.self, from: JSONEncoder().encode(controller.savedWorkspace()))
+        let restored = Self.makeController()
+        try restored.restoreWorkspace(saved)
+        restored.selectLocalWorkspace(original)
+        XCTAssertEqual(restored.savedWorkspace().tabs.flatMap(\.panes).first { $0.id == paneID }?.kind, .workspaces)
+        XCTAssertTrue(descendants(restored.view).contains { $0.accessibilityLabel() == "Workspace list" })
+    }
+
+    @MainActor
+    func testNewPaneTypesChooseSplitAxisFromFocusedPaneSize() throws {
+        let actions: [(SavedWorkspace.Pane.Kind, (WorkspaceViewController) -> Void)] = [
+            (.localTerminal, { $0.newTerminalPane(nil) }),
+            (.browser, { $0.newBrowserPane(nil) }),
+            (.agents, { $0.newAgentsPane(nil) }),
+            (.workspaces, { $0.newWorkspacesPane(nil) }),
+        ]
+        for (sidebar, size, axis) in [
+            (false, NSSize(width: 1200, height: 800), SplitAxis.horizontal),
+            (false, NSSize(width: 700, height: 1200), .vertical),
+            (false, NSSize(width: 900, height: 940), .horizontal),
+            (true, NSSize(width: 1200, height: 800), .vertical),
+            (true, NSSize(width: 1200, height: 250), .horizontal),
+        ] {
+            for (kind, create) in actions {
+                let controller = Self.makeController()
+                controller.view.setFrameSize(size)
+                controller.view.layoutSubtreeIfNeeded()
+                let mainLayout = controller.debugLayoutNode
+                if sidebar {
+                    controller.toggleSidebar(nil)
+                    controller.debugFocusSidebarPane(try XCTUnwrap(controller.debugSidebarPaneIDs.first))
+                }
+                let anchor = try XCTUnwrap(sidebar ? controller.debugSidebarFocusedPaneID : controller.debugFocusedPaneID)
+                create(controller)
+                let saved = controller.savedWorkspace()
+                let tab = try XCTUnwrap(sidebar ? saved.sidebar?.tab : saved.tabs.first)
+                XCTAssertEqual(tab.panes.count, 2, "\(sidebar) \(kind) \(size)")
+                XCTAssertEqual(tab.layout?.parentSplitContext(for: anchor)?.axis, axis, "\(sidebar) \(kind) \(size)")
+                XCTAssertEqual(tab.panes.first { $0.id == tab.focusedPaneID }?.kind, kind)
+                if sidebar { XCTAssertEqual(controller.debugLayoutNode, mainLayout) }
+                try saved.validate()
+            }
+        }
+    }
+
+    @MainActor
+    func testSidebarStartsWithLocalTerminalAndAllowsExplicitSplits() throws {
+        let controller = Self.makeController()
+        let mainLayout = controller.debugLayoutNode
+        controller.toggleSidebar(nil)
+        let first = try XCTUnwrap(controller.debugSidebarPaneIDs.first)
+        let terminal = try XCTUnwrap(controller.debugSidebarPane(first) as? TerminalPaneController)
+        XCTAssertNil(terminal.herdrSession)
+        controller.debugFocusSidebarPane(first)
+        XCTAssertTrue(controller.commandPaletteCommands.first { $0.id == "pane.split.horizontal" }?.isEnabled == true)
+        controller.splitPaneHorizontally(nil)
+        XCTAssertEqual(controller.debugSidebarPaneIDs.count, 2)
+        XCTAssertEqual(controller.savedWorkspace().sidebar?.tab.layout?.parentSplitContext(for: first)?.axis, .horizontal)
+        controller.debugFocusSidebarPane(first)
+        controller.splitPaneVertically(nil)
+        XCTAssertEqual(controller.debugSidebarPaneIDs.count, 3)
+        XCTAssertEqual(controller.savedWorkspace().sidebar?.tab.layout?.parentSplitContext(for: first)?.axis, .vertical)
+        XCTAssertEqual(controller.debugLayoutNode, mainLayout)
+        XCTAssertTrue(controller.savedWorkspace().sidebar?.tab.autoResize.isEmpty == true)
+        try controller.savedWorkspace().validate()
+    }
+
+    @MainActor
+    func testSidebarAddCommandsChooseAxisWhenReopened() throws {
+        let actions: [(WorkspaceViewController) -> Void] = [
+            { $0.addSidebarBrowser(nil) }, { $0.addSidebarWorkspaces(nil) }, { $0.addSidebarAgents(nil) },
+        ]
+        for (height, axis) in [(CGFloat(250), SplitAxis.horizontal), (800, .vertical)] {
+            for create in actions {
+                let controller = Self.makeController()
+                controller.toggleSidebar(nil)
+                let anchor = try XCTUnwrap(controller.debugSidebarPaneIDs.first)
+                controller.toggleSidebar(nil)
+                controller.view.setFrameSize(NSSize(width: 1200, height: height))
+                create(controller)
+                XCTAssertTrue(controller.debugSidebarVisible)
+                XCTAssertEqual(controller.savedWorkspace().sidebar?.tab.layout?.parentSplitContext(for: anchor)?.axis, axis)
+            }
+        }
+    }
+
+    @MainActor
+    func testSidebarTerminalRestoresAndStartsLocallyInHerdrWorkspace() throws {
+        let controller = Self.makeController()
+        controller.toggleSidebar(nil)
+        var saved = controller.savedWorkspace()
+        saved.workspaceKind = .herdr
+        saved.tabs[0].panes = saved.tabs[0].panes.map {
+            .init(id: $0.id, kind: .herdrTerminal, name: $0.name, title: $0.title)
+        }
+        let decoded = try JSONDecoder().decode(SavedWorkspace.self, from: JSONEncoder().encode(saved))
+        let restored = Self.makeController()
+        try restored.restoreWorkspace(decoded)
+        let id = try XCTUnwrap(restored.debugSidebarPaneIDs.first)
+        let placeholder = try XCTUnwrap(restored.debugSidebarPane(id) as? RestoredPanePlaceholderController)
+        placeholder.onActivate?()
+        let terminal = try XCTUnwrap(restored.debugSidebarPane(id) as? TerminalPaneController)
+        XCTAssertNil(terminal.herdrSession)
+        restored.debugFocusSidebarPane(id)
+        restored.newTerminalPane(nil)
+        XCTAssertTrue(restored.savedWorkspace().sidebar?.tab.panes.allSatisfy { $0.kind == .localTerminal } == true)
+        try restored.savedWorkspace().validate()
+    }
+
+    @MainActor
+    func testSidebarSharesWindowEdgePaddingWithMainPanes() throws {
+        let controller = Self.makeController()
+        defer { AppAppearanceSettings.resetWorkspaceEdgePadding() }
+        let view = try XCTUnwrap(controller.view as? WindowContentView)
+        controller.toggleSidebar(nil)
+
+        for side in [SidebarSide.left, .right] {
+            if side == .left { controller.moveSidebarLeft(nil) }
+            else { controller.moveSidebarRight(nil) }
+            for padding: CGFloat in [0, 8, 24] {
+                AppAppearanceSettings.workspaceEdgePadding = padding
+                view.layoutSubtreeIfNeeded()
+                let sidebar = view.sidebarView.convert(view.sidebarView.bounds, to: view)
+                let main = view.mainView.contentContainerView.convert(view.mainView.contentContainerView.bounds, to: view)
+                let toolbar = view.mainView.toolbarView.convert(view.mainView.toolbarView.bounds, to: view)
+                XCTAssertEqual(sidebar.minY, main.minY, accuracy: 0.01)
+                XCTAssertEqual(sidebar.minY - toolbar.maxY, WorkspaceLayoutMetrics.workspaceSectionSpacing, accuracy: 0.01)
+                XCTAssertEqual(sidebar.maxY, view.bounds.maxY - padding, accuracy: 0.01)
+                XCTAssertEqual(main.maxY, sidebar.maxY, accuracy: 0.01)
+                XCTAssertEqual(toolbar.minY, padding, accuracy: 0.01)
+                XCTAssertEqual(toolbar.minX, padding, accuracy: 0.01)
+                XCTAssertEqual(toolbar.maxX, view.bounds.maxX - padding, accuracy: 0.01)
+                let point = NSPoint(x: sidebar.midX, y: toolbar.midY)
+                let hit = try XCTUnwrap(view.hitTest(point))
+                XCTAssertTrue(hit === view.mainView.toolbarView || hit.isDescendant(of: view.mainView.toolbarView))
+                if side == .left {
+                    XCTAssertEqual(sidebar.minX, padding, accuracy: 0.01)
+                    XCTAssertEqual(main.maxX, view.bounds.maxX - padding, accuracy: 0.01)
+                    XCTAssertEqual(main.minX - sidebar.maxX, AppAppearanceSettings.workspaceDividerThickness, accuracy: 0.01)
+                } else {
+                    XCTAssertEqual(sidebar.maxX, view.bounds.maxX - padding, accuracy: 0.01)
+                    XCTAssertEqual(main.minX, padding, accuracy: 0.01)
+                    XCTAssertEqual(sidebar.minX - main.maxX, AppAppearanceSettings.workspaceDividerThickness, accuracy: 0.01)
+                }
+            }
+        }
+        controller.toggleSidebar(nil)
+        view.layoutSubtreeIfNeeded()
+        let main = view.mainView.convert(view.mainView.bounds, to: view)
+        assertRectsEqual(main, view.bounds.insetBy(dx: 24, dy: 24), accuracy: 0.01)
+    }
+
+    @MainActor
+    func testSidebarMinimumWindowHeightIncludesBottomToolbar() throws {
+        let controller = Self.makeController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 1200), styleMask: [], backing: .buffered, defer: false)
+        window.contentViewController = controller
+        defer { window.contentViewController = nil }
+        controller.toggleSidebar(nil)
+        controller.debugFocusSidebarPane(try XCTUnwrap(controller.debugSidebarPaneIDs.first))
+        for _ in 0..<4 { controller.splitPaneVertically(nil) }
+        let layout = try XCTUnwrap(controller.savedWorkspace().sidebar?.tab.layout)
+        let expectedHeight = layout.minimumSize(dividerThickness: AppAppearanceSettings.workspaceDividerThickness).height
+            + WorkspaceLayoutMetrics.tabStripHeight + WorkspaceLayoutMetrics.workspaceSectionSpacing
+            + AppAppearanceSettings.workspaceEdgePadding * 2
+        XCTAssertEqual(window.contentMinSize.height, expectedHeight, accuracy: 0.01)
+    }
+
+    @MainActor
     func testSidebarWidthUsesPointsAndPreservesPreferenceAfterWindowClamp() throws {
         let view = WindowContentView(frame: NSRect(x: 0, y: 0, width: 1200, height: 800))
         let state = WindowSidebarState()
@@ -2366,7 +3039,7 @@ extension WorkspaceViewControllerTests {
         view.frame.size.width = 800
         view.needsLayout = true
         view.layoutSubtreeIfNeeded()
-        XCTAssertGreaterThanOrEqual(view.mainView.frame.width, 500)
+        XCTAssertGreaterThanOrEqual(view.mainView.contentContainerView.frame.width, 500)
         XCTAssertGreaterThanOrEqual(view.sidebarView.frame.width, 240)
         view.frame.size.width = 10000
         view.needsLayout = true
@@ -2376,7 +3049,7 @@ extension WorkspaceViewControllerTests {
         state.side = .right
         view.updateSidebar(state)
         XCTAssertEqual(view.sidebarView.frame.width, 280, accuracy: 0.01)
-        XCTAssertEqual(view.sidebarView.frame.maxY, view.mainView.frame.maxY)
+        XCTAssertEqual(view.sidebarView.frame.maxY, view.mainView.contentContainerView.frame.maxY)
     }
 
     @MainActor
@@ -2384,13 +3057,13 @@ extension WorkspaceViewControllerTests {
         let view = WindowContentView(frame: NSRect(x: 0, y: 0, width: 1200, height: 800))
         let state = WindowSidebarState(); state.isVisible = true
         view.updateSidebar(state)
-        let outer = try XCTUnwrap(view.subviews.first as? WorkspaceTilingView)
+        let outer = try XCTUnwrap(view.mainView.contentLayoutView.subviews.first as? WorkspaceTilingView)
         var widths: [CGFloat] = []
         view.onWidthChange = { widths.append($0) }
         outer.onFractionsChange?([], [0.3, 0.7], .layoutClamp)
         XCTAssertTrue(widths.isEmpty)
         outer.onFractionsChange?([], [0.3, 0.7], .userDrag)
-        XCTAssertEqual(try XCTUnwrap(widths.last), 0.3 * (1200 - AppAppearanceSettings.workspaceDividerThickness), accuracy: 0.01)
+        XCTAssertEqual(try XCTUnwrap(widths.last), 0.3 * (1200 - AppAppearanceSettings.workspaceEdgePadding * 2 - AppAppearanceSettings.workspaceDividerThickness), accuracy: 0.01)
     }
 
     @MainActor
@@ -2399,7 +3072,7 @@ extension WorkspaceViewControllerTests {
         let original = controller.debugSelectedWorkspace
         controller.newWorkspace(nil)
         let other = controller.debugSelectedWorkspace
-        controller.toggleSidebar(nil)
+        controller.addSidebarWorkspaces(nil)
         let id = try XCTUnwrap(controller.debugSidebarPaneIDs.first)
         let pane = try XCTUnwrap(controller.debugSidebarPane(id) as? SidebarListPaneController)
         controller.debugFocusSidebarPane(id)
@@ -2463,7 +3136,7 @@ extension WorkspaceViewControllerTests {
         restored.view.layoutSubtreeIfNeeded()
         XCTAssertEqual(restored.savedWorkspace().sidebar?.tab.layout, layout)
         let top = try XCTUnwrap(restored.debugSidebarPane(ids[0]))
-        XCTAssertEqual(top.hostView.frame.height / (1000 - AppAppearanceSettings.workspaceDividerThickness), 0.8, accuracy: 0.01)
+        XCTAssertEqual(top.hostView.frame.height / (outer.sidebarView.bounds.height - AppAppearanceSettings.workspaceDividerThickness), 0.8, accuracy: 0.01)
     }
 }
 
@@ -2473,15 +3146,15 @@ extension WorkspaceViewControllerTests {
         let controller = Self.makeController()
         controller.toggleSidebar(nil)
         let windowView = try XCTUnwrap(controller.view as? WindowContentView)
-        let outer = try XCTUnwrap(windowView.subviews.first as? WorkspaceTilingView)
+        let outer = try XCTUnwrap(windowView.mainView.contentLayoutView.subviews.first as? WorkspaceTilingView)
         outer.debugApplyDragForDivider(at: [], dividerIndex: 0, location: NSPoint(x: 400, y: 400))
         XCTAssertGreaterThan(windowView.sidebarView.frame.width, 280)
         XCTAssertEqual(try XCTUnwrap(controller.savedWorkspace().sidebar?.preferredWidth), windowView.sidebarView.frame.width, accuracy: 0.01)
         controller.debugSplitFocusedPane(along: .horizontal)
         controller.view.layoutSubtreeIfNeeded()
         outer.debugApplyDragForDivider(at: [], dividerIndex: 0, location: NSPoint(x: 1150, y: 400))
-        let minimum = try XCTUnwrap(controller.debugLayoutNode).minimumSize().width + AppAppearanceSettings.workspaceEdgePadding * 2
-        XCTAssertGreaterThanOrEqual(windowView.mainView.frame.width + 0.01, minimum)
+        let minimum = try XCTUnwrap(controller.debugLayoutNode).minimumSize().width
+        XCTAssertGreaterThanOrEqual(windowView.mainView.contentContainerView.frame.width + 0.01, minimum)
         XCTAssertEqual(try XCTUnwrap(controller.savedWorkspace().sidebar?.preferredWidth), windowView.sidebarView.frame.width, accuracy: 0.01)
         try controller.savedWorkspace().validate()
     }
@@ -2489,9 +3162,64 @@ extension WorkspaceViewControllerTests {
 
 extension WorkspaceViewControllerTests {
     @MainActor
+    func testWorkspaceListControlNavigationFromPaneAndTable() throws {
+        let pane = SidebarListPaneController()
+        let entries = [WorkspaceEntry(reference: UUID(), name: "First"), WorkspaceEntry(reference: UUID(), name: "Second")]
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let table = try XCTUnwrap(descendants(pane.hostView).compactMap { $0 as? NSTableView }.first)
+        var activated: [UUID] = []
+        pane.onSelectWorkspace = { activated.append($0) }
+        func key(_ character: String, code: UInt16, on responder: NSResponder) throws {
+            responder.keyDown(with: try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+                modifierFlags: .control, timestamp: 0, windowNumber: 0, context: nil,
+                characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: code)))
+        }
+        for responder in [pane.focusTargetView, table] {
+            pane.update(entries: entries, selected: entries[0].reference)
+            try key("p", code: 35, on: responder)
+            XCTAssertEqual(table.selectedRow, 0)
+            try key("n", code: 45, on: responder)
+            XCTAssertEqual(table.selectedRow, 1)
+            try key("n", code: 45, on: responder)
+            XCTAssertEqual(table.selectedRow, 1)
+            try key("p", code: 35, on: responder)
+            XCTAssertEqual(table.selectedRow, 0)
+            XCTAssertTrue(activated.isEmpty, "Navigation must not activate a workspace")
+            pane.update(entries: [], selected: nil)
+            try key("n", code: 45, on: responder)
+            try key("p", code: 35, on: responder)
+            XCTAssertEqual(table.selectedRow, -1)
+        }
+    }
+
+    @MainActor
+    func testWorkspaceListCardsKeepCurrentWorkspaceAndRemoteDetailsDuringKeyboardSelection() throws {
+        let pane = SidebarListPaneController()
+        pane.hostView.frame = NSRect(x: 0, y: 0, width: 280, height: 400)
+        pane.fitToSize()
+        let first = WorkspaceEntry(reference: UUID(), name: "Local")
+        let second = WorkspaceEntry(reference: UUID(), name: "Remote", kind: .herdr, remote: .init(id: "remote-core", name: "Server"))
+        pane.update(entries: [first, second], selected: first.reference)
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let table = try XCTUnwrap(descendants(pane.hostView).compactMap { $0 as? NSTableView }.first)
+        func cell(_ row: Int) throws -> NSView { try XCTUnwrap(table.view(atColumn: 0, row: row, makeIfNecessary: true)) }
+        XCTAssertEqual(try cell(0).accessibilityLabel(), "Local, Local Workspace, Current")
+        XCTAssertEqual(try cell(1).accessibilityLabel(), "Remote, Herdr · Server")
+        let down = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: 0, context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: 125))
+        pane.focusTargetView.keyDown(with: down)
+        XCTAssertEqual(table.selectedRow, 1)
+        XCTAssertEqual(try cell(0).accessibilityLabel(), "Local, Local Workspace, Current")
+        pane.update(entries: [second, first], selected: second.reference)
+        XCTAssertEqual(table.selectedRow, 0)
+        XCTAssertEqual(try cell(0).accessibilityLabel(), "Remote, Herdr · Server, Current")
+        XCTAssertEqual(try cell(1).accessibilityLabel(), "Local, Local Workspace")
+    }
+
+    @MainActor
     func testSidebarWorkspaceListKeyboardSelectionTracksStableIdentity() throws {
         let controller = Self.makeController()
-        controller.toggleSidebar(nil)
+        controller.addSidebarWorkspaces(nil)
         let pane = try XCTUnwrap(controller.debugSidebarPane(try XCTUnwrap(controller.debugSidebarPaneIDs.first)) as? SidebarListPaneController)
         let first = WorkspaceEntry(reference: UUID(), name: "First")
         let second = WorkspaceEntry(reference: UUID(), name: "Second")

@@ -210,6 +210,9 @@ final class TerminalPaneInteractionTests: XCTestCase {
         defer { window.orderOut(nil); window.contentView = nil }
         terminal.fitToSize()
         XCTAssertNotNil(terminal.scrollModeGrid)
+        // Model a visible renderer without activating the test window.
+        terminal.core.setApplicationActive(true)
+        terminal.core.setWindowVisible(true)
         // All-motion mouse reporting must not forward synthetic selection gestures.
         let sample = "A中👩🏽‍💻e\u{301}Z"
         let words = "  foo_bar/path.txt  next"

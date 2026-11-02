@@ -3,6 +3,7 @@ import SwiftUI
 
 @MainActor
 struct SettingsView: View {
+    private let createHerdrWorkspace: ((HerdrRemote) -> Bool)?
     @State private var selectedSection: SettingsSection? = .appearance
     @State private var accentColor: Color
     @State private var activeTabBackgroundKind: ActiveTabBackgroundKind
@@ -33,8 +34,10 @@ struct SettingsView: View {
         terminalThemeName: String = TerminalSettings.themeName,
         terminalFontFamily: String = TerminalSettings.fontFamily,
         terminalFontSize: CGFloat = TerminalSettings.fontSize,
-        terminalPadding: CGFloat = TerminalSettings.padding
+        terminalPadding: CGFloat = TerminalSettings.padding,
+        createHerdrWorkspace: ((HerdrRemote) -> Bool)? = nil
     ) {
+        self.createHerdrWorkspace = createHerdrWorkspace
         _accentColor = State(initialValue: Color(nsColor: accentColor))
         switch activeTabBackground {
         case .solid(let color):
@@ -168,6 +171,8 @@ struct SettingsView: View {
                 terminalFontSize: $terminalFontSize,
                 terminalPadding: $terminalPadding
             )
+        case .herdr:
+            HerdrSettingsPane(createWorkspace: createHerdrWorkspace)
         case .keybindings:
             KeybindingSettingsPane()
         }

@@ -23,9 +23,11 @@ final class RestoredPanePlaceholderController: NSObject, PaneControlling {
             guard let self else { return }
             self.onFocusRequest?(self.id)
         }
+        placeholderView.onAppearanceChange = { [weak self] in self?.updateAppearance() }
         label.stringValue = message
         label.alignment = .center
         button.title = "Start New Local Terminal"
+        button.keyEquivalentModifierMask = []
         button.target = self; button.action = #selector(activate)
         let stack = NSStackView(views: [label, button])
         stack.orientation = .vertical
@@ -45,13 +47,13 @@ final class RestoredPanePlaceholderController: NSObject, PaneControlling {
     func setMessage(_ message: String) { label.stringValue = message }
     @objc private func activate() { onFocusRequest?(id); onActivate?() }
     func updatePresentation(isFocused: Bool, isFloating: Bool) {
+        button.keyEquivalent = isFocused ? "\r" : ""
         hostView.layer?.borderWidth = isFocused ? AppAppearanceSettings.activePaneBorderWidth : 1
         hostView.effectiveAppearance.performAsCurrentDrawingAppearance {
             hostView.layer?.borderColor = (isFocused ? AppAppearanceSettings.accentColor : .separatorColor).cgColor
         }
     }
     func updateAppearance() {
-        hostView.appearance = NSAppearance(named: .darkAqua)
         hostView.wantsLayer = true
         hostView.layer?.cornerRadius = AppAppearanceSettings.paneCornerRadius
         hostView.effectiveAppearance.performAsCurrentDrawingAppearance {
@@ -66,6 +68,11 @@ final class RestoredPanePlaceholderController: NSObject, PaneControlling {
 @MainActor
 private final class RestoredPanePlaceholderView: NSView {
     var onFocus: (() -> Void)?
+    var onAppearanceChange: (() -> Void)?
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        onAppearanceChange?()
+    }
     override var acceptsFirstResponder: Bool { true }
     override func mouseDown(with event: NSEvent) {
         onFocus?()

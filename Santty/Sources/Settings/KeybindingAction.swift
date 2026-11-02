@@ -2,6 +2,7 @@ import AppKit
 import KeyboardShortcuts
 
 enum KeybindingAction: String, CaseIterable, Identifiable {
+    case showAgents
     case toggleSidebar
     case toggleMaximizeWindow
     case splitPaneHorizontally
@@ -45,6 +46,7 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
 
     var commandID: String {
         switch self {
+        case .showAgents: "agents.show"
         case .newWorkspace: "workspace.new"
         case .renameWorkspace: "workspace.rename"
         case .closeWorkspace: "workspace.close"
@@ -123,6 +125,7 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .showAgents: "Show Agents"
         case .newWorkspace: "New Workspace"
         case .renameWorkspace: "Rename Workspace"
         case .closeWorkspace: "Close Workspace"
@@ -202,7 +205,7 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
     var groupTitle: String {
         switch self {
         case .newWorkspace, .renameWorkspace, .closeWorkspace: "Pane"
-        case .toggleMaximizeWindow, .toggleSidebar:
+        case .toggleMaximizeWindow, .toggleSidebar, .showAgents:
             "Application"
         case .splitPaneHorizontally, .splitPaneVertically, .equalizePaneSplits,
             .movePaneDividerUp, .movePaneDividerDown, .movePaneDividerLeft,
@@ -220,7 +223,8 @@ enum KeybindingAction: String, CaseIterable, Identifiable {
 
     var defaultShortcut: KeyboardShortcuts.Shortcut? {
         switch self {
-        case .toggleSidebar: nil
+        case .showAgents: .init(.m, modifiers: [.command, .shift])
+        case .toggleSidebar: .init(.b, modifiers: [.command])
         case .renameTab: nil
         case .newWorkspace, .renameWorkspace, .closeWorkspace: nil
         case .toggleMaximizeWindow:

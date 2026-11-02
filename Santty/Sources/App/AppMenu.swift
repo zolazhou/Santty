@@ -190,12 +190,21 @@ enum AppMenu {
             ("Move Left", #selector(WorkspaceViewController.moveSidebarLeft(_:))),
             ("Move Right", #selector(WorkspaceViewController.moveSidebarRight(_:))),
             ("Add Browser", #selector(WorkspaceViewController.addSidebarBrowser(_:))),
-            ("Add Workspaces", #selector(WorkspaceViewController.addSidebarWorkspaces(_:)))
+            ("Add Workspaces", #selector(WorkspaceViewController.addSidebarWorkspaces(_:))),
+            ("Add Agents", #selector(WorkspaceViewController.addSidebarAgents(_:)))
         ] {
             sidebarMenu.addItem(withTitle: title, action: action, keyEquivalent: "").target = target
         }
         menu.addItem(.separator())
         addKeybindingMenuItem(to: menu, action: .newWorkspace, selector: #selector(WorkspaceViewController.newWorkspace(_:)), target: target)
+        menu.items.last?.title = "New Local Workspace"
+        let herdrWorkspace = NSMenuItem(title: "New Herdr Workspace", action: #selector(WorkspaceViewController.newHerdrWorkspace(_:)), keyEquivalent: "")
+        herdrWorkspace.target = target
+        menu.addItem(herdrWorkspace)
+        let remoteWorkspace = NSMenuItem(title: "New Remote Herdr Workspace…", action: #selector(WorkspaceViewController.newRemoteHerdrWorkspace(_:)), keyEquivalent: "")
+        remoteWorkspace.target = target
+        menu.addItem(remoteWorkspace)
+        addKeybindingMenuItem(to: menu, action: .showAgents, selector: #selector(WorkspaceViewController.showAgentManager(_:)), target: target)
         addKeybindingMenuItem(to: menu, action: .renameWorkspace, selector: #selector(WorkspaceViewController.renameWorkspace(_:)), target: target)
         addKeybindingMenuItem(to: menu, action: .closeWorkspace, selector: #selector(WorkspaceViewController.closeWorkspace(_:)), target: target)
         menu.addItem(.separator())
@@ -222,6 +231,10 @@ enum AppMenu {
         )
 
         menu.addItem(.separator())
+
+        menu.addItem(withTitle: "New Terminal Pane", action: #selector(WorkspaceViewController.newTerminalPane(_:)), keyEquivalent: "").target = target
+        menu.addItem(withTitle: "New Workspaces Pane", action: #selector(WorkspaceViewController.newWorkspacesPane(_:)), keyEquivalent: "").target = target
+        menu.addItem(withTitle: "New Agents Pane", action: #selector(WorkspaceViewController.newAgentsPane(_:)), keyEquivalent: "").target = target
 
         addKeybindingMenuItem(
             to: menu,

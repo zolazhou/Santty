@@ -20,7 +20,6 @@ final class CommandPalettePanel: NSPanel {
             defer: false
         )
 
-        appearance = NSAppearance(named: .darkAqua)
         self.contentView = contentView
         contentMinSize = contentView.preferredContentSize
         contentMaxSize = contentView.preferredContentSize

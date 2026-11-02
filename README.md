@@ -62,23 +62,33 @@ English mode. SSH and tmux sessions expose only the local foreground program.
 
 ## Window Sidebar
 
-Use **Pane → Toggle Sidebar** or **Show Sidebar** in the command palette to open
-this window's fixed tool area. It starts on the left with the Workspaces list.
-**Pane → Sidebar** adds Browser or Workspaces,
+Use **Cmd+B**, **Pane → Toggle Sidebar**, or **Toggle Sidebar** in the command palette to open
+this window's fixed tool area. It starts on the left with a fresh local terminal.
+**Pane → Sidebar** adds Browser, Workspaces or Agents,
 and moves the area to either side. Drag its outer divider to change its width;
-its internal panes use the same split layout as the main workspace.
+its internal panes use the same split layout as the main workspace. The sidebar
+ends above the bottom Tab toolbar, which spans the full window width.
 
 The sidebar has one internal tab and never appears in the workspace picker or
 main tab strip. Switching workspaces keeps its content and layout. Directional
 **Focus Left / Right / Above / Below Pane** commands cross between the sidebar
 and the main area; Next/Previous Pane stays inside the current area. Pane actions
 operate on the focused area, while Tab and Workspace actions target the main
-area. Terminal splitting, floating and detaching remain main-area actions.
+area. Terminal splitting and **Toggle Floating Pane** (**Shift+Cmd+F**) work in
+both areas. Sidebar panes float at the center of the window and return to their
+original slot when toggled again; hiding the sidebar also returns them. Detaching
+remains a main-area action. When a sidebar pane has no internal horizontal split,
+**Move Divider Left / Right** (**Shift+Cmd+H / L**) adjusts the sidebar's width.
+**New Terminal Pane**, **New Browser Pane**, **New Agents Pane**
+and **New Workspaces Pane** split the focused pane side by side when it is wider
+than it is tall (including square panes), or stack panes when it is taller.
+Explicit **Split Horizontally / Vertically** commands keep their chosen direction.
 
 Hiding the sidebar preserves its content. Closing its final pane hides it;
-opening an empty sidebar restores the Workspaces list. Position, preferred
-width, pane layout and Browser URLs restore with the window.
-Set an optional Toggle Sidebar shortcut in **Settings → Keybindings**.
+opening an empty sidebar creates a fresh local terminal. Position, preferred
+width, pane layout and Browser URLs restore with the window. Restored local
+terminals ask you to start a new shell, just like those in the main workspace.
+Customize the Toggle Sidebar shortcut in **Settings → Keybindings**.
 
 ## Scroll Mode (Experimental)
 
@@ -121,17 +131,91 @@ Names stay hidden until Command is held alone for 350 ms, then appear as overlay
 on named panes in the current tab. Releasing Command, using a shortcut or mouse
 action, or leaving the window hides them without resizing the content.
 
-## Local Workspaces
+## Workspaces
 
-Use the workspace picker or command palette to switch between local workspaces.
-**New Workspace** creates an independent set of tabs and pane layouts; terminal
+Use the workspace picker or command palette to switch between Local and Herdr workspaces.
+**New Local Workspace** creates a Local Workspace with an independent set of tabs and pane layouts; terminal
 sessions keep running when you switch away. **Rename Workspace**, **Rename Tab**
 and **Close Workspace** are available in menus and the command palette. Closing
 a workspace asks for confirmation and ends its local terminal processes. Closing
 the last workspace creates a fresh Default workspace.
 
-The command palette searches workspace, tab and pane names with **All / Workspace /
-Tab / Pane / Command** filters. Pane results include Browser, floating and
+**New Herdr Workspace** creates terminals in the installed local `hc` (herdr-core).
+Santty owns their tabs, splits, floating panes and Scroll Mode; core owns the
+programs. Switching workspaces or closing Santty leaves Herdr terminals running.
+Reopening Santty reattaches the saved terminal addresses, checking the core identity
+first. Explicitly closing a pane, tab or workspace ends its Herdr terminals.
+Connection errors show a retry action; an uncertain creation is reconciled using
+the pane label; a missing ambiguous result never starts a duplicate shell. Core
+loss recovery (`keep`) starts a fresh shell, never reruns a lost command. `hc` is
+found on PATH, in `~/.local/bin`, or in the standard Homebrew binary directories;
+Santty does not install or update it.
+
+**New Remote Herdr Workspace…** selects a machine already configured with
+`hc machine add`. Terminals run on that machine through the local core proxy;
+Santty keeps the layout locally and continues using Ghostty, floating panes and
+Scroll Mode. Saved bindings use the permanent remote core ID, so renaming a
+machine alias does not replace its terminals. Remote cwd and process metadata
+come from core; remote file paths are not opened on this Mac, and remote shells
+do not receive Santty's local control socket.
+
+Disconnected machines show their connection status and stop accepting input.
+After reconnecting, Santty attaches a fresh screen and exits the old Scroll Mode;
+it never replays input typed during a disconnection. Closing a remote pane, tab or
+workspace kills its terminals before removing their bindings. A failed close
+retains them for retry. Closing Santty only detaches viewers. None of these actions
+remove the shared machine connection. Machine setup, SSH login, hc updates and
+core settings remain managed through `hc machine`.
+
+**Settings → Herdr** configures the `hc` executable and the history loaded when a
+terminal attaches (default 2000 lines, 0 for the current screen only). Paths are
+validated before applying; a failed check leaves the current connection intact.
+Check Connection and Reconnect show the active core identity and version without
+restarting core or ending terminal processes. The panel lists configured remote
+machines and can create a workspace on one. Copy Diagnostics includes connection
+identity, versions, machine states and the recent error category, excluding
+terminal text, environment variables, custom connection commands and raw errors.
+Fonts, themes and input sources continue to use Terminal settings.
+
+**Show Agents** (⌘⇧M by default) is available from the Pane menu, command palette and the
+toolbar’s Agents button (with an unread badge when reports exist). It follows
+program status from herdr-core across local and remote machines, including while
+a Local workspace is selected. Programs must report OSC 7501 status; Santty does
+not guess activity from process names or screen text, or install agent hooks.
+Root and child records show working, blocked, error, idle and unknown states.
+Ended agents leave the list; their message history remains in memory.
+Only an explicit `done` report creates a completion message; a turn increment or
+`idle` can also mean interruption. Initial, reconnect and missed-event snapshots
+establish a baseline and do not replay old notifications.
+
+Each agent row has a message button on the right showing its message count and
+highlighting unread messages. Click it to open that agent's message history in a
+popover. Root and child agents keep separate histories. Click an agent, message
+or notification to open its terminal, or use Up/Down, Control-P/Control-N, Enter
+and Escape in the panel.
+Existing Santty panes retain their workspace, tab and floating presentation.
+External terminals get a saved viewer: closing that viewer, its tab or workspace
+only detaches and never kills a program started by another client. Ordinary
+Santty-owned Herdr panes keep their existing close-to-end behavior. Messages and
+unread state are local to this app, kept in memory with a 256-message limit.
+
+Use **Pane → New Agents Pane** for an Agents list beside your terminals, or
+**Pane → Sidebar → Add Agents** for a persistent sidebar list. Both show Agents
+with per-agent message popovers, share live updates and navigation, and restore
+with the saved layout. Codex, Claude Code, pi, OpenCode and GitHub Copilot use
+local brand icons; status dots remain separate from agent identity. Unknown
+agent types retain their reported names and a generic icon. Herdr workspaces
+also use their brand icon in the Workspaces list, picker and command palette.
+Original SVGs, source references and license notices are bundled in
+`Santty/Resources/BrandIcons/`.
+
+Herdr agent notifications are enabled for all agent types. Santty requests macOS
+notification permission when the first banner is needed; notification delivery
+can be controlled in macOS System Settings. Watching the target tab suppresses
+its system banner. The directory and Messages continue updating independently.
+
+The command palette searches workspace, tab, pane and agent names with **All / Agents /
+Workspace / Tab / Pane / Command** filters. Pane results include Browser, floating and
 hidden content. Choosing a result switches workspace and focuses its target;
 stale results report a navigation status without changing selection.
 
@@ -140,7 +224,7 @@ the window sidebar are saved to
 `~/Library/Application Support/Santty/Workspace/workspace.json`. Saves are atomic,
 keep a previous valid backup, and allow one writer per file. Other instances restore
 read-only. Previous local shells restore as placeholders with **Start New Local
-Terminal**; previous commands are never replayed. A declined save error keeps the workspace open.
+Terminal**; previous local commands are never replayed. A declined save error keeps the workspace open.
 
 Only the current v10 workspace format is supported. Earlier development snapshots
 are not migrated. Unsupported or unreadable files are preserved; remove local

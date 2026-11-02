@@ -13,6 +13,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
 
     private let terminalView: TerminalView
     private let terminalController: TerminalController
+    let herdrSession: HerdrTerminalSession?
     private let openURL: @MainActor (URL) -> Bool
     private let foregroundProcessIDProvider: @MainActor () -> Int32?
     private let processWorkingDirectoryProvider: (Int32) -> String?
@@ -25,6 +26,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
     }
     private(set) var currentWorkingDirectory: String?
     private var isFloating = false
+    private var paneIsFocused = false
     private(set) var isScrollModeActive = false
     private var isAwaitingSecondScrollModeG = false
 
@@ -39,15 +41,24 @@ final class TerminalPaneController: NSObject, PaneControlling {
 
     var displayTitle: String {
 
+        if let herdrSession {
+            switch herdrSession.state {
+            case .connecting: return lastKnownTitle + " (Connecting)"
+            case .disconnected: return lastKnownTitle + " (Disconnected)"
+            case let .failed(message): return message
+            case .live, .finished: break
+            }
+        }
         return isLive ? lastKnownTitle : "\(lastKnownTitle) (Exited)"
     }
 
     var focusTargetView: NSView {
-        return terminalHostView.scrollModeView ?? (isLive ? terminalView : terminalHostView)
+        return terminalHostView.scrollModeView ?? (isLive && (herdrSession == nil || herdrSession?.state == .live) ? terminalView : terminalHostView)
     }
 
 
     var foregroundProcessID: Int? {
+        if let herdrSession { return herdrSession.record?.foreground.map { Int($0.pid) } }
         guard isLive, let processID = foregroundProcessIDProvider() else {
             return nil
         }
@@ -57,6 +68,14 @@ final class TerminalPaneController: NSObject, PaneControlling {
 
     func inputSourceForeground() async throws -> InputSourceForeground {
 
+        if let session = herdrSession, session.remote != nil {
+            guard session.state == .live, let foreground = session.record?.foreground else {
+                throw CLIError("Remote foreground process information is unavailable")
+            }
+            return InputSourceForeground(groupID: Int(foreground.pid), processes: [
+                .init(id: Int(foreground.pid), name: foreground.name, command: foreground.name)
+            ])
+        }
         guard let groupID = foregroundProcessID else { throw CLIError("Foreground process information is unavailable") }
         let processes = await Task.detached(priority: .utility) {
             TerminalProcessInspector.currentProcessTable().filter { $0.processGroupID == groupID }
@@ -68,11 +87,12 @@ final class TerminalPaneController: NSObject, PaneControlling {
     }
 
     var inputSourceTargetView: NSView? {
-        guard isLive, !isScrollModeActive else { return nil }
+        guard isLive, !isScrollModeActive, herdrSession == nil || herdrSession?.state == .live else { return nil }
         return terminalView
     }
 
     var workingDirectoryForNewPane: String? {
+        if let herdrSession { return herdrSession.record?.foreground?.cwd ?? currentWorkingDirectory }
         guard
             isLive,
             let processID = foregroundProcessIDProvider(),
@@ -88,6 +108,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
     init(
         id: PaneID = UUID(),
         workingDirectory: String? = nil,
+        herdrSession: HerdrTerminalSession? = nil,
         foregroundProcessIDProvider: (@MainActor () -> Int32?)? = nil,
         processWorkingDirectoryProvider: @escaping (Int32) -> String? = {
             ProcessWorkingDirectoryResolver.workingDirectory(for: $0)
@@ -95,6 +116,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
         openURL: @escaping @MainActor (URL) -> Bool = { NSWorkspace.shared.open($0) }
     ) {
         self.id = id
+        self.herdrSession = herdrSession
         self.openURL = openURL
         currentWorkingDirectory = workingDirectory
 
@@ -106,7 +128,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
             ),
             theme: TerminalDefaults.theme
         )
-        terminalView.configuration = TerminalSurfaceOptions()
+        terminalView.configuration = TerminalSurfaceOptions(backend: herdrSession.map { .inMemory($0.memory) } ?? .exec)
         terminalView.controller = terminalController
 
         self.terminalView = terminalView
@@ -121,6 +143,27 @@ final class TerminalPaneController: NSObject, PaneControlling {
         super.init()
 
         terminalView.delegate = self
+        herdrSession?.onReset = { [weak self] in self?.exitScrollMode() }
+        herdrSession?.onChange = { [weak self] in
+            guard let self, let session = self.herdrSession else { return }
+            if let record = session.record {
+                if !record.title.isEmpty { self.lastKnownTitle = record.title }
+                self.currentWorkingDirectory = record.foreground?.cwd ?? record.cwd
+            }
+            switch session.state {
+            case .disconnected, .failed: self.terminalHostView.setRetryAction { [weak session] in session?.retry() }
+            default: self.terminalHostView.setRetryAction(nil)
+            }
+            let wasLive = self.isLive
+            self.isLive = session.state != .finished
+            self.onTitleChange?(self.id)
+            if session.state == .live, self.paneIsFocused, !self.isScrollModeActive,
+               self.terminalView.window?.firstResponder === self.terminalHostView {
+                self.terminalView.window?.makeFirstResponder(self.terminalView)
+            }
+            if wasLive, !self.isLive { self.exitScrollMode(); self.onExit?(self.id) }
+        }
+        if terminalView.scrollModeGrid != nil { herdrSession?.surfaceAttached() }
         updatePresentation(isFocused: false)
     }
 
@@ -137,6 +180,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
         }
 
         hasStarted = true
+        herdrSession?.start()
     }
 
     func fitToSize() {
@@ -149,10 +193,11 @@ final class TerminalPaneController: NSObject, PaneControlling {
 
     func updatePresentation(isFocused: Bool, isFloating: Bool = false) {
         self.isFloating = isFloating
+        paneIsFocused = isFocused
         terminalHostView.updatePresentation(
             isFocused: isFocused,
             isFloating: isFloating,
-            isLive: isLive,
+            isLive: isLive && (herdrSession == nil || herdrSession?.state == .live),
             displayTitle: displayTitle
         )
     }
@@ -171,7 +216,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
 
     func enterScrollMode() {
 
-        guard isLive, !isScrollModeActive else {
+        guard isLive, !isScrollModeActive, herdrSession == nil || herdrSession?.state == .live else {
             return
         }
 
@@ -298,7 +343,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
     }
 
     @discardableResult func submitPrompt(_ prompt: String) -> Bool {
-        guard isLive else { NSSound.beep(); return false }
+        guard isLive, herdrSession == nil || herdrSession?.state == .live else { NSSound.beep(); return false }
         terminalView.window?.makeFirstResponder(terminalView)
 
         guard terminalView.paste(text: prompt) else { return false }
@@ -310,6 +355,7 @@ final class TerminalPaneController: NSObject, PaneControlling {
     }
 
     func applyTerminalSettings() {
+        herdrSession?.updateDisplay()
 
         let _ = terminalController.setTheme(TerminalDefaults.theme)
         let _ = terminalController.setTerminalConfiguration(
@@ -419,6 +465,7 @@ extension TerminalPaneController: TerminalSurfaceOpenURLDelegate {
 
     func terminalDidRequestOpenURL(_ text: String, kind _: TerminalOpenURLKind) {
         guard let url = Self.linkURL(text) else { NSSound.beep(); return }
+        guard herdrSession?.remote == nil || !url.isFileURL else { NSSound.beep(); return }
         // OSC 8 targets are producer-controlled; confirm potentially executable handlers.
         if !["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") {
             let alert = NSAlert()
@@ -474,6 +521,7 @@ extension TerminalPaneController: TerminalSurfaceCloseDelegate {
 
 extension TerminalPaneController: TerminalSurfaceFocusDelegate {
     func terminalDidChangeFocus(_ focused: Bool) {
+        herdrSession?.setFocused(focused)
         guard focused, !isFloating else {
             return
         }
@@ -583,4 +631,10 @@ enum ProcessWorkingDirectoryResolver {
 
         return path
     }
+}
+
+
+extension TerminalPaneController: TerminalSurfaceLifecycleDelegate {
+    func terminalDidAttachSurface(_ surface: TerminalSurface) { herdrSession?.surfaceAttached() }
+    func terminalDidDetachSurface() { herdrSession?.surfaceDetached() }
 }

@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuKeyEquivalentMonitor: Any?
     private var terminalSettingsObserver: NSObjectProtocol?
     private var keybindingSettingsObserver: NSObjectProtocol?
+    private var pendingAgentTarget: HerdrTerminalBinding?
 
     func applicationDidFinishLaunching(_: Notification) {
         TerminalLoggingConfiguration.apply()
@@ -47,6 +48,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
 
         if !restorationTest {
+            AgentNotifier.shared.onReadMessage = { id in
+                if let message = HerdrCoreClient.shared.agents.messageSnapshots.first(where: { $0.id == id }) {
+                    HerdrCoreClient.shared.agents.acknowledge(message)
+                }
+            }
+            AgentNotifier.shared.onActivate = { [weak self] target in self?.pendingAgentTarget = target }
             installMenuKeyEquivalentMonitor()
             installKeybindingSettingsObserver()
         }
@@ -100,6 +107,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.window = window
         self.workspaceViewController = workspaceViewController
         if !restorationTest {
+            HerdrCoreClient.shared.agents.onNotification = { [weak workspaceViewController] message in
+                guard workspaceViewController?.canSendAgentNotifications == true else { return }
+                AgentNotifier.shared.notifyAgent(message)
+            }
+            AgentNotifier.shared.onActivate = { [weak self] target in
+                guard let self else { return }
+                if let workspace = self.workspaceViewController {
+                    self.window?.makeKeyAndOrderFront(nil)
+                    NSApp.activate(ignoringOtherApps: true)
+                    workspace.navigateToAgent(target)
+                } else { self.pendingAgentTarget = target }
+            }
+            HerdrCoreClient.shared.startAgentMonitoring()
+            if let target = pendingAgentTarget {
+                pendingAgentTarget = nil
+                workspaceViewController.navigateToAgent(target)
+            }
+        }
+        if !restorationTest {
             PaneInputSourceCoordinator.shared.targetProvider = { [weak workspaceViewController] in
                 workspaceViewController?.inputSourceTarget
             }
@@ -137,6 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_: Notification) {
+        HerdrCoreClient.shared.stopAgentMonitoring()
         PaneInputSourceCoordinator.shared.stop()
         if let menuKeyEquivalentMonitor {
             NSEvent.removeMonitor(menuKeyEquivalentMonitor)
@@ -268,7 +295,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showSettings(_: Any?) {
-        settingsWindowController.show(relativeTo: window)
+        settingsWindowController.show(relativeTo: window) { [weak self] remote in
+            guard let self, self.workspaceViewController?.createRemoteHerdrWorkspace(remote) == true else { return false }
+            self.settingsWindowController.window?.orderOut(nil)
+            self.window?.makeKeyAndOrderFront(nil)
+            return true
+        }
     }
 
     private func configureCommandPalette() {

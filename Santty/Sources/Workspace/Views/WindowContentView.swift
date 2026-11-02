@@ -3,6 +3,7 @@ import AppKit
 @MainActor
 final class WindowContentView: NSView {
     let mainView = WorkspaceRootView()
+    let sidebarFloatingView = WorkspaceRootView()
     let sidebarView = WorkspaceTilingView(dividerThickness: AppAppearanceSettings.workspaceDividerThickness)
     private let outerLayout = WorkspaceTilingView()
     private let mainID = UUID()
@@ -17,13 +18,18 @@ final class WindowContentView: NSView {
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        addSubview(outerLayout)
+        addSubview(mainView)
+        mainView.contentLayoutView.addSubview(outerLayout)
+        outerLayout.autoresizingMask = [.width, .height]
+        sidebarFloatingView.isFloatingOverlayOnly = true
+        addSubview(sidebarFloatingView)
         outerLayout.onFractionsChange = { [weak self] _, fractions, source in
             guard let self, source == .userDrag, fractions.count == 2 else { return }
             let index = side == .left ? 0 : 1
             let proposed = fractions[index] * max(0, outerLayout.bounds.width - AppAppearanceSettings.workspaceDividerThickness)
             preferredWidth = clampedSidebarWidth(proposed)
             if preferredWidth != proposed { installLayout() }
+            mainView.needsLayout = true
             onSidebarLayout?()
             onWidthChange?(preferredWidth)
         }
@@ -43,15 +49,37 @@ final class WindowContentView: NSView {
 
     override func layout() {
         super.layout()
-        outerLayout.frame = bounds
+        let edgePadding = AppAppearanceSettings.workspaceEdgePadding
+        mainView.frame = NSRect(
+            x: edgePadding,
+            y: edgePadding,
+            width: max(0, bounds.width - edgePadding * 2),
+            height: max(0, bounds.height - edgePadding * 2)
+        )
+        sidebarFloatingView.frame = mainView.frame
+        mainView.layoutSubtreeIfNeeded()
+        outerLayout.frame = mainView.contentLayoutView.bounds
         outerLayout.updateDividerThickness(AppAppearanceSettings.workspaceDividerThickness)
         guard !outerLayout.isDraggingDivider else { return }
         guard sidebarVisible else {
-            outerLayout.setLayoutNode(.panel(mainID), paneViews: [mainID: mainView])
+            outerLayout.setLayoutNode(.panel(mainID), paneViews: [mainID: mainView.contentContainerView])
+            mainView.needsLayout = true
             return
         }
         installLayout()
         onSidebarLayout?()
+    }
+
+    func moveSidebarDivider(by fraction: CGFloat) {
+        guard sidebarVisible else { return }
+        let available = max(0, outerLayout.bounds.width - AppAppearanceSettings.workspaceDividerThickness)
+        let delta = available * fraction * (side == .left ? 1 : -1)
+        let width = clampedSidebarWidth(sidebarView.frame.width + delta)
+        guard width != sidebarView.frame.width else { return }
+        preferredWidth = width
+        installLayout()
+        onSidebarLayout?()
+        onWidthChange?(preferredWidth)
     }
 
     func updateMinimumWidths(main: CGFloat, sidebar: CGFloat) {
@@ -62,16 +90,17 @@ final class WindowContentView: NSView {
     }
 
     private func clampedSidebarWidth(_ proposed: CGFloat) -> CGFloat {
-        let available = max(0, bounds.width - AppAppearanceSettings.workspaceDividerThickness)
+        let available = max(0, outerLayout.bounds.width - AppAppearanceSettings.workspaceDividerThickness)
         return min(available, max(sidebarMinimumWidth, min(proposed, available - mainMinimumWidth)))
     }
 
     private func installLayout() {
-        let available = max(1, bounds.width - AppAppearanceSettings.workspaceDividerThickness)
+        let available = max(1, outerLayout.bounds.width - AppAppearanceSettings.workspaceDividerThickness)
         let fraction = min(1, max(0, clampedSidebarWidth(preferredWidth) / available))
         let children: [LayoutNode] = side == .left ? [.panel(sidebarID), .panel(mainID)] : [.panel(mainID), .panel(sidebarID)]
         let fractions = side == .left ? [fraction, 1 - fraction] : [1 - fraction, fraction]
         outerLayout.setLayoutNode(.split(axis: .horizontal, children: children, fractions: fractions),
-            paneViews: [sidebarID: sidebarView, mainID: mainView])
+            paneViews: [sidebarID: sidebarView, mainID: mainView.contentContainerView])
+        mainView.needsLayout = true
     }
 }

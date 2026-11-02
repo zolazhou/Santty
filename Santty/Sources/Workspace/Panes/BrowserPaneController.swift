@@ -108,7 +108,6 @@ final class BrowserPaneHostView: NSView {
 
         wantsLayer = true
         layer?.masksToBounds = true
-        appearance = NSAppearance(named: .darkAqua)
 
         vibrancyView.frame = bounds
         addSubview(vibrancyView)
@@ -122,7 +121,6 @@ final class BrowserPaneHostView: NSView {
         errorView.material = .popover
         errorView.blendingMode = .withinWindow
         errorView.state = .active
-        errorView.appearance = NSAppearance(named: .darkAqua)
         errorView.wantsLayer = true
         errorView.layer?.cornerRadius = 8
         errorView.layer?.masksToBounds = true
@@ -131,7 +129,6 @@ final class BrowserPaneHostView: NSView {
         errorLabel.alignment = .center
         errorLabel.font = .systemFont(ofSize: 13)
         errorLabel.textColor = .secondaryLabelColor
-        errorLabel.appearance = NSAppearance(named: .darkAqua)
         errorView.addSubview(errorLabel)
         addSubview(errorView)
 
