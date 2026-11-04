@@ -190,9 +190,9 @@ final class WorkspaceTilingView: NSView {
         (([LayoutPathComponent], [CGFloat], TilingFractionChangeSource) -> Void)?
     private(set) var isDraggingDivider = false
 
-    private var layoutNode: LayoutNode?
+    private(set) var layoutNode: LayoutNode?
     var paneViews: [PaneID: NSView] = [:]
-    private var currentLayout: TilingLayout?
+    private(set) var currentLayout: TilingLayout?
     private var dividerThickness: CGFloat
     private let minimumPaneSize: NSSize
     private var isTransientLayout = false

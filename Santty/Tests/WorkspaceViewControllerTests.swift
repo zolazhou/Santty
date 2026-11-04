@@ -869,6 +869,42 @@ final class WorkspaceViewControllerTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testSplitAndCloseApplyAutoResizeWithoutIntermediatePaneSizes() throws {
+        for axis in [SplitAxis.horizontal, .vertical] {
+            let controller = Self.makeController()
+            let first = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugSplitFocusedPane(along: axis)
+            let second = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugSetPaneAutoResizeConfiguration(.init(
+                isEnabled: true, ratios: .init(horizontal: 0.3, vertical: 0.3),
+                trigger: .unfocused), for: first)
+            controller.debugFocusPane(withID: first)
+            controller.debugFocusPane(withID: second)
+
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            let tiling = try XCTUnwrap(descendants(controller.view).compactMap { $0 as? WorkspaceTilingView }
+                .first { $0.paneViews[first] != nil })
+            let pane = try XCTUnwrap(tiling.paneViews[first])
+            pane.postsFrameChangedNotifications = true
+            var sizes: [NSSize] = []
+            let observer = NotificationCenter.default.addObserver(
+                forName: NSView.frameDidChangeNotification, object: pane, queue: nil
+            ) { _ in MainActor.assumeIsolated { sizes.append(pane.frame.size) } }
+            defer { NotificationCenter.default.removeObserver(observer) }
+
+            controller.debugSplitFocusedPane(along: axis)
+            XCTAssertTrue(sizes.allSatisfy { $0 == pane.frame.size }, "Split applied intermediate sizes: \(sizes)")
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.3, 0.35, 0.35], accuracy: 0.0001)
+
+            sizes.removeAll()
+            controller.debugPerformClosePane(withID: try XCTUnwrap(controller.debugFocusedPaneID))
+            XCTAssertTrue(sizes.allSatisfy { $0 == pane.frame.size }, "Close applied intermediate sizes: \(sizes)")
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.3, 0.7], accuracy: 0.0001)
+            try controller.savedWorkspace().validate()
+        }
+    }
+
     func testDisabledPaneAutoResizeSkipsAutoZoom() async throws {
         try await MainActor.run {
             let controller = Self.makeController()
@@ -1078,6 +1114,96 @@ final class WorkspaceViewControllerTests: XCTestCase {
             controller.debugFocusPane(withID: ids[2])
             assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0, 0.55, 0.45], accuracy: 0.0001)
             try controller.savedWorkspace().validate()
+        }
+    }
+
+    @MainActor
+    func testResizeKeepsUnrelatedSiblingsFoldedAndOnlyRevealsItsHiddenNeighbor() throws {
+        for axis in [SplitAxis.horizontal, .vertical] {
+            let controller = Self.makeController()
+            controller.debugSplitFocusedPane(along: axis)
+            controller.debugSplitFocusedPane(along: axis)
+            controller.debugSplitFocusedPane(along: axis)
+            let ids = controller.debugPaneIDsInTraversalOrder
+            for id in ids.prefix(2) {
+                controller.debugSetPaneAutoResizeConfiguration(.init(
+                    isEnabled: true, ratios: .init(horizontal: 0, vertical: 0), trigger: .unfocused), for: id)
+            }
+            controller.debugFocusPane(withID: ids[2])
+            let configurations = controller.savedWorkspace().tabs[0].autoResize
+            let next = axis == .horizontal ? "pane.resize.right" : "pane.resize.down"
+            let previous = axis == .horizontal ? "pane.resize.left" : "pane.resize.up"
+
+            controller.debugPerformCommand(withID: next)
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0, 0, 0.55, 0.45], accuracy: 0.0001)
+            controller.debugSelectTab(withID: try XCTUnwrap(controller.debugSelectedTabID))
+            assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0, 0, 0.55, 0.45], accuracy: 0.0001)
+
+            controller.debugPerformCommand(withID: previous)
+            let revealed = try XCTUnwrap(controller.debugRenderedSplitFractions(at: []))
+            XCTAssertEqual(revealed[0], 0)
+            XCTAssertGreaterThan(revealed[1], 0)
+            XCTAssertGreaterThan(revealed[2], 0)
+            controller.debugPerformCommand(withID: previous)
+            XCTAssertEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])).first, 0)
+            controller.debugSelectTab(withID: try XCTUnwrap(controller.debugSelectedTabID))
+            XCTAssertGreaterThan(try XCTUnwrap(controller.debugRenderedSplitFractions(at: []))[1], 0)
+
+            controller.debugFocusPane(withID: ids[3])
+            let foldedAgain = try XCTUnwrap(controller.debugRenderedSplitFractions(at: []))
+            XCTAssertEqual(foldedAgain[0], 0)
+            XCTAssertEqual(foldedAgain[1], 0)
+            XCTAssertEqual(controller.savedWorkspace().tabs[0].autoResize, configurations)
+            try controller.savedWorkspace().validate()
+        }
+    }
+
+    @MainActor
+    func testOuterColumnResizeKeepsNestedPaneFoldedAndHeightResizeRevealsIt() throws {
+        for command in ["pane.resize.up", "pane.resize.down"] {
+            for drag in [false, true] {
+                let controller = Self.makeController()
+                let a = try XCTUnwrap(controller.debugFocusedPaneID)
+                controller.debugSplitFocusedPane(along: .horizontal)
+                let c = try XCTUnwrap(controller.debugFocusedPaneID)
+                controller.debugFocusPane(withID: a)
+                controller.debugSplitFocusedPane(along: .vertical)
+                let b = try XCTUnwrap(controller.debugFocusedPaneID)
+                controller.debugSetPaneAutoResizeConfiguration(.init(
+                    isEnabled: true, ratios: .init(horizontal: 0, vertical: 0),
+                    trigger: .unfocused, isHorizontalEnabled: false), for: b)
+                controller.debugFocusPane(withID: a)
+                let configurations = controller.savedWorkspace().tabs[0].autoResize
+                func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+                let tiling = try XCTUnwrap(descendants(controller.view).compactMap { $0 as? WorkspaceTilingView }
+                    .first { $0.paneViews[a] != nil })
+
+                if drag {
+                    let width = tiling.bounds.width - AppAppearanceSettings.workspaceDividerThickness
+                    tiling.debugApplyDragForDivider(at: [], dividerIndex: 0, location: NSPoint(x: width * 0.55, y: 300))
+                } else {
+                    controller.debugPerformCommand(withID: "pane.resize.right")
+                }
+                assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [])), [0.55, 0.45], accuracy: 0.0001)
+                assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [.child(0)])), [1, 0], accuracy: 0.0001)
+                XCTAssertEqual(tiling.paneViews[b]?.isHidden, true)
+                controller.debugSelectTab(withID: try XCTUnwrap(controller.debugSelectedTabID))
+                XCTAssertEqual(tiling.paneViews[b]?.isHidden, true)
+
+                controller.debugPerformCommand(withID: command)
+                let expected: [CGFloat] = command == "pane.resize.up" ? [0.45, 0.55] : [0.55, 0.45]
+                assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [.child(0)])), expected, accuracy: 0.0001)
+                XCTAssertEqual(tiling.paneViews[b]?.isHidden, false)
+                controller.debugSelectTab(withID: try XCTUnwrap(controller.debugSelectedTabID))
+                assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [.child(0)])), expected, accuracy: 0.0001)
+
+                controller.debugFocusPane(withID: c)
+                XCTAssertEqual(tiling.paneViews[b]?.isHidden, true)
+                controller.debugFocusPane(withID: b)
+                assertFractionsEqual(try XCTUnwrap(controller.debugRenderedSplitFractions(at: [.child(0)])), expected, accuracy: 0.0001)
+                XCTAssertEqual(controller.savedWorkspace().tabs[0].autoResize, configurations)
+                try controller.savedWorkspace().validate()
+            }
         }
     }
 

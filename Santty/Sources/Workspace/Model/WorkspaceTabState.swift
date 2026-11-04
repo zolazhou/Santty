@@ -16,6 +16,7 @@ final class WorkspaceTabState {
     var customTitle: String?
     private var recentlyFocusedPaneIDs: [PaneID]
     var activeAutoZoomState: ActiveAutoZoomState?
+    var manualResizeLayout: (focusedPaneID: PaneID, node: LayoutNode)?
     var activeFloatingPaneState: ActiveFloatingPaneState?
     var detachedPaneIDs: [PaneID] = []
     var activeDetachedPaneID: PaneID?

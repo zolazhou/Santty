@@ -1174,10 +1174,13 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         }
 
         guard
+            let tabState = activePaneTab,
             let target,
-            let targetFractions = movedDividerFractions(
+            case .split(_, _, let originalFractions) = tabState.layoutNode?.node(at: target.context.splitPath),
+            let move = movedDividerFractions(
                 in: target.context,
-                direction: direction
+                direction: direction,
+                restoringFrom: originalFractions
             )
         else {
             NSSound.beep()
@@ -1185,29 +1188,41 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         }
 
         let clampedFractions = target.splitNode.clampedFractions(
-            targetFractions,
-            in: target.tilingView.bounds.size,
-            dividerThickness: AppAppearanceSettings.workspaceDividerThickness
+            move.fractions,
+            in: target.tilingView.currentLayout?.nodeFrames[target.context.splitPath]?.size
+                ?? target.tilingView.bounds.size,
+            dividerThickness: AppAppearanceSettings.workspaceDividerThickness,
+            collapsedChildIndices: Set(target.context.fractions.indices.filter {
+                target.context.fractions[$0] == 0
+                    && $0 != target.context.focusedChildIndex && $0 != move.neighboringIndex
+            })
         )
         guard clampedFractions != target.context.fractions else {
             NSSound.beep()
             return
         }
 
-        // Update the model
-        if let layoutNode = activePaneTab?.layoutNode,
-            let updatedNode = layoutNode.replacingFractions(
-                at: target.context.splitPath, with: clampedFractions
-            )
-        {
-            activePaneTab?.layoutNode = updatedNode
-            let paneViews = buildPaneViewsDictionary(for: activePaneTab!)
-            target.tilingView.setLayoutNode(
-                updatedNode, paneViews: paneViews, animated: true
-            )
+        guard let updatedNode = target.layoutNode.replacingFractions(
+            at: target.context.splitPath, with: clampedFractions
+        ) else { return }
+
+        let preservesFoldedLayout = tabState.manualResizeLayout != nil
+            || !target.tilingView.collapsedPaneIDs.isEmpty
+        if preservesFoldedLayout, let focusedPaneID = tabState.focusedPaneID {
+            tabState.manualResizeLayout = (focusedPaneID, updatedNode)
+        }
+        let paneViews = buildPaneViewsDictionary(for: tabState)
+        target.tilingView.setLayoutNode(
+            updatedNode, paneViews: paneViews, animated: true,
+            isTransient: preservesFoldedLayout
+        )
+
+        if sidebarIsFocused {
+            tabState.layoutNode = updatedNode
+            scheduleWorkspaceSave()
+            return
         }
 
-        if sidebarIsFocused { scheduleWorkspaceSave(); return }
         updateSplitFractions(
             at: target.context.splitPath,
             to: clampedFractions,
@@ -1336,13 +1351,15 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     ) -> (
         context: ParentSplitContext,
         splitNode: LayoutNode,
+        layoutNode: LayoutNode,
         tilingView: WorkspaceTilingView
     )? {
         guard
             let tabState = activePaneTab,
-            let layoutNode = tabState.layoutNode,
             let focusedPaneID = tabState.focusedPaneID,
             let tilingView = sidebarIsFocused ? windowContentView.sidebarView : tilingView,
+            let layoutNode = tabState.manualResizeLayout == nil && tilingView.collapsedPaneIDs.isEmpty
+                ? tabState.layoutNode : tilingView.layoutNode,
             let context = layoutNode.ancestorSplitContexts(for: focusedPaneID).reversed()
                 .first(where: { $0.axis == axis && $0.fractions.count > 1 }),
             let splitNode = layoutNode.node(at: context.splitPath)
@@ -1350,16 +1367,19 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             return nil
         }
 
-        return (context, splitNode, tilingView)
+        return (context, splitNode, layoutNode, tilingView)
     }
 
     private func movedDividerFractions(
         in context: ParentSplitContext,
         direction: PaneDividerMoveDirection,
+        restoringFrom originalFractions: [CGFloat],
         step: CGFloat = 0.05
-    ) -> [CGFloat]? {
+    ) -> (fractions: [CGFloat], neighboringIndex: Int)? {
         let focusedIndex = context.focusedChildIndex
-        guard context.fractions.indices.contains(focusedIndex) else {
+        guard context.fractions.indices.contains(focusedIndex),
+            originalFractions.count == context.fractions.count
+        else {
             return nil
         }
 
@@ -1390,9 +1410,17 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         }
 
         var fractions = context.fractions
+        if fractions[focusedIndex] == 0 || fractions[neighboringIndex] == 0 {
+            // Restore only the resized pair, leaving other folded siblings at zero.
+            let budget = fractions[focusedIndex] + fractions[neighboringIndex]
+            let originalBudget = originalFractions[focusedIndex] + originalFractions[neighboringIndex]
+            guard originalBudget > 0 else { return nil }
+            fractions[focusedIndex] = budget * originalFractions[focusedIndex] / originalBudget
+            fractions[neighboringIndex] = budget * originalFractions[neighboringIndex] / originalBudget
+        }
         fractions[focusedIndex] += focusedDelta
         fractions[neighboringIndex] -= focusedDelta
-        return fractions
+        return (fractions, neighboringIndex)
     }
 
     private func performClosePane(withID paneID: PaneID) {
@@ -2362,11 +2390,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             return
         }
 
-        let paneViews = buildPaneViewsDictionary(for: tabState)
-
-        if let tilingView {
-            tilingView.setLayoutNode(layoutNode, paneViews: paneViews)
-        } else {
+        if tilingView == nil {
             let newTilingView = WorkspaceTilingView(
                 dividerThickness: AppAppearanceSettings.workspaceDividerThickness
             )
@@ -2376,13 +2400,20 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
                 )
             }
             tilingView = newTilingView
-            newTilingView.setLayoutNode(layoutNode, paneViews: paneViews)
             rootView.installRenderedContentView(newTilingView)
         }
 
         view.layoutSubtreeIfNeeded()
+        // Apply the final auto-resized layout without first resizing terminals to the model layout.
         if !applyPreservedActiveAutoZoom(in: tabState) {
-            applyAutoZoomToFocusedPane(in: tabState, animated: applyAutoZoomAnimated)
+            if tabState.activeFloatingPaneState == nil,
+                let focusedPaneID = tabState.focusedPaneID,
+                tabState.isPaneTiled(focusedPaneID)
+            {
+                applyAutoZoomToFocusedPane(in: tabState, animated: applyAutoZoomAnimated)
+            } else {
+                tilingView?.setLayoutNode(layoutNode, paneViews: buildPaneViewsDictionary(for: tabState))
+            }
         }
         if restoreFloatingPresentation {
             restoreActiveFloatingPresentation(in: tabState)
@@ -2492,7 +2523,14 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             return
         }
 
-        if tabState.activeAutoZoomState?.splitStates.contains(where: { $0.splitPath == path })
+        if changeSource == .userDrag,
+            tabState.manualResizeLayout != nil || tilingView?.collapsedPaneIDs.isEmpty == false,
+            let focusedPaneID = tabState.focusedPaneID,
+            let renderedNode = tilingView?.layoutNode
+        {
+            tabState.manualResizeLayout = (focusedPaneID, renderedNode)
+            tabState.activeAutoZoomState = nil
+        } else if tabState.activeAutoZoomState?.splitStates.contains(where: { $0.splitPath == path })
             == true
         {
             tabState.activeAutoZoomState = nil
@@ -2515,7 +2553,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func restoreActiveAutoZoom(in tabState: WorkspaceTabState, animated: Bool) {
-        guard tabState.activeAutoZoomState != nil,
+        guard tabState.activeAutoZoomState != nil || tabState.manualResizeLayout != nil,
             let modelLayoutNode = tabState.layoutNode,
             let tilingView
         else {
@@ -2527,6 +2565,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         let paneViews = buildPaneViewsDictionary(for: tabState)
         tilingView.setLayoutNode(modelLayoutNode, paneViews: paneViews, animated: animated)
         tabState.activeAutoZoomState = nil
+        tabState.manualResizeLayout = nil
     }
 
     private func clearActiveAutoZoomState(
@@ -2540,6 +2579,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         }
 
         tabState.activeAutoZoomState = nil
+        tabState.manualResizeLayout = nil
     }
 
     private func applyAutoZoomToFocusedPane(in tabState: WorkspaceTabState, animated: Bool) {
@@ -2547,6 +2587,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             return
         }
 
+        tabState.manualResizeLayout = nil
         guard
             let focusedPaneID = tabState.focusedPaneID,
             tabState.isPaneTiled(focusedPaneID)
@@ -2576,6 +2617,17 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func applyPreservedActiveAutoZoom(in tabState: WorkspaceTabState) -> Bool {
+        if let manualLayout = tabState.manualResizeLayout,
+            manualLayout.focusedPaneID == tabState.focusedPaneID,
+            manualLayout.node.paneIDsInTraversalOrder == tabState.layoutNode?.paneIDsInTraversalOrder,
+            let tilingView
+        {
+            tilingView.setLayoutNode(
+                manualLayout.node, paneViews: buildPaneViewsDictionary(for: tabState),
+                animated: false, isTransient: true)
+            return true
+        }
+        tabState.manualResizeLayout = nil
         guard let activeAutoZoomState = tabState.activeAutoZoomState else {
             return false
         }
