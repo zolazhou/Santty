@@ -117,7 +117,7 @@ The codebase is organized into three layers that bridge AppKit to the Ghostty C 
   and exclude connection commands, raw errors and environment values from copied diagnostics.
 - v10 includes optional workspace kinds and Herdr bindings; absent kinds mean
   Local Workspace. Keep the terminal backend consistent with its owning workspace.
-- The window sidebar starts with a local terminal and supports Terminal,
+- The window sidebar starts with a local Herdr terminal and supports Terminal,
   Workspaces, Browser and Agents panes. Keep
   its state and focus independent of the selected main workspace.
 

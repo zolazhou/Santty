@@ -63,12 +63,10 @@ struct SavedWorkspace: Codable, Sendable, Equatable {
                   sidebar.tab.detachedPaneIDs.isEmpty, sidebar.tab.activeDetachedPaneID == nil,
                   sidebar.tab.floating == nil || sidebar.isVisible,
                   sidebar.tab.autoResize.isEmpty,
-                  sidebar.tab.panes.allSatisfy({ [.localTerminal, .browser, .workspaces, .agents].contains($0.kind) }),
                   !sidebar.isVisible || sidebar.tab.layout != nil,
                   sidebarIsFocused != true || sidebar.isVisible && sidebar.tab.focusedPaneID != nil else {
                 throw CLIError("Invalid saved window sidebar")
             }
-            try SavedWorkspace(tabs: [sidebar.tab]).validate()
         } else if sidebarIsFocused == true { throw CLIError("Missing focused sidebar") }
 
         guard tabs.count <= 64, Set(tabs.map(\.id)).count == tabs.count,
@@ -93,7 +91,7 @@ struct SavedWorkspace: Codable, Sendable, Equatable {
         func validCoreID(_ id: String) -> Bool {
             !id.isEmpty && id.utf8.count <= 128 && id.range(of: "^[a-zA-Z0-9_-]+$", options: .regularExpression) != nil
         }
-        func validateKind(_ tabs: [Tab], _ kind: WorkspaceKind, _ remote: HerdrRemote?) throws {
+        func validateKind(_ tabs: [Tab], _ kind: WorkspaceKind?, _ remote: HerdrRemote?) throws {
             if let remote {
                 guard kind == .herdr, validCoreID(remote.id), !remote.name.isEmpty,
                       remote.name.utf8.count <= 1024, remote.name.rangeOfCharacter(from: .controlCharacters) == nil else {
@@ -101,7 +99,7 @@ struct SavedWorkspace: Codable, Sendable, Equatable {
                 }
             }
             for pane in tabs.flatMap(\.panes) {
-                guard kind == .herdr ? pane.kind != .localTerminal : pane.kind != .herdrTerminal else {
+                guard kind == nil || (kind == .herdr ? pane.kind != .localTerminal : pane.kind != .herdrTerminal) else {
                     throw CLIError("Terminal backend does not match its workspace")
                 }
                 guard pane.kind == .herdrTerminal || (pane.herdr == nil && pane.herdrRunPending == nil && pane.herdrViewer == nil) else { throw CLIError("Unexpected core terminal binding") }
@@ -119,6 +117,8 @@ struct SavedWorkspace: Codable, Sendable, Equatable {
             }
         }
         try validateKind(tabs, workspaceKind ?? .local, herdrRemote)
+        // Older local sidebar shells remain placeholders until explicitly restarted.
+        if let sidebar { try validateKind([sidebar.tab], nil, nil) }
         for workspace in otherLocalWorkspaces ?? [] { try validateKind(workspace.tabs, workspace.kind ?? .local, workspace.herdrRemote) }
         let allTabs = tabs + (otherLocalWorkspaces ?? []).flatMap(\.tabs) + (sidebar.map { [$0.tab] } ?? [])
         guard allTabs.count <= (sidebar == nil ? 64 : 65), Set(allTabs.map(\.id)).count == allTabs.count,
@@ -138,7 +138,7 @@ struct SavedWorkspace: Codable, Sendable, Equatable {
             size.width.isFinite && size.height.isFinite && size.width > 0 && size.height > 0
                 && size.width <= 100_000 && size.height <= 100_000
         }
-        for tab in tabs {
+        for tab in tabs + (sidebar.map { [$0.tab] } ?? []) {
             let ids = Set(tab.panes.map(\.id))
             let tiled = tab.layout?.paneIDsInTraversalOrder ?? []
             let detached = Set(tab.detachedPaneIDs)

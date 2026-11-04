@@ -422,12 +422,45 @@ final class HerdrWorkspaceTests: XCTestCase {
         XCTAssertTrue(pasteboard.string(forType: .string)?.contains("REAL-BURST-DONE") == true)
         client.settings.historyLines = HerdrSettings.defaultHistoryLines
 
+        workspace!.toggleSidebar(nil)
+        let sidebarID = try XCTUnwrap(workspace!.debugSidebarPaneIDs.first)
+        let sidebarPane = try XCTUnwrap(workspace!.debugSidebarPane(sidebarID) as? TerminalPaneController)
+        let sidebarSession = try XCTUnwrap(sidebarPane.herdrSession)
+        let sidebarTerminal = try XCTUnwrap(descendants(sidebarPane.hostView).compactMap { $0 as? TerminalView }.first)
+        workspace!.view.layoutSubtreeIfNeeded(); sidebarTerminal.fitToSize()
+        try await waitFor { sidebarSession.state == .live }
+        let sidebarBinding = try XCTUnwrap(sidebarSession.binding)
+        XCTAssertEqual(sidebarBinding.coreID, binding.coreID)
+        XCTAssertNil(sidebarBinding.remote)
+        workspace!.debugFocusSidebarPane(sidebarID)
+        workspace!.debugSetFocusedPaneName("Sidebar shell")
+        XCTAssertTrue(sidebarTerminal.paste(text: #"printf 'SIDEBAR-%s-OK\n' CORE; printf '\033]7501;state=done:app=codex:msg=U2lkZWJhciByZWFkeQ==\033\\'"#))
+        XCTAssertTrue(sidebarTerminal.sendKey(.enter))
+        try await waitFor { sidebarTerminal.readScreenText()?.contains("SIDEBAR-CORE-OK") == true }
+        try await waitFor { client.agents.messages.contains { $0.binding == sidebarBinding && $0.body == "Sidebar ready" } }
+        XCTAssertEqual(client.agents.context?(sidebarBinding), "Sidebar › Sidebar shell")
+        workspace!.newTerminalPane(nil)
+        let sidebarSplitID = try XCTUnwrap(workspace!.debugSidebarFocusedPaneID)
+        let sidebarSplit = try XCTUnwrap(workspace!.debugSidebarPane(sidebarSplitID) as? TerminalPaneController)
+        try await waitFor { sidebarSplit.herdrSession?.state == .live }
+        let sidebarSplitBinding = try XCTUnwrap(sidebarSplit.herdrSession?.binding)
+        XCTAssertNotEqual(sidebarSplitBinding, sidebarBinding)
+        workspace!.debugPerformClosePane(withID: sidebarSplitID)
+        try await waitFor { workspace!.debugSidebarPane(sidebarSplitID) == nil }
+        let sidebarSplitFinished = try await client.terminal(sidebarSplitBinding)
+        XCTAssertEqual(sidebarSplitFinished.state, "finished")
+        workspace!.toggleSidebar(nil)
+        let sidebarBefore = try await client.terminal(sidebarBinding)
+        XCTAssertEqual(sidebarBefore.state, "live")
+
         workspace!.selectWorkspace(local)
         XCTAssertEqual(workspace!.savedWorkspace().workspaceKind, nil)
         let stillRunning = try await client.terminal(binding)
         XCTAssertEqual(stillRunning.state, "live")
         XCTAssertEqual(stillRunning.address, before.address)
         let saved = workspace!.savedWorkspace()
+        try saved.validate()
+        XCTAssertEqual(saved.sidebar?.tab.panes.first?.herdr, sidebarBinding)
         window.contentView = nil; workspace = nil
 
         workspace = WorkspaceViewController()
@@ -439,10 +472,33 @@ final class HerdrWorkspaceTests: XCTestCase {
         window.contentView = workspace!.view
         workspace!.viewDidAppear()
         workspace!.view.layoutSubtreeIfNeeded()
-        let restoredTerminal = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? TerminalView }.first)
+        let restoredTerminal = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? TerminalView }
+            .first { ($0.delegate as? TerminalPaneController)?.id == paneID })
         restoredTerminal.fitToSize()
         try await waitFor { restoredTerminal.readScreenText()?.contains("REAL-BURST-DONE") == true }
         XCTAssertEqual(workspace!.savedWorkspace().tabs.first?.panes.first?.herdr, binding)
+        XCTAssertFalse(workspace!.debugSidebarVisible)
+        let mainTabs = workspace!.debugTabIDs
+        workspace!.navigateToAgent(sidebarBinding)
+        try await waitFor { workspace!.debugSidebarFocused && workspace!.debugSidebarVisible }
+        XCTAssertEqual(workspace!.debugSidebarFocusedPaneID, sidebarID)
+        XCTAssertEqual(workspace!.debugSelectedWorkspace, herdrID)
+        XCTAssertEqual(workspace!.debugTabIDs, mainTabs, "A sidebar agent must reuse its pane instead of opening a viewer tab")
+        let restoredSidebarPane = try XCTUnwrap(workspace!.debugSidebarPane(sidebarID) as? TerminalPaneController)
+        let restoredSidebarSession = try XCTUnwrap(restoredSidebarPane.herdrSession)
+        let restoredSidebarTerminal = try XCTUnwrap(descendants(restoredSidebarPane.hostView).compactMap { $0 as? TerminalView }.first)
+        workspace!.view.layoutSubtreeIfNeeded(); restoredSidebarTerminal.fitToSize()
+        try await waitFor { restoredSidebarSession.state == .live && restoredSidebarTerminal.readScreenText()?.contains("SIDEBAR-CORE-OK") == true }
+        let sidebarAfter = try await client.terminal(sidebarBinding)
+        XCTAssertEqual(sidebarAfter.pid, sidebarBefore.pid)
+        try await client.reconnect()
+        try await waitFor { restoredSidebarSession.state == .live }
+        XCTAssertEqual(restoredSidebarSession.binding, sidebarBinding)
+        workspace!.debugPerformClosePane(withID: sidebarID)
+        try await waitFor { workspace!.debugSidebarPaneIDs.isEmpty }
+        let sidebarFinished = try await client.terminal(sidebarBinding)
+        XCTAssertEqual(sidebarFinished.state, "finished")
+        XCTAssertFalse(workspace!.debugSidebarVisible)
         workspace!.closeLocalWorkspace(herdrID)
         try await waitFor { workspace!.debugSelectedWorkspace == local }
         let finished = try await client.terminal(binding)

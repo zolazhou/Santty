@@ -1044,12 +1044,12 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             splitFocusedPane(along: axis) {
                 self.makeTerminalPaneController(
                     workingDirectory: focusedTerminalPaneController.workingDirectoryForNewPane,
-                    kind: self.sidebarIsFocused ? .local : nil
+                    kind: self.sidebarIsFocused ? .herdr : nil
                 )
             }
         } else {
             splitFocusedPane(along: axis) {
-                self.makeTerminalPaneController(kind: self.sidebarIsFocused ? .local : nil)
+                self.makeTerminalPaneController(kind: self.sidebarIsFocused ? .herdr : nil)
             }
         }
     }
@@ -3195,13 +3195,13 @@ extension WorkspaceViewController {
     }
 
     private func agentLocation(_ binding: HerdrTerminalBinding) -> (UUID, WorkspaceTabState, TerminalPaneController)? {
-        for workspace in localWorkspaceStates {
-            for tab in workspace.tabs {
-                for pane in tab.paneControllers.values {
-                    if let terminal = pane as? TerminalPaneController, let owned = terminal.herdrSession?.binding,
-                       owned.coreID == binding.coreID, owned.address == binding.address,
-                       (owned.remote == true) == (binding.remote == true) { return (workspace.id, tab, terminal) }
-                }
+        let locations = localWorkspaceStates.flatMap { workspace in workspace.tabs.map { (workspace.id, $0) } }
+            + [(localWorkspaceID, sidebar.tab)]
+        for (workspaceID, tab) in locations {
+            for pane in tab.paneControllers.values {
+                if let terminal = pane as? TerminalPaneController, let owned = terminal.herdrSession?.binding,
+                   owned.coreID == binding.coreID, owned.address == binding.address,
+                   (owned.remote == true) == (binding.remote == true) { return (workspaceID, tab, terminal) }
             }
         }
         return nil
@@ -3209,6 +3209,7 @@ extension WorkspaceViewController {
 
     private func agentContext(_ binding: HerdrTerminalBinding) -> String? {
         if let (workspaceID, tab, pane) = agentLocation(binding), let workspace = localWorkspaceStates.first(where: { $0.id == workspaceID }) {
+            if tab === sidebar.tab { return "Sidebar › " + (pane.name ?? pane.displayTitle) }
             return [workspace.name, tab.displayTitle, pane.name ?? pane.displayTitle].joined(separator: " › ")
         }
         let machine = binding.remote == true ? herdrCoreClient.machines.first { $0.id == binding.coreID }?.name ?? "Remote" : "Local herdr-core"
@@ -3218,7 +3219,8 @@ extension WorkspaceViewController {
     private func agentIsVisible(_ binding: HerdrTerminalBinding) -> Bool {
         guard view.window?.isKeyWindow == true, NSApp.isActive,
               let (workspace, tab, pane) = agentLocation(binding), workspace == localWorkspaceID,
-              tab.id == selectedTabID, pane.herdrSession?.state == .live else { return false }
+              tab === sidebar.tab ? sidebar.isVisible : tab.id == selectedTabID,
+              pane.herdrSession?.state == .live else { return false }
         return tab.isPaneTiled(pane.id) || tab.activeDetachedPaneID == pane.id
     }
 
@@ -3268,7 +3270,12 @@ extension WorkspaceViewController {
                 try Task.checkCancellation()
                 guard !isClosingWindow, closingHerdrPaneIDs.isEmpty else { throw CLIError("Finish the current close operation before opening an agent") }
                 if let (workspace, tab, pane) = agentLocation(binding) {
-                    navigateFromPalette(workspaceID: workspace, tabID: tab.id, paneID: pane.id)
+                    if tab === sidebar.tab {
+                        if !sidebar.isVisible { toggleSidebar(nil) }
+                        focusSidebarPane(pane.id)
+                    } else {
+                        navigateFromPalette(workspaceID: workspace, tabID: tab.id, paneID: pane.id)
+                    }
                 } else {
                     guard terminal.state == "live" else { throw CLIError("This agent terminal has ended") }
                     let remote: HerdrRemote?
@@ -3954,7 +3961,7 @@ extension WorkspaceViewController {
         try document.validate()
         suppressWorkspaceSaving = true
         defer { suppressWorkspaceSaving = false }
-        func restoreTabs(_ savedTabs: [SavedWorkspace.Tab], remote: HerdrRemote? = nil) -> [WorkspaceTabState] {
+        func restoreTabs(_ savedTabs: [SavedWorkspace.Tab], remote: HerdrRemote? = nil, isSidebar: Bool = false) -> [WorkspaceTabState] {
             var restoredTabs: [WorkspaceTabState] = []
             for saved in savedTabs {
                 var controllers: [PaneID: any PaneControlling] = [:]
@@ -3967,7 +3974,7 @@ extension WorkspaceViewController {
                         placeholder.onFocusRequest = { [weak self] in self?.handlePaneFocusRequest(withID: $0) }
                         placeholder.onActivate = { [weak self] in
                             guard let self else { return }
-                            self.replaceRestoredPane(pane.id, with: self.makeTerminalPaneController(id: pane.id, workingDirectory: pane.cwd, kind: .local))
+                            self.replaceRestoredPane(pane.id, with: self.makeTerminalPaneController(id: pane.id, workingDirectory: pane.cwd, kind: isSidebar ? .herdr : .local))
                         }
                         controller = placeholder
                     case .herdrTerminal:
@@ -3998,7 +4005,7 @@ extension WorkspaceViewController {
             sidebar.side = savedSidebar.side
             sidebar.preferredWidth = savedSidebar.preferredWidth
             sidebar.isVisible = savedSidebar.isVisible
-            sidebar.tab = restoreTabs([savedSidebar.tab])[0]
+            sidebar.tab = restoreTabs([savedSidebar.tab], isSidebar: true)[0]
         } else {
             sidebar.isVisible = false
             sidebar.tab = WorkspaceTabState(layoutNode: nil, paneControllers: [:], paneAutoResizeConfigurations: [:], focusedPaneID: nil)
@@ -4022,6 +4029,7 @@ extension WorkspaceViewController {
 
     private func replaceRestoredPane(_ id: PaneID, with controller: any PaneControlling) {
         guard let tab = tabState(containing: id), tab.paneControllers[id] is RestoredPanePlaceholderController else { return }
+        controller.name = tab.paneControllers[id]?.name
         tab.paneControllers[id] = controller
         if tab === sidebar.tab { rebuildPaneContainer(tab) }
         else if tab.id == selectedTabID { rebuildWorkspaceLayout() }
@@ -4186,7 +4194,7 @@ extension WorkspaceViewController {
     }
 
     private func createDefaultSidebar() {
-        let terminal = makeTerminalPaneController(kind: .local)
+        let terminal = makeTerminalPaneController(kind: .herdr)
         sidebar.tab.paneControllers = [terminal.id: terminal]
         sidebar.tab.layoutNode = .panel(terminal.id)
         sidebar.tab.focusedPaneID = terminal.id

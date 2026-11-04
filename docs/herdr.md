@@ -11,6 +11,12 @@ loss recovery (`keep`) starts a fresh shell, never reruns a lost command. `hc` i
 found on PATH, in `~/.local/bin`, or in the standard Homebrew binary directories;
 Santty does not install or update it.
 
+The window sidebar also uses local Herdr terminals, independently of the selected
+workspace or its remote machine. Its terminal bindings persist and reattach on
+reopen; hiding the sidebar leaves the programs running. Explicit pane close ends
+the terminal. Older local sidebar sessions restore as placeholders; starting one
+creates a new local Herdr terminal without replaying its previous command.
+
 ## Remote Workspaces
 
 **New Remote Herdr Workspace…** selects a machine already configured with

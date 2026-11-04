@@ -2759,12 +2759,15 @@ extension WorkspaceViewControllerTests {
     }
 
     @MainActor
-    func testSidebarClosingLastPaneHidesAndReopensDefaults() throws {
+    func testSidebarClosingLastPaneHidesAndReopensDefaults() async throws {
         let controller = Self.makeController()
         controller.toggleSidebar(nil)
         for id in controller.debugSidebarPaneIDs {
             controller.debugFocusSidebarPane(id)
-            controller.closePane(nil)
+            controller.debugPerformClosePane(withID: id)
+        }
+        for _ in 0..<100 where controller.debugSidebarVisible {
+            try await Task.sleep(for: .milliseconds(10))
         }
         XCTAssertFalse(controller.debugSidebarVisible)
         XCTAssertFalse(controller.debugSidebarFocused)
@@ -2814,7 +2817,17 @@ extension WorkspaceViewControllerTests {
         XCTAssertThrowsError(try invalid.validate())
         invalid = original
         let sidebarPane = try XCTUnwrap(original.sidebar?.tab.panes.first)
-        invalid.sidebar?.tab.panes = [.init(id: sidebarPane.id, kind: .herdrTerminal, title: "Remote")]
+        invalid.sidebar?.tab.panes = [.init(id: sidebarPane.id, kind: .herdrTerminal, title: "Remote",
+            herdr: .init(coreID: "remote-core", address: "t1", remote: true))]
+        XCTAssertThrowsError(try invalid.validate())
+        invalid = original
+        invalid.sidebar?.tab.panes[0].herdr = .init(coreID: "local-core", address: "../t1")
+        XCTAssertThrowsError(try invalid.validate())
+        invalid = original
+        invalid.sidebar?.tab.panes[0].herdrViewer = true
+        XCTAssertThrowsError(try invalid.validate())
+        invalid = original
+        invalid.sidebar?.tab.panes[0].title = String(repeating: "x", count: 1025)
         XCTAssertThrowsError(try invalid.validate())
         invalid = original
         invalid.version = 7
@@ -2898,7 +2911,7 @@ extension WorkspaceViewControllerTests {
                 let tab = try XCTUnwrap(sidebar ? saved.sidebar?.tab : saved.tabs.first)
                 XCTAssertEqual(tab.panes.count, 2, "\(sidebar) \(kind) \(size)")
                 XCTAssertEqual(tab.layout?.parentSplitContext(for: anchor)?.axis, axis, "\(sidebar) \(kind) \(size)")
-                XCTAssertEqual(tab.panes.first { $0.id == tab.focusedPaneID }?.kind, kind)
+                XCTAssertEqual(tab.panes.first { $0.id == tab.focusedPaneID }?.kind, sidebar && kind == .localTerminal ? .herdrTerminal : kind)
                 if sidebar { XCTAssertEqual(controller.debugLayoutNode, mainLayout) }
                 try saved.validate()
             }
@@ -2906,13 +2919,14 @@ extension WorkspaceViewControllerTests {
     }
 
     @MainActor
-    func testSidebarStartsWithLocalTerminalAndAllowsExplicitSplits() throws {
+    func testSidebarStartsWithLocalHerdrTerminalAndAllowsExplicitSplits() throws {
         let controller = Self.makeController()
         let mainLayout = controller.debugLayoutNode
         controller.toggleSidebar(nil)
         let first = try XCTUnwrap(controller.debugSidebarPaneIDs.first)
         let terminal = try XCTUnwrap(controller.debugSidebarPane(first) as? TerminalPaneController)
-        XCTAssertNil(terminal.herdrSession)
+        XCTAssertNotNil(terminal.herdrSession)
+        XCTAssertNil(terminal.herdrSession?.remote)
         controller.debugFocusSidebarPane(first)
         XCTAssertTrue(controller.commandPaletteCommands.first { $0.id == "pane.split.horizontal" }?.isEnabled == true)
         controller.splitPaneHorizontally(nil)
@@ -2924,6 +2938,7 @@ extension WorkspaceViewControllerTests {
         XCTAssertEqual(controller.savedWorkspace().sidebar?.tab.layout?.parentSplitContext(for: first)?.axis, .vertical)
         XCTAssertEqual(controller.debugLayoutNode, mainLayout)
         XCTAssertTrue(controller.savedWorkspace().sidebar?.tab.autoResize.isEmpty == true)
+        XCTAssertTrue(controller.savedWorkspace().sidebar?.tab.panes.allSatisfy { $0.kind == .herdrTerminal } == true)
         try controller.savedWorkspace().validate()
     }
 
@@ -2947,25 +2962,52 @@ extension WorkspaceViewControllerTests {
     }
 
     @MainActor
-    func testSidebarTerminalRestoresAndStartsLocallyInHerdrWorkspace() throws {
+    func testSidebarTerminalRestoresLocalCoreBindingInRemoteWorkspace() throws {
         let controller = Self.makeController()
         controller.toggleSidebar(nil)
         var saved = controller.savedWorkspace()
         saved.workspaceKind = .herdr
+        saved.herdrRemote = .init(id: "remote-core", name: "Remote")
         saved.tabs[0].panes = saved.tabs[0].panes.map {
             .init(id: $0.id, kind: .herdrTerminal, name: $0.name, title: $0.title)
         }
+        let binding = HerdrTerminalBinding(coreID: "local-core", address: "t1")
+        saved.sidebar?.tab.panes[0].herdr = binding
         let decoded = try JSONDecoder().decode(SavedWorkspace.self, from: JSONEncoder().encode(saved))
         let restored = Self.makeController()
         try restored.restoreWorkspace(decoded)
         let id = try XCTUnwrap(restored.debugSidebarPaneIDs.first)
-        let placeholder = try XCTUnwrap(restored.debugSidebarPane(id) as? RestoredPanePlaceholderController)
-        placeholder.onActivate?()
         let terminal = try XCTUnwrap(restored.debugSidebarPane(id) as? TerminalPaneController)
-        XCTAssertNil(terminal.herdrSession)
+        XCTAssertEqual(terminal.herdrSession?.binding, binding)
+        XCTAssertNil(terminal.herdrSession?.remote)
         restored.debugFocusSidebarPane(id)
         restored.newTerminalPane(nil)
-        XCTAssertTrue(restored.savedWorkspace().sidebar?.tab.panes.allSatisfy { $0.kind == .localTerminal } == true)
+        XCTAssertTrue(restored.savedWorkspace().sidebar?.tab.panes.allSatisfy { $0.kind == .herdrTerminal } == true)
+        for id in restored.debugSidebarPaneIDs {
+            let pane = try XCTUnwrap(restored.debugSidebarPane(id) as? TerminalPaneController)
+            XCTAssertNil(pane.herdrSession?.remote)
+        }
+        try restored.savedWorkspace().validate()
+    }
+
+    @MainActor
+    func testPreviousLocalSidebarRequiresExplicitStartIntoCore() throws {
+        let controller = Self.makeController()
+        controller.toggleSidebar(nil)
+        var saved = controller.savedWorkspace()
+        let pane = try XCTUnwrap(saved.sidebar?.tab.panes.first)
+        saved.sidebar?.tab.panes = [.init(id: pane.id, kind: .localTerminal, name: "Previous shell", title: pane.title, cwd: "/tmp")]
+        let restored = Self.makeController()
+        try restored.restoreWorkspace(saved)
+        let placeholder = try XCTUnwrap(restored.debugSidebarPane(pane.id) as? RestoredPanePlaceholderController)
+        XCTAssertEqual(placeholder.savedPane.kind, .localTerminal)
+        placeholder.onActivate?()
+        let terminal = try XCTUnwrap(restored.debugSidebarPane(pane.id) as? TerminalPaneController)
+        XCTAssertNotNil(terminal.herdrSession)
+        XCTAssertNil(terminal.herdrSession?.remote)
+        XCTAssertEqual(terminal.currentWorkingDirectory, "/tmp")
+        XCTAssertEqual(terminal.name, "Previous shell")
+        XCTAssertFalse(terminal.hasStarted)
         try restored.savedWorkspace().validate()
     }
 
