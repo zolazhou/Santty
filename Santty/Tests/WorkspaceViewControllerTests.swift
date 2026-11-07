@@ -60,7 +60,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
     }
 
     @MainActor
-    func testPaneNamesRevealAfterCommandHoldAndCancelForShortcutsAndFocusLoss() async throws {
+    func testPaneNamesToggleAfterDoubleCommandAndCancelForShortcutsAndFocusLoss() throws {
         let controller = Self.makeController()
         let firstID = try XCTUnwrap(controller.debugFocusedPaneID)
         controller.debugSetFocusedPaneName("API")
@@ -73,63 +73,84 @@ final class WorkspaceViewControllerTests: XCTestCase {
             try XCTUnwrap(controller.debugPaneNameBadge(for: $0))
         }
         let terminalFrame = controller.debugTerminalFrame(for: firstID)
-        func flags(_ modifiers: NSEvent.ModifierFlags) throws -> NSEvent {
-            try XCTUnwrap(NSEvent.keyEvent(
+        var timestamp: TimeInterval = 1
+        func flags(_ modifiers: NSEvent.ModifierFlags, after interval: TimeInterval = 0.01, keyCode: UInt16 = 55) throws {
+            timestamp += interval
+            controller.handlePaneNameEvent(try XCTUnwrap(NSEvent.keyEvent(
                 with: .flagsChanged, location: .zero, modifierFlags: modifiers,
-                timestamp: 0, windowNumber: 0, context: nil, characters: "",
-                charactersIgnoringModifiers: "", isARepeat: false, keyCode: 55))
+                timestamp: timestamp, windowNumber: 0, context: nil, characters: "",
+                charactersIgnoringModifiers: "", isARepeat: false, keyCode: keyCode)))
         }
-        let down = try flags(.command)
-        let up = try flags([])
+        func doubleCommand() throws {
+            try flags(.command)
+            try flags([])
+            try flags(.command)
+            try flags([])
+        }
+        let timeout = NSEvent.doubleClickInterval + 1
         XCTAssertTrue(badges.allSatisfy(\.isHidden))
-        controller.handlePaneNameEvent(down)
-        try await Task.sleep(for: .milliseconds(100))
+        try flags(.command)
         XCTAssertTrue(badges.allSatisfy(\.isHidden))
-        controller.handlePaneNameEvent(up)
-        try await Task.sleep(for: .milliseconds(400))
+        try flags([], after: timeout)
         XCTAssertTrue(badges.allSatisfy(\.isHidden))
-
-        controller.handlePaneNameEvent(down)
-        try await Task.sleep(for: .milliseconds(450))
+        try flags(.command)
+        XCTAssertTrue(badges.allSatisfy(\.isHidden), "A long hold must not count as a double press")
+        try flags([])
+        try flags(.command, after: timeout)
+        XCTAssertTrue(badges.allSatisfy(\.isHidden), "Slow presses must not reveal names")
+        try flags(.command)
+        XCTAssertTrue(badges.allSatisfy(\.isHidden), "Repeated flags while held are not a second press")
+        try flags([])
+        try flags(.command)
         XCTAssertFalse(badges[0].isHidden)
         XCTAssertFalse(badges[1].isHidden)
         XCTAssertTrue(badges[2].isHidden)
         controller.view.layoutSubtreeIfNeeded()
         XCTAssertEqual(controller.debugTerminalFrame(for: firstID), terminalFrame)
         XCTAssertNil(badges[0].hitTest(.zero))
-        controller.handlePaneNameEvent(up)
-        XCTAssertTrue(badges.allSatisfy(\.isHidden))
+        try flags([])
+        XCTAssertFalse(badges[0].isHidden, "Names remain visible after releasing Cmd")
+        try doubleCommand()
+        XCTAssertTrue(badges.allSatisfy(\.isHidden), "A second double press hides names")
 
-        controller.handlePaneNameEvent(down)
+        try flags(.command)
         controller.handlePaneNameEvent(try XCTUnwrap(Self.makeKeyEvent("c", modifiers: .command)))
-        controller.handlePaneNameEvent(down)
-        try await Task.sleep(for: .milliseconds(450))
-        XCTAssertTrue(badges.allSatisfy(\.isHidden))
-
-        controller.handlePaneNameEvent(up)
-        controller.handlePaneNameEvent(down)
-        controller.handlePaneNameEvent(try flags([.command, .shift]))
-        controller.handlePaneNameEvent(down)
-        try await Task.sleep(for: .milliseconds(450))
-        XCTAssertTrue(badges.allSatisfy(\.isHidden))
-
-        controller.handlePaneNameEvent(up)
-        controller.handlePaneNameEvent(down)
-        try await Task.sleep(for: .milliseconds(450))
-        XCTAssertFalse(badges[0].isHidden)
+        try flags(.command)
+        try flags([])
+        try flags(.command)
+        XCTAssertTrue(badges.allSatisfy(\.isHidden), "A shortcut must cancel the pending double press")
+        try flags([.command, .shift])
+        try flags(.command)
+        try flags([])
+        try flags(.command)
+        XCTAssertTrue(badges.allSatisfy(\.isHidden), "Other modifiers must cancel the pending double press")
+        try flags([])
+        try flags(.command, keyCode: 54)
+        try flags([], keyCode: 54)
+        XCTAssertFalse(badges[0].isHidden, "Either Command key can complete the double press")
         controller.handlePaneNameEvent(try XCTUnwrap(NSEvent.mouseEvent(
-            with: .leftMouseDown, location: .zero, modifierFlags: .command,
-            timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)))
+            with: .leftMouseDown, location: .zero, modifierFlags: [],
+            timestamp: timestamp, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)))
         XCTAssertTrue(badges.allSatisfy(\.isHidden))
-        controller.handlePaneNameEvent(up)
-        controller.handlePaneNameEvent(down)
-        try await Task.sleep(for: .milliseconds(450))
+        try doubleCommand()
+        XCTAssertFalse(badges[0].isHidden)
+        controller.handlePaneNameEvent(try XCTUnwrap(Self.makeKeyEvent("a", modifiers: [])))
+        XCTAssertTrue(badges.allSatisfy(\.isHidden), "Typing must hide names")
+
+        try doubleCommand()
         XCTAssertFalse(badges[0].isHidden)
         NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp)
         XCTAssertTrue(badges.allSatisfy(\.isHidden))
-        controller.handlePaneNameEvent(down)
+        try flags(.command)
+        try flags([])
+        NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp)
+        try flags(.command)
+        try flags([])
+        XCTAssertTrue(badges.allSatisfy(\.isHidden), "Focus loss must cancel the pending double press")
+        try flags(.command)
+        try flags([])
+        XCTAssertFalse(badges[0].isHidden)
         controller.debugNewTab()
-        try await Task.sleep(for: .milliseconds(450))
         XCTAssertTrue(badges.allSatisfy(\.isHidden))
     }
 

@@ -230,7 +230,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     private var appearanceSettingsObserver: NSObjectProtocol?
     private var terminalSettingsObserver: NSObjectProtocol?
     private var animatingDetachedPaneIDs: Set<PaneID> = []
-    private var paneNameRevealTask: Task<Void, Never>?
+    private var lastPaneNameCommandPress: TimeInterval?
     private var paneNamesVisible = false
     private var isCommandHeld = false
     private var isClosingWindow = false
@@ -385,7 +385,6 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             agentNavigationTask?.cancel()
             if let sidebarMouseMonitor { NSEvent.removeMonitor(sidebarMouseMonitor) }
             workspaceSaveTask?.cancel()
-            paneNameRevealTask?.cancel()
             for observer in paneNameFocusObservers {
                 NotificationCenter.default.removeObserver(observer)
             }
@@ -428,22 +427,25 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         let wasCommandHeld = isCommandHeld
         let modifiers = event.modifierFlags.intersection([.command, .shift, .control, .option, .function])
         isCommandHeld = modifiers.contains(.command)
+        if event.type == .flagsChanged, modifiers.isEmpty { return }
         guard event.type == .flagsChanged, modifiers == [.command] else {
             cancelPaneNameReveal()
             return
         }
-        // A shortcut or another modifier suppresses this hold until Cmd is released.
+        // A shortcut or another modifier suppresses this press until Cmd is released.
         guard !wasCommandHeld else { return }
-        paneNameRevealTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: .milliseconds(350)) }
-            catch { return }
-            self?.setPaneNamesVisible(true)
+        if let lastPress = lastPaneNameCommandPress,
+            (0...NSEvent.doubleClickInterval).contains(event.timestamp - lastPress)
+        {
+            lastPaneNameCommandPress = nil
+            setPaneNamesVisible(!paneNamesVisible)
+        } else {
+            lastPaneNameCommandPress = event.timestamp
         }
     }
 
     private func cancelPaneNameReveal() {
-        paneNameRevealTask?.cancel()
-        paneNameRevealTask = nil
+        lastPaneNameCommandPress = nil
         setPaneNamesVisible(false)
     }
 
@@ -871,7 +873,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         cancelPaneNameReveal()
         let alert = NSAlert()
         alert.messageText = "Rename Pane"
-        alert.informativeText = "Hold Command to show pane names. Leave empty to remove the name."
+        alert.informativeText = "Double-press Command to show pane names. Leave empty to remove the name."
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
