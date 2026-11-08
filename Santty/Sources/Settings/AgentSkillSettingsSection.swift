@@ -25,7 +25,7 @@ struct AgentSkillSettingsSection: View {
             Text("Agent Skills")
         } footer: {
             Text(
-                "Teaches agents to find panes, search logs and read context. Links update with Santty. Install the CLI and enable CLI access separately. Start a new agent session if the skill is not discovered."
+                "Teaches agents to read logs and safely control panes when authorized. Install the CLI and enable read, pane control and input permissions separately. Links update with Santty. Start a new agent session if the skill is not discovered."
             )
         }
     }

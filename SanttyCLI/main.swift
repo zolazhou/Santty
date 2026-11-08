@@ -1,124 +1,103 @@
 import Darwin
 import Foundation
 
-let usage = """
-    Usage:
-      santty list [--json] [--socket PATH]
-      santty read <pane-id> [--tail N | --start-line N --end-line M] [--json] [--socket PATH]
-      santty search <pane-id> <text> [--ignore-case] [--limit N] [--json] [--socket PATH]
-
-    Read terminal text, including retained scrollback, without changing focus or selection.
-    --tail defaults to 200 (maximum 10000); output is capped at 256 KiB.
-    Ranges are 1-based and inclusive (maximum 10000 lines).
-    Search is literal, returns matching lines in buffer order, and defaults to 100 results (maximum 1000).
-    Line numbers refer to the current buffer and can change when history is discarded or the screen changes.
-    SANTTY_CONTROL_SOCKET is a hint; stale instance paths are rediscovered.
-    """
-
+let arguments = Array(CommandLine.arguments.dropFirst())
+if arguments.isEmpty || arguments == ["--help"] || arguments == ["help"] {
+    print(CLIInvocation.usage)
+    exit(0)
+}
+var outputJSON = arguments.contains("--json")
+var mutationID: String?
 do {
-    var arguments = Array(CommandLine.arguments.dropFirst())
-    if arguments.isEmpty || arguments == ["--help"] || arguments == ["help"] {
-        print(usage)
-        exit(0)
+    var invocation = try CLIInvocation.parse(arguments)
+    outputJSON = invocation.json
+    if invocation.readsStdin {
+        var data = Data()
+        while let chunk = try FileHandle.standardInput.read(upToCount: 4096), !chunk.isEmpty {
+            data.append(chunk)
+            guard data.count <= 64 * 1024 else { throw CLIError("Input exceeds 64 KiB.") }
+        }
+        guard let text = String(data: data, encoding: .utf8) else { throw CLIError("stdin must contain UTF-8 text.") }
+        invocation.request.text = text
     }
-    let command = arguments.removeFirst()
-    var request = CLIRequest(command: command)
-    var json = false
     let environment = ProcessInfo.processInfo.environment
-    var explicitSocket: String?
-    if command == "read" || command == "search" {
-        guard let value = arguments.first, let id = UUID(uuidString: value) else {
-            throw CLIError("\(command) requires a pane UUID. Run santty list --json first.")
-        }
-        request.paneID = id
-        arguments.removeFirst()
-    }
-    if command == "search" {
-        guard !arguments.isEmpty else { throw CLIError("search requires text to find.") }
-        request.query = arguments.removeFirst()
-    }
-    while !arguments.isEmpty {
-        let flag = arguments.removeFirst()
-        switch flag {
-        case "--json": json = true
-        case "--tail":
-            guard command == "read", !arguments.isEmpty,
-                let count = Int(arguments.removeFirst())
-            else { throw CLIError("--tail requires an integer and the read command.") }
-            request.tail = count
-        case "--start-line", "--end-line", "--limit":
-            guard !arguments.isEmpty, let count = Int(arguments.removeFirst()) else {
-                throw CLIError("\(flag) requires an integer.")
-            }
-            if flag == "--start-line" { request.startLine = count }
-            if flag == "--end-line" { request.endLine = count }
-            if flag == "--limit" { request.limit = count }
-        case "--ignore-case": request.ignoreCase = true
-        case "--socket":
-            guard !arguments.isEmpty else { throw CLIError("--socket requires a path.") }
-            explicitSocket = arguments.removeFirst()
-        default: throw CLIError("Unknown argument: \(flag)\n\(usage)")
-        }
-    }
-    try request.validate()
     let candidates: [String]
-    if explicitSocket == nil {
+    if invocation.socket == nil {
         try CLITransport.prepareDirectory()
-        candidates = try FileManager.default.contentsOfDirectory(
-            atPath: CLITransport.directory.path
-        )
-        .filter { $0.hasSuffix(".sock") }.map { CLITransport.directory.appendingPathComponent($0).path }
+        candidates = try FileManager.default.contentsOfDirectory(atPath: CLITransport.directory.path)
+            .filter { $0.hasSuffix(".sock") }.map { CLITransport.directory.appendingPathComponent($0).path }
     } else { candidates = [] }
-    let socketPath = try CLIInstanceDiscovery.resolve(explicit: explicitSocket, inherited: environment["SANTTY_CONTROL_SOCKET"],
-        candidates: candidates) { path in
-            let fd = try CLITransport.connect(to: path); defer { close(fd) }
-            try CLITransport.write(CLIRequest(command: "list", includeProcesses: false), to: fd)
-            return try JSONDecoder().decode(CLIResponse.self, from: CLITransport.readLine(fd, limit: CLITransport.maximumResponseBytes))
-        }
-    let fd = try CLITransport.connect(to: socketPath)
-    defer { close(fd) }
-    try CLITransport.write(request, to: fd)
-    let data = try CLITransport.readLine(fd, limit: CLITransport.maximumResponseBytes)
-    let response = try JSONDecoder().decode(CLIResponse.self, from: data)
-    guard response.version == 2 else {
-        throw CLIError("CLI protocol mismatch. Reinstall the CLI from Santty settings.")
+    func exchange(_ request: CLIRequest, at path: String) throws -> CLIResponse {
+        let fd = try CLITransport.connect(to: path)
+        defer { close(fd) }
+        if request.isMutation { CLITransport.configure(fd, timeoutSeconds: 30) }
+        try CLITransport.write(request, to: fd)
+        return try JSONDecoder().decode(CLIResponse.self, from: CLITransport.readLine(fd, limit: CLITransport.maximumResponseBytes))
     }
-    if let error = response.error { throw CLIError(error) }
-
-    if json {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        FileHandle.standardOutput.write(try encoder.encode(response))
-        print("")
-    } else if command == "list" {
-        for tab in response.tabs ?? [] {
-            print("\(tab.isSelected ? "*" : " ") Tab \(tab.id): \(tab.title)")
-            for pane in tab.panes {
-                let name = pane.name.map { "  name=\($0)" } ?? ""
-                print("  \(pane.id)  \(pane.kind)  \(pane.title)\(name)  \(pane.cwd ?? "")")
-                for process in pane.processes { print("    \(process.pid) \(process.command)") }
-            }
+    let path = try CLIInstanceDiscovery.resolve(explicit: invocation.socket, inherited: environment["SANTTY_CONTROL_SOCKET"], candidates: candidates) {
+        try exchange(CLIRequest(command: "list", includeProcesses: false), at: $0)
+    }
+    if invocation.request.isMutation {
+        let response = try exchange(CLIRequest(command: "capabilities"), at: path)
+        guard response.version == 2, let capabilities = response.capabilities,
+              capabilities.commands.contains(invocation.request.command) else {
+            throw CLIError("This Santty server does not support pane control. Update and restart Santty.", code: "unsupported_command")
         }
-    } else if command == "search" {
-        for match in response.matches ?? [] {
-            print("\(match.line):\(match.text)")
+        if invocation.request.requestID == nil {
+            invocation.request.requestID = CLIRequestToken(instance: capabilities.instanceID).rawValue
         }
-        if response.truncated == true {
-            FileHandle.standardError.write(
-                Data("santty: search output limited by --limit or the 256 KiB cap.\n".utf8))
+        mutationID = invocation.request.requestID
+    }
+    try invocation.request.validate()
+    let response: CLIResponse
+    do { response = try exchange(invocation.request, at: path) }
+    catch {
+        if invocation.request.isMutation {
+            throw CLIError("Delivery/result is unknown. Inspect pane state or recover using the SAME --request-id \(mutationID ?? ""). Never automatically resend with a new ID.", code: "result_unknown")
         }
+        throw error
+    }
+    guard response.version == 2 else { throw CLIError("CLI protocol mismatch. Reinstall the CLI from Santty settings.") }
+    if invocation.json {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        FileHandle.standardOutput.write(try encoder.encode(response)); print("")
+        if response.error != nil { exit(1) }
     } else {
-        let text = response.text ?? ""
-        FileHandle.standardOutput.write(Data(text.utf8))
-        if !text.isEmpty && !text.hasSuffix("\n") { print("") }
+        if let error = response.error { throw CLIError(error, code: response.errorCode ?? "operation_failed") }
+        if invocation.request.command == "list" {
+            for tab in response.tabs ?? [] {
+                let context = " [\(tab.workspaceName ?? "") \(tab.workspaceID?.uuidString ?? "sidebar")]"
+                print("\(tab.isSelected ? "*" : " ") Tab \(tab.id): \(tab.title)\(context)")
+                for pane in tab.panes {
+                    let name = pane.name.map { "  name=\($0)" } ?? ""
+                    print("  \(pane.id)  \(pane.kind)  \(pane.title)\(name)  \(pane.cwd ?? "")")
+                    for process in pane.processes { print("    \(process.pid) \(process.command)") }
+                }
+            }
+        } else if let capabilities = response.capabilities {
+            print(capabilities.commands.joined(separator: "\n"))
+            print("control=\(capabilities.controlEnabled) input=\(capabilities.inputEnabled)")
+        } else if invocation.request.isMutation {
+            print("\(response.status ?? "ok")\(response.paneID.map { " " + $0.uuidString } ?? "")")
+            if let requestID = response.requestID { print("request-id=\(requestID)") }
+        } else if invocation.request.command == "search" {
+            for match in response.matches ?? [] { print("\(match.line):\(match.text)") }
+        } else {
+            let text = response.text ?? ""
+            FileHandle.standardOutput.write(Data(text.utf8))
+            if !text.isEmpty && !text.hasSuffix("\n") { print("") }
+        }
         if response.truncated == true {
-            FileHandle.standardError.write(
-                Data(
-                    "santty: output limited by --tail or the 256 KiB cap; use --json for returned line numbers.\n"
-                        .utf8))
+            FileHandle.standardError.write(Data("santty: output limited by the requested limit or 256 KiB cap; use --json for line metadata.\n".utf8))
         }
     }
 } catch {
-    FileHandle.standardError.write(Data("santty: \(error.localizedDescription)\n".utf8))
+    if outputJSON {
+        var response = CLIResponse.failure(error); response.requestID = mutationID
+        if let data = try? JSONEncoder().encode(response) { FileHandle.standardOutput.write(data); print("") }
+    } else {
+        FileHandle.standardError.write(Data("santty: \(error.localizedDescription)\n".utf8))
+        if let mutationID { FileHandle.standardError.write(Data("request-id=\(mutationID)\n".utf8)) }
+    }
     exit(1)
 }

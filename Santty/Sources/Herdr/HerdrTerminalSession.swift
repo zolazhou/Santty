@@ -30,8 +30,9 @@ final class HerdrTerminalSession {
     private var sentSize: [UInt16]?
     private var sentFacts: Data?
     private(set) var createResultUnknown = false
-    lazy var memory = InMemoryTerminalSession(write: { [weak self] data in
-        Task { @MainActor [weak self] in self?.input(data) }
+    private let inputSink = HerdrTerminalInput()
+    lazy var memory = InMemoryTerminalSession(write: { [inputSink] data in
+        inputSink.write(data)
     }, resize: { [weak self] viewport in
         Task { @MainActor [weak self] in self?.resize(viewport) }
     })
@@ -169,6 +170,7 @@ final class HerdrTerminalSession {
                 connection.register(channel: attached.channel) { result in consumer.receive(result) }
                 apply(attached.terminal)
                 state = .live
+                inputSink.attach(connection: connection, channel: attached.channel)
                 if let latest = self.viewport { resize(latest) }
                 setFocused(focused)
                 onChange?()
@@ -203,14 +205,6 @@ final class HerdrTerminalSession {
             }
             updateDisplay()
         } else { connectIfNeeded() }
-    }
-
-    private func input(_ data: Data) {
-        guard state == .live, let channel, let connection else { return }
-        // Keep a large paste within the protocol's frame limit.
-        for start in stride(from: 0, to: data.count, by: 16 * 1024) {
-            connection.send(channel: channel, kind: 0, payload: Data(data[start..<min(start + 16 * 1024, data.count)]))
-        }
     }
 
     func setFocused(_ focused: Bool) {
@@ -268,6 +262,7 @@ final class HerdrTerminalSession {
         onChange?()
     }
     private func disconnectViewer() {
+        inputSink.detach()
         consumer?.invalidate(); consumer = nil
         if let channel { connection?.detach(channel: channel) }
         channel = nil; connection = nil; sentSize = nil; sentFacts = nil
@@ -311,10 +306,31 @@ final class HerdrTerminalSession {
     deinit {
         MainActor.assumeIsolated {
             task?.cancel()
+            inputSink.detach()
             consumer?.invalidate()
             if let channel { connection?.detach(channel: channel) }
             client.removeObserver(observerID)
             client.removeMachineObserver(observerID)
+        }
+    }
+}
+
+/// Bind bytes to the connection/channel at callback time, not a later MainActor
+/// task. A queued key must never cross a disconnect and land on a new stream.
+private final class HerdrTerminalInput: @unchecked Sendable {
+    private let lock = NSLock()
+    private var target: (HerdrCoreTransport, UInt32)?
+
+    func attach(connection: HerdrCoreTransport, channel: UInt32) {
+        lock.withLock { target = (connection, channel) }
+    }
+    func detach() { lock.withLock { target = nil } }
+    func write(_ data: Data) {
+        lock.withLock {
+            guard let (connection, channel) = target else { return }
+            for start in stride(from: 0, to: data.count, by: 16 * 1024) {
+                connection.send(channel: channel, kind: 0, payload: Data(data[start..<min(start + 16 * 1024, data.count)]))
+            }
         }
     }
 }

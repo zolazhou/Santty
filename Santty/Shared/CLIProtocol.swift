@@ -3,11 +3,15 @@ import Foundation
 
 struct CLIError: LocalizedError {
     let message: String
-    init(_ message: String) { self.message = message }
+    let code: String
+    init(_ message: String, code: String = "invalid_request") {
+        self.message = message
+        self.code = code
+    }
     var errorDescription: String? { message }
 }
 
-struct CLIRequest: Codable, Sendable {
+struct CLIRequest: Codable, Sendable, Equatable {
     var command: String
     var paneID: UUID?
     var tail: Int?
@@ -17,8 +21,38 @@ struct CLIRequest: Codable, Sendable {
     var ignoreCase: Bool?
     var limit: Int?
     var includeProcesses: Bool?
+    var workspaceID: UUID?
+    var paneType: String?
+    var direction: String?
+    var amount: Int?
+    var focus: Bool?
+    var activate: Bool?
+    var force: Bool?
+    var name: String?
+    var text: String?
+    var key: String?
+    var requestID: String?
+
+    static let paneCommands = ["pane.new", "pane.split", "pane.close", "pane.focus", "pane.rename",
+                               "pane.move", "pane.resize", "pane.equalize", "pane.send-text", "pane.send-key"]
+    var isMutation: Bool { Self.paneCommands.contains(command) }
+    var isInput: Bool { command == "pane.send-text" || command == "pane.send-key" }
 
     func validate() throws {
+        if isMutation {
+            try validatePaneCommand()
+            return
+        }
+        guard workspaceID == nil, paneType == nil, direction == nil, amount == nil,
+              focus == nil, activate == nil, force == nil, name == nil, text == nil,
+              key == nil, requestID == nil else { throw CLIError("Pane options require a pane command.") }
+        if command == "capabilities" {
+            guard paneID == nil, tail == nil, startLine == nil, endLine == nil, query == nil,
+                  ignoreCase == nil, limit == nil, includeProcesses == nil else {
+                throw CLIError("capabilities does not accept pane or read options.")
+            }
+            return
+        }
         guard ["list", "read", "search"].contains(command) else {
             throw CLIError("Unknown command: \(command)")
         }
@@ -127,6 +161,16 @@ struct CLITab: Codable, Sendable {
     let title: String
     let isSelected: Bool
     var panes: [CLIPane]
+    var workspaceID: UUID? = nil
+    var workspaceName: String? = nil
+    var region: String? = nil
+}
+
+struct CLICapabilities: Codable, Sendable {
+    var commands: [String]
+    var controlEnabled: Bool
+    var inputEnabled: Bool
+    var instanceID: UUID
 }
 
 struct CLIResponse: Codable, Sendable {
@@ -140,6 +184,18 @@ struct CLIResponse: Codable, Sendable {
     var totalLines: Int?
     var matches: [CLIMatch]?
     var totalMatches: Int?
+    var errorCode: String?
+    var capabilities: CLICapabilities?
+    var paneID: UUID?
+    var tabID: UUID?
+    var workspaceID: UUID?
+    var requestID: String?
+    var status: String?
+
+    static func failure(_ error: any Error) -> CLIResponse {
+        CLIResponse(error: error.localizedDescription,
+                    errorCode: (error as? CLIError)?.code ?? "operation_failed")
+    }
 }
 
 struct CLIMatch: Codable, Sendable {
@@ -156,6 +212,7 @@ struct CLIConnectionError: LocalizedError, Sendable {
 }
 
 enum CLITransport {
+    static let maximumRequestBytes = 512 * 1024
     static let maximumResponseBytes = 2 * 1024 * 1024
     static var directory: URL {
         URL(fileURLWithPath: "/tmp/santty-\(getuid())", isDirectory: true)
@@ -199,12 +256,12 @@ enum CLITransport {
         }
     }
 
-    static func configure(_ fd: CInt) {
+    static func configure(_ fd: CInt, timeoutSeconds: Int = 5) {
         // BSD accept() inherits O_NONBLOCK from the listener. Client I/O uses
         // bounded blocking reads, so clear it before applying the timeouts.
         let flags = fcntl(fd, F_GETFL)
         if flags >= 0 { _ = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) }
-        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
         setsockopt(
             fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout.size(ofValue: timeout)))
         setsockopt(

@@ -15,7 +15,7 @@ wrapper around the Ghostty terminal core, consumed through the
 - **[Scroll Mode (experimental)](docs/scroll-mode.md)** — Navigate, select and copy terminal output with Vim-style keys while output stays live.
 - **[Pane names](docs/pane-names.md)** — Name terminal and browser panes, then hold Command to reveal their labels.
 - **[Automatic input sources](docs/input-sources.md)** — Switch input sources by foreground program and use English input in the command palette.
-- **[CLI](docs/cli.md) and [agent skill](docs/agent-skill.md)** — Let agents find panes, search logs and read terminal output without changing focus.
+- **[CLI](docs/cli.md) and [agent skill](docs/agent-skill.md)** — Read and search terminal output without changing focus; optionally manage panes, layouts and terminal input with separate permissions.
 - **[Automatic updates](#publish-an-update-sparkle)** — Receive signed updates through Sparkle in configured builds.
 
 ## Development

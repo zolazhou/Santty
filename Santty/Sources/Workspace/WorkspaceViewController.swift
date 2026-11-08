@@ -199,23 +199,13 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
     func handleCLIRequest(_ request: CLIRequest) throws -> CLIResponse {
         try request.validate()
-        if request.command == "list" {
-            return CLIResponse(tabs: tabs.map { tab in
-                CLITab(id: tab.id, title: tab.displayTitle, isSelected: tab.id == selectedTabID,
-                    panes: tab.paneControllers.values.sorted { $0.id.uuidString < $1.id.uuidString }.map { pane in
-                        let terminal = pane as? TerminalPaneController
-                        return CLIPane(id: pane.id, title: pane.displayTitle, name: pane.name,
-                            kind: terminal != nil ? "terminal" : pane is AgentsPaneController ? "agents" : pane is SidebarListPaneController ? "workspaces" : "browser",
-                            cwd: terminal?.workingDirectoryForNewPane,
-                            foregroundProcessGroupID: terminal?.herdrSession?.remote == nil ? terminal?.foregroundProcessID : nil,
-                            isFocused: tab.focusedPaneID == pane.id, isLive: pane.isLive,
-                            isDetached: tab.isPaneDetached(pane.id))
-                    })
-            })
+        if request.command == "list" { return CLIResponse(tabs: cliTabSnapshots()) }
+        guard request.command == "read" || request.command == "search" else {
+            throw CLIError("Control commands must pass through the authorized CLI router.")
         }
         guard let id = request.paneID,
-            let pane = tabs.lazy.compactMap({ $0.paneControllers[id] }).first
-        else { throw CLIError("Pane not found. Run santty list --json to refresh pane IDs.") }
+            let pane = paneOwnerTabs.lazy.compactMap({ $0.paneControllers[id] }).first
+        else { throw CLIError("Pane not found. Run santty list --json to refresh pane IDs.", code: "pane_not_found") }
         guard let terminal = pane as? TerminalPaneController else {
             throw CLIError("Only terminal panes support reading text.")
         }
@@ -234,6 +224,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     private var paneNamesVisible = false
     private var isCommandHeld = false
     private var isClosingWindow = false
+    private var cliWindowClosePending = false
+    private var cliWindowCloseRequestID: String?
+    private var cliPreservingResponder = false
     private var paneNameFocusObservers: [NSObjectProtocol] = []
 
     private var selectedTabIndex: Int? {
@@ -1073,33 +1066,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
         leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
         clearActiveAutoZoomState(in: tabState, restoreLayout: false, animated: false)
-
-        let newPaneController = makeNewPaneController()
-
-        guard
-            let updatedLayoutNode = layoutNode.insertingSplit(
-                for: focusedPaneID,
-                axis: axis,
-                newPaneID: newPaneController.id
-            )
-        else {
-            return
-        }
-
-        tabState.paneControllers[newPaneController.id] = newPaneController
-        if tabState !== sidebar.tab {
-            tabState.paneAutoResizeConfigurations[newPaneController.id] = WorkspaceFocusZoomConfiguration.defaultAutoResizeConfiguration
-        }
-        tabState.layoutNode = updatedLayoutNode
-        tabState.focusedPaneID = newPaneController.id
-        tabState.markPaneFocused(newPaneController.id)
-        recordWindowFocus(newPaneController.id)
-        rebuildPaneContainer(tabState)
-
-        if hasAppeared {
-            newPaneController.startIfNeeded()
-            applyFocusedPaneResponder()
-        }
+        _ = insertPane(makeNewPaneController(), relativeTo: focusedPaneID, in: tabState,
+                       layout: layoutNode, axis: axis, before: false, focus: true)
     }
 
     private func replaceFocusedPane(with newPaneController: any PaneControlling) {
@@ -1433,7 +1401,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         performClosePane(withID: paneID, in: tabState)
     }
 
-    private func performClosePane(withID paneID: PaneID, in tabState: WorkspaceTabState) {
+    private func performClosePane(withID paneID: PaneID, in tabState: WorkspaceTabState, forCLI: Bool = false) {
         if let pane = tabState.paneControllers[paneID], closeHerdrPanes([pane], then: { [weak self, weak tabState] in
             guard let self, let tabState else { return }
             self.performClosePane(withID: paneID, in: tabState)
@@ -1444,7 +1412,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             leaveFloatingPane(in: tabState, animated: false, reapplyAutoZoom: false)
             removePaneControllerState(for: paneID, in: tabState)
             tabState.layoutNode = result.root
-            tabState.focusedPaneID = result.promotedPaneID ?? result.root?.firstPaneID
+            if tabState.focusedPaneID == paneID {
+                tabState.focusedPaneID = result.promotedPaneID ?? result.root?.firstPaneID
+            }
             if result.root == nil { sidebar.isVisible = false; sidebarIsFocused = false }
             rebuildSidebar()
             applyFocusedPaneResponder()
@@ -1462,7 +1432,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             }
 
             if tabState.paneControllers.isEmpty {
-                closeTab(withID: tabState.id, bypassTabConfirmation: true)
+                if forCLI { cliRemoveEmptyTab(tabState) }
+                else { closeTab(withID: tabState.id, bypassTabConfirmation: true) }
                 return
             }
 
@@ -1487,7 +1458,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
         if let root = closePaneResult.root {
             tabState.layoutNode = root
-            tabState.focusedPaneID = closePaneResult.promotedPaneID ?? root.firstPaneID
+            if tabState.focusedPaneID == paneID {
+                tabState.focusedPaneID = closePaneResult.promotedPaneID ?? root.firstPaneID
+            }
             if let focusedPaneID = tabState.focusedPaneID {
                 tabState.markPaneFocused(focusedPaneID)
             }
@@ -1499,7 +1472,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             return
         }
 
-        closeTab(withID: tabState.id, bypassTabConfirmation: true)
+        if forCLI { cliRemoveEmptyTab(tabState) }
+        else { closeTab(withID: tabState.id, bypassTabConfirmation: true) }
     }
 
     private func closeHerdrPanes(_ panes: [any PaneControlling], then completion: @escaping @MainActor () -> Void) -> Bool {
@@ -3120,7 +3094,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func applyFocusedPaneResponder() {
-        guard hasAppeared, let window = view.window else {
+        guard !cliPreservingResponder, hasAppeared, let window = view.window else {
             return
         }
 
@@ -3171,8 +3145,13 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         scheduleWorkspaceSave()
     }
 
-    private func startPaneControllersIfNeeded(in tabState: WorkspaceTabState) {
-        tabState.paneControllers.values.forEach { $0.startIfNeeded() }
+    private func startPaneControllersIfNeeded(in tabState: WorkspaceTabState, allowFocus: Bool = true) {
+        for pane in tabState.paneControllers.values {
+            // Empty browsers start by focusing their address field. Background CLI
+            // operations must leave that to an explicit later focus/presentation.
+            if pane is BrowserPaneController, !allowFocus || cliPreservingResponder { continue }
+            pane.startIfNeeded()
+        }
     }
 
     private func tabState(containing paneID: PaneID) -> WorkspaceTabState? {
@@ -4284,7 +4263,7 @@ extension WorkspaceViewController {
         tab === sidebar.tab ? windowContentView.sidebarFloatingView : rootView
     }
 
-    private func rebuildSidebar(restoreFloatingPresentation: Bool = true) {
+    private func rebuildSidebar(restoreFloatingPresentation: Bool = true, allowFocus: Bool = true) {
         windowContentView.updateSidebar(sidebar)
         renderSidebar()
         if restoreFloatingPresentation { restoreActiveFloatingPresentation(in: sidebar.tab) }
@@ -4292,7 +4271,7 @@ extension WorkspaceViewController {
         updatePanePresentation(in: sidebar.tab)
         updateWindowMinimumSize()
         scheduleWorkspaceSave()
-        if hasAppeared, sidebar.isVisible { startPaneControllersIfNeeded(in: sidebar.tab) }
+        if hasAppeared, sidebar.isVisible { startPaneControllersIfNeeded(in: sidebar.tab, allowFocus: allowFocus) }
     }
 
     private func updateWorkspaceLists() {
@@ -4309,4 +4288,233 @@ extension WorkspaceViewController {
     func debugFocusSidebarPane(_ id: PaneID) { focusSidebarPane(id) }
     func debugSidebarPane(_ id: PaneID) -> (any PaneControlling)? { sidebar.tab.paneControllers[id] }
 
+}
+
+// Explicit-target operations shared by GUI actions and the authorized CLI router.
+// Kept in this file so the controller's presentation and ownership stay private.
+extension WorkspaceViewController {
+    private func cliTabSnapshots() -> [CLITab] {
+        func snapshot(_ tab: WorkspaceTabState, owner: LocalWorkspaceState?) -> CLITab {
+            CLITab(id: tab.id, title: tab.displayTitle,
+                isSelected: owner?.id == localWorkspaceID && tab.id == selectedTabID,
+                panes: tab.paneControllers.values.sorted { $0.id.uuidString < $1.id.uuidString }.map { pane in
+                    let terminal = pane as? TerminalPaneController
+                    return CLIPane(id: pane.id, title: pane.displayTitle, name: pane.name,
+                        kind: terminal != nil ? "terminal" : pane is AgentsPaneController ? "agents" : pane is SidebarListPaneController ? "workspaces" : pane is RestoredPanePlaceholderController ? "unavailable" : "browser",
+                        cwd: terminal?.workingDirectoryForNewPane,
+                        foregroundProcessGroupID: terminal?.herdrSession?.remote == nil ? terminal?.foregroundProcessID : nil,
+                        isFocused: tab.focusedPaneID == pane.id, isLive: pane.isLive,
+                        isDetached: tab.isPaneDetached(pane.id))
+                }, workspaceID: owner?.id, workspaceName: owner?.name,
+                region: owner == nil ? "sidebar" : "main")
+        }
+        // Current workspace stays first for old consumers of list.
+        let current = LocalWorkspaceState(id: localWorkspaceID, name: localWorkspaceName, kind: workspaceKind,
+                                         remote: workspaceRemote, tabs: tabs, selectedTabID: selectedTabID)
+        return ([current] + otherLocalWorkspaces).flatMap { owner in owner.tabs.map { snapshot($0, owner: owner) } }
+            + [snapshot(sidebar.tab, owner: nil)]
+    }
+
+    private func cliOwner(of tab: WorkspaceTabState) -> LocalWorkspaceState? {
+        localWorkspaceStates.first { owner in owner.tabs.contains { $0 === tab } }
+    }
+
+    private func cliMakePane(type: String?, owner: LocalWorkspaceState?, cwd: String? = nil) -> any PaneControlling {
+        switch type ?? "terminal" {
+        case "browser": return makeBrowserPaneController()
+        case "agents": return makeAgentsPaneController()
+        case "workspaces": return makeWorkspacesPaneController()
+        default: return makeTerminalPaneController(workingDirectory: cwd, kind: owner?.kind ?? .herdr, remote: owner?.remote)
+        }
+    }
+
+    @discardableResult
+    private func insertPane(_ pane: any PaneControlling, relativeTo anchor: PaneID, in tab: WorkspaceTabState,
+                            layout: LayoutNode, axis: SplitAxis, before: Bool, focus: Bool) -> Bool {
+        guard var updated = layout.insertingSplit(for: anchor, axis: axis, newPaneID: pane.id) else { return false }
+        if before, let swapped = updated.swappingPane(anchor, with: pane.id) { updated = swapped }
+        tab.paneControllers[pane.id] = pane
+        if tab !== sidebar.tab {
+            tab.paneAutoResizeConfigurations[pane.id] = WorkspaceFocusZoomConfiguration.defaultAutoResizeConfiguration
+        }
+        tab.layoutNode = updated
+        if focus {
+            tab.focusedPaneID = pane.id
+            tab.markPaneFocused(pane.id)
+            recordWindowFocus(pane.id)
+            rebuildPaneContainer(tab)
+            if hasAppeared { pane.startIfNeeded(); applyFocusedPaneResponder() }
+        } else { cliRefresh(tab) }
+        scheduleWorkspaceSave()
+        return true
+    }
+
+    /// Updates only the target container; never changes first responder, selected
+    /// workspace/tab, or a different container's transient layout.
+    private func cliRefresh(_ tab: WorkspaceTabState) {
+        if tab === sidebar.tab {
+            rebuildSidebar(allowFocus: false)
+        } else if tab.id == selectedTabID, let layout = tab.layoutNode {
+            tilingView?.setLayoutNode(layout, paneViews: buildPaneViewsDictionary(for: tab))
+            updatePanePresentation(in: tab)
+            updateWindowMinimumSize()
+            if hasAppeared { startPaneControllersIfNeeded(in: tab, allowFocus: false) }
+        }
+        updateTabStrip()
+        updateWindowTitle()
+        scheduleWorkspaceSave()
+    }
+
+    private func cliLayout(in tab: WorkspaceTabState, paneID: PaneID) throws -> LayoutNode {
+        let rendered = tab === sidebar.tab ? windowContentView.sidebarView : tab.id == selectedTabID ? tilingView : nil
+        guard tab.isPaneTiled(paneID), tab.activeFloatingPaneState == nil, tab.activeDetachedPaneID == nil,
+              tab.manualResizeLayout == nil, rendered?.collapsedPaneIDs.isEmpty != false,
+              let layout = tab.layoutNode else {
+            throw CLIError("Layout operations require tiled panes without floating, detached overlays or folded layouts. Restore the layout first.", code: "unsupported_layout")
+        }
+        return layout
+    }
+
+    func performCLIPaneRequest(_ request: CLIRequest) async throws -> CLIResponse {
+        guard !isClosingWindow, !cliWindowClosePending, closingHerdrPaneIDs.isEmpty,
+              view.window?.attachedSheet == nil, NSApp.modalWindow == nil else {
+            throw CLIError("Finish the current close operation first.", code: "busy")
+        }
+        if request.command == "pane.new" || request.command == "pane.split" {
+            guard paneOwnerTabs.reduce(0, { $0 + $1.paneControllers.count }) < 512 else {
+                throw CLIError("Workspace pane limit reached.", code: "limit_reached")
+            }
+        }
+        if request.command == "pane.new" {
+            guard let owner = localWorkspaceStates.first(where: { $0.id == request.workspaceID }) else {
+                throw CLIError("Workspace not found. Run santty list --json.", code: "workspace_not_found")
+            }
+            guard allWorkspaceTabs.count < 64 else { throw CLIError("Tab limit reached.", code: "limit_reached") }
+            let pane = cliMakePane(type: request.paneType, owner: owner)
+            let tab = WorkspaceTabState(layoutNode: .panel(pane.id), paneControllers: [pane.id: pane],
+                paneAutoResizeConfigurations: [pane.id: WorkspaceFocusZoomConfiguration.defaultAutoResizeConfiguration], focusedPaneID: pane.id)
+            if owner.id == localWorkspaceID { tabs.append(tab) }
+            else if let index = otherLocalWorkspaces.firstIndex(where: { $0.id == owner.id }) {
+                otherLocalWorkspaces[index].tabs.append(tab)
+            }
+            if request.focus == true { cliFocus(pane.id, tab: tab, owner: owner, activate: false) }
+            else { cliRefresh(tab) }
+            return CLIResponse(paneID: pane.id, tabID: tab.id, workspaceID: owner.id, status: "created")
+        }
+        guard let id = request.paneID, let tab = paneOwnerTabs.first(where: { $0.containsPane(withID: id) }),
+              let pane = tab.paneControllers[id] else {
+            throw CLIError("Pane not found. Run santty list --json to refresh pane IDs.", code: "pane_not_found")
+        }
+        let owner = cliOwner(of: tab)
+        var response = CLIResponse(paneID: id, tabID: tab.id, workspaceID: owner?.id, status: "ok")
+        switch request.command {
+        case "pane.rename": updatePaneName(request.name ?? "", for: pane)
+        case "pane.focus":
+            cliFocus(id, tab: tab, owner: owner, activate: request.activate == true)
+        case "pane.close":
+            guard !pane.isLive || request.force == true else {
+                throw CLIError("Pane is live. Use --force to close its session (external viewers only detach).", code: "confirmation_required")
+            }
+            let window = view.window
+            let responder = window?.firstResponder
+            let preserveResponder = focusedPaneController?.id != id
+            closingHerdrPaneIDs.insert(id)
+            defer { closingHerdrPaneIDs.remove(id) }
+            if let terminal = pane as? TerminalPaneController { try await terminal.herdrSession?.closeTerminal() }
+            // GUI actions may have run during the await. Never remove a replacement.
+            guard tab.paneControllers[id] === pane else { throw CLIError("Pane changed while closing.", code: "pane_changed") }
+            cliPreservingResponder = preserveResponder
+            performClosePane(withID: id, in: tab, forCLI: true)
+            cliPreservingResponder = false
+            if cliWindowClosePending { cliWindowCloseRequestID = request.requestID }
+            if preserveResponder, let responder, let responderView = responder as? NSView, responderView.window === window {
+                window?.makeFirstResponder(responder)
+            }
+            scheduleWorkspaceSave()
+            do { try await flushWorkspaceState() }
+            catch {
+                cliWindowClosePending = false
+                throw CLIError("Pane closed, but saving workspace state failed: \(error.localizedDescription)", code: "persistence_failed")
+            }
+            response.status = "closed"
+        case "pane.split":
+            let layout = try cliLayout(in: tab, paneID: id)
+            guard (layout.path(to: id)?.count ?? 64) < 62 else { throw CLIError("Layout depth limit reached.", code: "limit_reached") }
+            let newPane = cliMakePane(type: request.paneType, owner: owner, cwd: (pane as? TerminalPaneController)?.workingDirectoryForNewPane)
+            let horizontal = request.direction == "left" || request.direction == "right"
+            tab.activeAutoZoomState = nil
+            guard insertPane(newPane, relativeTo: id, in: tab, layout: layout,
+                             axis: horizontal ? .horizontal : .vertical,
+                             before: request.direction == "left" || request.direction == "up", focus: false) else {
+                throw CLIError("Could not split pane.", code: "unsupported_layout")
+            }
+            if request.focus == true { cliFocus(newPane.id, tab: tab, owner: owner, activate: false) }
+            response.paneID = newPane.id; response.status = "created"
+        case "pane.move", "pane.resize", "pane.equalize":
+            let layout = try cliLayout(in: tab, paneID: id)
+            view.layoutSubtreeIfNeeded()
+            let size = tab === sidebar.tab ? windowContentView.sidebarView.bounds.size : rootView.contentContainerView.bounds.size
+            let updated = try CLIPaneLayout.apply(request, to: layout, size: size)
+            tab.activeAutoZoomState = nil
+            tab.layoutNode = updated
+            cliRefresh(tab)
+        case "pane.send-text", "pane.send-key":
+            guard let terminal = pane as? TerminalPaneController else { throw CLIError("Only terminal panes accept input.", code: "not_terminal") }
+            try terminal.sendForCLI(request)
+            response.status = "accepted"
+        default: throw CLIError("Unsupported pane command.", code: "unsupported_command")
+        }
+        return response
+    }
+
+    private func cliFocus(_ id: PaneID, tab: WorkspaceTabState, owner: LocalWorkspaceState?, activate: Bool) {
+        if let owner {
+            if owner.id != localWorkspaceID { selectLocalWorkspace(owner.id) }
+            if tab.id != selectedTabID { selectTab(withID: tab.id) }
+        }
+        if tab === sidebar.tab, !sidebar.isVisible {
+            sidebar.isVisible = true
+            rebuildSidebar()
+        }
+        handlePaneFocusRequest(withID: id)
+        // An already-focused pane in an inactive app still needs its responder.
+        applyFocusedPaneResponder()
+        if activate { view.window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+        scheduleWorkspaceSave()
+    }
+
+    private func cliRemoveEmptyTab(_ tab: WorkspaceTabState) {
+        if let index = otherLocalWorkspaces.firstIndex(where: { $0.tabs.contains { $0 === tab } }) {
+            otherLocalWorkspaces[index].tabs.removeAll { $0 === tab }
+            if otherLocalWorkspaces[index].tabs.isEmpty { otherLocalWorkspaces.remove(at: index) }
+            else if otherLocalWorkspaces[index].selectedTabID == tab.id {
+                otherLocalWorkspaces[index].selectedTabID = otherLocalWorkspaces[index].tabs.first?.id
+            }
+            refreshWorkspacePicker()
+        } else {
+            tabs.removeAll { $0 === tab }
+            if tabs.isEmpty, let next = otherLocalWorkspaces.first {
+                otherLocalWorkspaces.removeFirst()
+                localWorkspaceID = next.id; localWorkspaceName = next.name; workspaceKind = next.kind; workspaceRemote = next.remote
+                tabs = next.tabs; selectedTabID = next.selectedTabID
+                finishLocalWorkspaceSwitch()
+            } else if tabs.isEmpty {
+                selectedTabID = nil
+                cliWindowClosePending = true
+            } else if selectedTabID == tab.id {
+                selectedTabID = tabs.first?.id
+                rebuildWorkspaceLayout()
+            }
+        }
+        scheduleWorkspaceSave()
+    }
+
+    /// Called only after the socket reply has been written, so closing the last
+    /// pane cannot terminate the app before the caller receives its result.
+    func finishCLIReply(requestID: String?) {
+        guard cliWindowClosePending, cliWindowCloseRequestID == requestID else { return }
+        cliWindowClosePending = false
+        cliWindowCloseRequestID = nil
+        requestWindowClose(workspaceSaveConfirmed: true)
+    }
 }

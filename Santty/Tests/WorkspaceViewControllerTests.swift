@@ -2983,7 +2983,7 @@ extension WorkspaceViewControllerTests {
     }
 
     @MainActor
-    func testHiddenSidebarIsExcludedFromDirectionalFocusAndCLI() throws {
+    func testHiddenSidebarIsExcludedFromDirectionalFocusButDiscoverableByCLI() throws {
         let controller = Self.makeController()
         controller.toggleSidebar(nil)
         let tabIDs = controller.debugTabIDs
@@ -2991,8 +2991,9 @@ extension WorkspaceViewControllerTests {
         controller.focusLeftPane(nil)
         XCTAssertFalse(controller.debugSidebarFocused)
         let response = try controller.handleCLIRequest(CLIRequest(command: "list"))
-        XCTAssertEqual(response.tabs?.map(\.id), tabIDs)
-        XCTAssertEqual(response.tabs?.flatMap(\.panes).count, 1)
+        XCTAssertEqual(response.tabs?.filter { $0.region == "main" }.map(\.id), tabIDs)
+        XCTAssertEqual(response.tabs?.filter { $0.region == "main" }.flatMap(\.panes).count, 1)
+        XCTAssertEqual(response.tabs?.filter { $0.region == "sidebar" }.flatMap(\.panes).map(\.id), controller.debugSidebarPaneIDs)
     }
 }
 

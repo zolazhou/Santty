@@ -168,8 +168,8 @@ final class HerdrWorkspaceTests: XCTestCase {
             let before = try await client.terminal(binding)
             let remoteRecord = try JSONDecoder().decode(HerdrCoreTerminal.self, from: await command(remote, ["get", binding.address]))
             XCTAssertEqual(before.pid, remoteRecord.pid)
-            XCTAssertTrue(terminal.paste(text: #"sh -c 'printf "REMOTE-SOCKET:%s\n" "${SANTTY_CONTROL_SOCKET-unset}"'; printf 'REMOTE-%s-OK\n' INPUT"#))
-            XCTAssertTrue(terminal.sendKey(.enter))
+            try pane.sendForCLI(.init(command: "pane.send-text", text: #"sh -c 'printf "REMOTE-SOCKET:%s\n" "${SANTTY_CONTROL_SOCKET-unset}"'; printf 'REMOTE-%s-OK\n' INPUT"#))
+            try pane.sendForCLI(.init(command: "pane.send-key", key: "Enter"))
             stage = "remote input"
             try await waitFor { terminal.readScreenText()?.contains("REMOTE-INPUT-OK") == true }
             XCTAssertTrue(terminal.readScreenText()?.contains("REMOTE-SOCKET:unset") == true)
@@ -198,8 +198,10 @@ final class HerdrWorkspaceTests: XCTestCase {
             try await waitFor { workspace!.savedWorkspace().tabs.first { $0.id == workspace!.debugSelectedTabID }?.panes.first?.herdr == externalBinding }
             let externalTab = try XCTUnwrap(workspace!.debugSelectedTabID)
             XCTAssertEqual(workspace!.savedWorkspace().tabs.first { $0.id == externalTab }?.panes.first?.herdrViewer, true)
-            workspace!.debugCloseTab(withID: externalTab)
-            try await waitFor { workspace!.debugTabIDs.count == 1 }
+            let viewerID = try XCTUnwrap(workspace!.debugFocusedPaneID)
+            let viewerClosed = try await workspace!.performCLIPaneRequest(.init(command: "pane.close", paneID: viewerID, force: true))
+            XCTAssertEqual(viewerClosed.status, "closed")
+            XCTAssertEqual(workspace!.debugTabIDs.count, 1)
             let externalLive = try await client.terminal(externalBinding)
             XCTAssertEqual(externalLive.pid, external.pid)
             XCTAssertEqual(externalLive.state, "live")
@@ -235,8 +237,15 @@ final class HerdrWorkspaceTests: XCTestCase {
             _ = try await client.configuredMachines()
             let checkedRecord = try await client.terminal(binding)
             XCTAssertEqual(checkedRecord.pid, before.pid)
-            XCTAssertTrue(terminal.paste(text: "printf 'RENAMED-%s-OK\\n' INPUT"))
-            XCTAssertTrue(terminal.sendKey(.enter))
+            // Renaming a machine can reconnect its stream after configuredMachines
+            // returns. Ghostty accepting a paste is not proof that Herdr is live.
+            if session.state != .live {
+                XCTAssertThrowsError(try pane.sendForCLI(.init(command: "pane.send-text", text: "never replay this input")))
+            }
+            stage = "renamed viewer reconnect"
+            try await waitFor { session.state == .live }
+            try pane.sendForCLI(.init(command: "pane.send-text", text: "printf 'RENAMED-%s-OK\\n' INPUT"))
+            try pane.sendForCLI(.init(command: "pane.send-key", key: "Enter"))
             stage = "renamed input"
             try await waitFor { terminal.readScreenText()?.contains("RENAMED-INPUT-OK") == true }
             XCTAssertTrue(terminal.paste(text: #"printf '\033]7501;state=working:app=codex\033\\'"#))
@@ -340,16 +349,18 @@ final class HerdrWorkspaceTests: XCTestCase {
         // The first attach must finish before accepting interactive input.
         try await waitFor { !workspace!.debugDisplayTitle(forTabID: workspace!.debugSelectedTabID!)!.contains("Connecting") }
         XCTAssertTrue(window.firstResponder === terminal)
-        XCTAssertTrue(terminal.paste(text: "printf 'PRODUCTION-%s-OK\\n' CORE"))
-        XCTAssertTrue(terminal.sendKey(.enter))
+        let cliTerminal = try XCTUnwrap(terminal.delegate as? TerminalPaneController)
+        try cliTerminal.sendForCLI(.init(command: "pane.send-text", text: "printf 'PRODUCTION-%s-OK\\n' CORE"))
+        try cliTerminal.sendForCLI(.init(command: "pane.send-key", key: "Enter"))
         try await waitFor { terminal.readScreenText()?.contains("PRODUCTION-CORE-OK") == true }
         workspace!.debugSplitFocusedPane(along: .horizontal)
         let secondPane = try XCTUnwrap(workspace!.debugFocusedPaneID)
         try await waitFor { workspace!.savedWorkspace().tabs[0].panes.first { $0.id == secondPane }?.herdr != nil }
         let secondBinding = try XCTUnwrap(workspace!.savedWorkspace().tabs[0].panes.first { $0.id == secondPane }?.herdr)
         XCTAssertNotEqual(secondBinding.address, binding.address)
-        workspace!.debugPerformClosePane(withID: secondPane)
-        try await waitFor { workspace!.debugFocusedPaneID == paneID }
+        let closeResult = try await workspace!.performCLIPaneRequest(.init(command: "pane.close", paneID: secondPane, force: true))
+        XCTAssertEqual(closeResult.status, "closed")
+        XCTAssertEqual(workspace!.debugFocusedPaneID, paneID)
         let secondFinished = try await client.terminal(secondBinding)
         XCTAssertEqual(secondFinished.state, "finished")
         workspace!.debugNewTab()
@@ -445,8 +456,9 @@ final class HerdrWorkspaceTests: XCTestCase {
         try await waitFor { sidebarSplit.herdrSession?.state == .live }
         let sidebarSplitBinding = try XCTUnwrap(sidebarSplit.herdrSession?.binding)
         XCTAssertNotEqual(sidebarSplitBinding, sidebarBinding)
-        workspace!.debugPerformClosePane(withID: sidebarSplitID)
-        try await waitFor { workspace!.debugSidebarPane(sidebarSplitID) == nil }
+        let sidebarClose = try await workspace!.performCLIPaneRequest(.init(command: "pane.close", paneID: sidebarSplitID, force: true))
+        XCTAssertEqual(sidebarClose.status, "closed")
+        XCTAssertNil(workspace!.debugSidebarPane(sidebarSplitID))
         let sidebarSplitFinished = try await client.terminal(sidebarSplitBinding)
         XCTAssertEqual(sidebarSplitFinished.state, "finished")
         workspace!.toggleSidebar(nil)

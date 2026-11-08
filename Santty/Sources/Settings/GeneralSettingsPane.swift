@@ -3,6 +3,8 @@ import SwiftUI
 @MainActor
 struct GeneralSettingsPane: View {
     @State private var cliEnabled = CLIControlServer.isEnabled
+    @State private var cliControlEnabled = CLICommandRouter.controlEnabled
+    @State private var cliInputEnabled = CLICommandRouter.inputEnabled
     @State private var cliInstallationMessage: String?
     @State private var automaticallyChecksForUpdates =
         AppUpdater.shared.automaticallyChecksForUpdates
@@ -13,6 +15,16 @@ struct GeneralSettingsPane: View {
                 Toggle("Allow CLI to Read Terminal Panes", isOn: $cliEnabled)
                     .onChange(of: cliEnabled) { _, value in
                         CLIControlServer.isEnabled = value
+                    }
+                Toggle("Allow CLI to Manage Panes and Layout", isOn: $cliControlEnabled)
+                    .disabled(!cliEnabled)
+                    .onChange(of: cliControlEnabled) { _, value in
+                        CLICommandRouter.controlEnabled = value
+                    }
+                Toggle("Allow CLI to Send Terminal Input", isOn: $cliInputEnabled)
+                    .disabled(!cliEnabled)
+                    .onChange(of: cliInputEnabled) { _, value in
+                        CLICommandRouter.inputEnabled = value
                     }
                 Button("Install Command Line Tool") {
                     do {
@@ -35,7 +47,7 @@ struct GeneralSettingsPane: View {
             } header: {
                 Text("Command Line")
             } footer: {
-                Text("Lets local tools running as your user read pane contents. The CLI updates with Santty. Reinstall the link if you move the app.")
+                Text("Read access lets local tools running as your user read pane contents. Pane control can create and close sessions; terminal input can execute commands in local and remote terminals. These permissions are separate and off by default. The CLI updates with Santty; reinstall the link if you move the app.")
             }
             AgentSkillSettingsSection()
             if AppUpdater.shared.isAvailable {

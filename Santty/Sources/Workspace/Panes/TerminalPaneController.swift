@@ -214,6 +214,34 @@ final class TerminalPaneController: NSObject, PaneControlling {
         return try CLITextSnapshot.response(text, request: request)
     }
 
+    /// Programmatic terminal input without selecting the pane, committing an IME
+    /// composition, changing the clipboard, or leaving Scroll Mode.
+    func sendForCLI(_ request: CLIRequest) throws {
+        guard isLive, !isScrollModeActive, !terminalView.hasMarkedText(),
+              herdrSession == nil || herdrSession?.state == .live else {
+            throw CLIError("Terminal is not ready for input (offline, exited, Scroll Mode or IME composition). Input was not queued.", code: "input_unavailable")
+        }
+        let accepted: Bool
+        if request.command == "pane.send-text" {
+            accepted = terminalView.paste(text: request.text ?? "")
+        } else {
+            let key = try CLIKey(request.key ?? "")
+            let named: [String: TerminalKey] = ["enter": .enter, "tab": .tab, "escape": .escape,
+                "backspace": .backspace, "delete": .delete, "home": .home, "end": .end,
+                "pageup": .pageUp, "pagedown": .pageDown, "left": .arrowLeft,
+                "right": .arrowRight, "up": .arrowUp, "down": .arrowDown]
+            var modifiers: TerminalInputModifiers = []
+            if key.control { modifiers.insert(.ctrl) }
+            if key.shift { modifiers.insert(.shift) }
+            let press: TerminalKeyPress?
+            if let namedKey = named[key.base] { press = TerminalKeyPress(namedKey, modifiers: modifiers) }
+            else { press = key.base.first.flatMap { TerminalKeyPress(typing: $0, modifiers: modifiers) } }
+            guard let press else { throw CLIError("Unsupported key.") }
+            accepted = terminalView.sendKey(press)
+        }
+        guard accepted else { throw CLIError("Terminal surface did not accept input. The pane may not have started.", code: "input_unavailable") }
+    }
+
     func enterScrollMode() {
 
         guard isLive, !isScrollModeActive, herdrSession == nil || herdrSession?.state == .live else {

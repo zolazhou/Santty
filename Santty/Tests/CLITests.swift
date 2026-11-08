@@ -196,7 +196,7 @@ final class CLITests: XCTestCase {
         let pane = try XCTUnwrap(workspace.debugFocusedPaneID)
         workspace.debugPerformCommand(withID: "pane.browser.convert")
         let response = try workspace.handleCLIRequest(CLIRequest(command: "list"))
-        XCTAssertEqual(response.tabs?.count, 2)
+        XCTAssertEqual(response.tabs?.filter { $0.region != "sidebar" }.count, 2)
         XCTAssertEqual(response.tabs?.filter(\.isSelected).count, 1)
         XCTAssertThrowsError(
             try workspace.handleCLIRequest(CLIRequest(command: "read", paneID: pane)))
@@ -236,7 +236,7 @@ final class CLITests: XCTestCase {
         arguments["cliAccessEnabled"] = true
         defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
         let workspace = WorkspaceViewController()
-        _ = workspace.view
+        workspace.debugLoadForTesting()
         server.workspace = workspace
         workspace.debugSetFocusedPaneName("API 中文")
         server.start()
@@ -249,7 +249,7 @@ final class CLITests: XCTestCase {
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/santty")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: helper.path))
         let path = CLITransport.socketPath
-        func run(_ cliArguments: [String]) async throws -> (Int32, Data, Data) {
+        func run(_ cliArguments: [String], input: Data? = nil) async throws -> (Int32, Data, Data) {
             try await Task.detached {
                 let process = Process()
                 process.executableURL = helper
@@ -258,7 +258,11 @@ final class CLITests: XCTestCase {
                 let errors = Pipe()
                 process.standardOutput = output
                 process.standardError = errors
+                let stdin = Pipe()
+                process.standardInput = stdin
                 try process.run()
+                if let input { try stdin.fileHandleForWriting.write(contentsOf: input) }
+                try stdin.fileHandleForWriting.close()
                 let data = output.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
                 return (
@@ -296,6 +300,44 @@ final class CLITests: XCTestCase {
         ])
         XCTAssertEqual(invalid.0, 1)
         XCTAssertTrue(String(decoding: invalid.2, as: UTF8.self).contains("cannot be combined"))
+
+        let capabilities = try await run(["capabilities", "--json"])
+        XCTAssertEqual(capabilities.0, 0)
+        let advertised = try JSONDecoder().decode(CLIResponse.self, from: capabilities.1)
+        XCTAssertTrue(advertised.capabilities?.commands.contains("pane.split") == true)
+        arguments["cliControlEnabled"] = false
+        defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        let target = try XCTUnwrap(workspace.debugFocusedPaneID).uuidString
+        let denied = try await run(["pane", "rename", target, "API", "--json"])
+        XCTAssertEqual(denied.0, 1)
+        XCTAssertEqual(try JSONDecoder().decode(CLIResponse.self, from: denied.1).errorCode, "permission_denied")
+        arguments["cliControlEnabled"] = true
+        defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        let split = try await run(["pane", "split", target, "--direction", "right", "--type", "agents", "--json"])
+        XCTAssertEqual(split.0, 0, String(decoding: split.1 + split.2, as: UTF8.self))
+        let created = try JSONDecoder().decode(CLIResponse.self, from: split.1)
+        let createdID = try XCTUnwrap(created.paneID).uuidString
+        let token = try XCTUnwrap(created.requestID)
+        let retry = try await run(["pane", "split", target, "--direction", "right", "--type", "agents", "--request-id", token, "--json"])
+        XCTAssertEqual(retry.0, 0)
+        XCTAssertEqual(try JSONDecoder().decode(CLIResponse.self, from: retry.1).paneID, created.paneID)
+        XCTAssertEqual(workspace.debugPaneIDsInTraversalOrder.count, 2)
+        let renamed = try await run(["pane", "rename", createdID, "Worker", "--json"])
+        XCTAssertEqual(renamed.0, 0)
+        arguments["cliInputEnabled"] = true
+        defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        let nonterminal = try await run(["pane", "send-text", createdID, "--stdin", "--json"], input: Data("hello 中文".utf8))
+        XCTAssertEqual(nonterminal.0, 1)
+        XCTAssertEqual(try JSONDecoder().decode(CLIResponse.self, from: nonterminal.1).errorCode, "not_terminal")
+        let invalidUTF8 = try await run(["pane", "send-text", target, "--stdin", "--json"], input: Data([0xff]))
+        XCTAssertEqual(invalidUTF8.0, 1)
+        XCTAssertEqual(try JSONDecoder().decode(CLIResponse.self, from: invalidUTF8.1).errorCode, "invalid_request")
+        let closed = try await run(["pane", "close", createdID, "--json"])
+        XCTAssertEqual(closed.0, 0)
+        XCTAssertEqual(workspace.debugPaneIDsInTraversalOrder.count, 1)
+        let badKey = try await run(["pane", "send-key", target, "Cmd+Q", "--json"])
+        XCTAssertEqual(badKey.0, 1)
+        XCTAssertEqual(try JSONDecoder().decode(CLIResponse.self, from: badKey.1).errorCode, "invalid_request")
 
     }
 

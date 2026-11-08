@@ -13,6 +13,7 @@ final class CLIControlServer {
     }
 
     weak var workspace: WorkspaceViewController?
+    private let router = CLICommandRouter()
     private var source: DispatchSourceRead?
     private let queue = DispatchQueue(label: "santty.cli")
 
@@ -65,7 +66,7 @@ final class CLIControlServer {
                 CLITransport.configure(client)
                 do {
                     try CLITransport.verifyPeer(client)
-                    let data = try CLITransport.readLine(client, limit: 16_384)
+                    let data = try CLITransport.readLine(client, limit: CLITransport.maximumRequestBytes)
                     let request = try JSONDecoder().decode(CLIRequest.self, from: data)
                     try request.validate()
                     let processes =
@@ -79,7 +80,7 @@ final class CLIControlServer {
                                 throw CLIError(
                                     "CLI access is disabled or the workspace is unavailable.")
                             }
-                            response = try workspace.handleCLIRequest(request)
+                            response = await server.router.handle(request, workspace: workspace)
                             if var tabs = response.tabs {
                                 for t in tabs.indices {
                                     for p in tabs[t].panes.indices {
@@ -94,16 +95,25 @@ final class CLIControlServer {
                                 }
                                 response.tabs = tabs
                             }
-                        } catch { response = CLIResponse(error: error.localizedDescription) }
+                        } catch { response = CLIResponse.failure(error) }
                         let result = response
+                        let replyWorkspace = server?.workspace
                         DispatchQueue.global(qos: .utility).async {
                             defer { close(client) }
-                            try? CLITransport.write(result, to: client)
+                            do {
+                                try CLITransport.write(result, to: client)
+                                if result.error == nil, request.command == "pane.close", result.status == "closed" {
+                                    Task { @MainActor [weak replyWorkspace] in replyWorkspace?.finishCLIReply(requestID: result.requestID) }
+                                }
+                            } catch {
+                                // The operation may already be complete. Its retry ID
+                                // remains journaled; never repeat it on write failure.
+                            }
                         }
                     }
                 } catch {
                     try? CLITransport.write(
-                        CLIResponse(error: error.localizedDescription), to: client)
+                        CLIResponse.failure(error), to: client)
                     close(client)
                 }
             }
