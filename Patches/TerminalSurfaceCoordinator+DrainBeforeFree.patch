@@ -1,0 +1,37 @@
+--- a/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift
++++ b/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift
+@@ -605,7 +605,8 @@
+         // unretained receive userdata until `surface.free()` joins it, and
+         // after a backend swap deferred by the zero-size guard this may be
+         // the session's last strong reference. `setFocus(false)` below can
+-        // still queue a focus report for that thread to write.
++        // still queue a focus report for that thread to write. The tick before
++        // the join runs mailbox actions for it, so the session must outlive it.
+         let session = surfaceSession
+         defer { withExtendedLifetime(session) {} }
+         session?.clearSurface(ifMatches: surface?.rawValue)
+@@ -622,9 +623,22 @@
+         bridge.rawSurface = nil
+         bridge.scrollbar = nil
+         let hadSurface = surface != nil
+-        surface?.setFocus(false)
+-        surface?.free()
++        // Detached before the tick below: draining the app mailbox can deliver
++        // a close queued for this very surface, and a re-entrant teardown must
++        // find it already retired instead of freeing it twice.
++        let retiringSurface = surface
+         surface = nil
++        retiringSurface?.setFocus(false)
++        if retiringSurface != nil {
++            // `free()` joins the surface's IO thread. That thread can only
++            // observe its quit request after the app mailbox it pushes into is
++            // drained: with a full mailbox it blocks in the push, the join
++            // never returns, and the whole main thread parks in
++            // "not responding". Empty the mailbox while the surface is
++            // already unreachable from this coordinator.
++            controller?.tick()
++        }
++        retiringSurface?.free()
+         fontSize = nil
+         lastMetrics = nil
+         syncedViewSize = nil

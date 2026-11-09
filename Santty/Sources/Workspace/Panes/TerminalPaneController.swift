@@ -170,7 +170,14 @@ final class TerminalPaneController: NSObject, PaneControlling {
     deinit {
         MainActor.assumeIsolated {
             terminalView.delegate = nil
-            terminalView.controller = nil
+            // Draining the view's controller frees its Ghostty surface, and
+            // that free joins the surface's IO thread without a timeout.
+            // Doing it from the deallocation of the pane that owns the view
+            // parks the main thread whenever the IO thread misses its quit
+            // wakeup: the app stops answering events until it is force quit.
+            // Retire the view on a later runloop turn instead, outside the
+            // release cascade that is running right now.
+            TerminalViewRetirement.retire(terminalView)
         }
     }
 
@@ -665,4 +672,39 @@ enum ProcessWorkingDirectoryResolver {
 extension TerminalPaneController: TerminalSurfaceLifecycleDelegate {
     func terminalDidAttachSurface(_ surface: TerminalSurface) { herdrSession?.surfaceAttached() }
     func terminalDidDetachSurface() { herdrSession?.surfaceDetached() }
+}
+
+/// Tears a terminal surface down after the pane graph that owned it has
+/// finished releasing.
+///
+/// Setting `controller` to nil re-enters the surface coordinator, which calls
+/// `ghostty_surface_free`; that call joins the surface's IO thread and cannot
+/// be interrupted. Releasing a pane happens inside layout, responder changes
+/// and workspace switches, so the join must not run there: one missed wakeup
+/// leaves the main thread blocked indefinitely. Views are held until the next
+/// runloop turn, which keeps the surface valid until then.
+@MainActor
+private enum TerminalViewRetirement {
+    private static var pending: [TerminalView] = []
+    private static var isDraining = false
+
+    static func retire(_ view: TerminalView) {
+        guard view.controller != nil else { return }
+        pending.append(view)
+        guard !isDraining else { return }
+        isDraining = true
+        DispatchQueue.main.async {
+            isDraining = false
+            drain()
+        }
+    }
+
+    private static func drain() {
+        let views = pending
+        pending.removeAll()
+        for view in views {
+            view.delegate = nil
+            view.controller = nil
+        }
+    }
 }

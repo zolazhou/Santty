@@ -1,0 +1,17 @@
+--- a/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift
++++ b/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift
+@@ -132,7 +132,13 @@
+         maximum: 120,
+         preferred: 120,
+     )
+-    private static let idleFramesBeforeRelease = 30
++    /// Frames to skip before the link is dropped. Pausing is what allows the
++    /// system CVDisplayLink to be released, so leaving within a quarter second
++    /// of quiet output tears one down and builds another on the next burst —
++    /// thread and mach port churn the user pays for while agents stream. Two
++    /// seconds of grace keeps one link across a burst and still costs nothing
++    /// on a terminal that has gone quiet.
++    private static let idleFramesBeforeRelease = 240
+ 
+     init() {
+         bridge.onCellSizeChange = { [weak self] width, height in

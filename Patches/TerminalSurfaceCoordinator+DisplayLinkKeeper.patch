@@ -1,0 +1,72 @@
+--- a/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift
++++ b/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift
+@@ -127,7 +127,7 @@
+     /// go to 120.
+     private var displayLink: DisplayLink?
+     private var idleFrameCount = 0
+-    private static let displayLinkFrameRateRange = DisplayLinkFrameRateRange(
++    static let displayLinkFrameRateRange = DisplayLinkFrameRateRange(
+         minimum: 60,
+         maximum: 120,
+         preferred: 120,
+@@ -537,6 +537,7 @@
+             }
+             return
+         }
++        TerminalDisplayLinkKeeper.noteActivity()
+         idleFrameCount = 0
+         pendingImmediateTick = false
+         TerminalDebugLog.log(.render, "tick")
+@@ -728,5 +729,52 @@
+ extension TerminalSurfaceCoordinator: DisplayLinkDelegate {
+     func displayLink(_: DisplayLink, didUpdate _: DisplayLinkFrame) {
+         tick()
++    }
++}
++
++// MARK: - Display Link Keep-Alive
++
++/// Keeps the platform display link alive between bursts of output.
++///
++/// A shared system link only exists while it has subscribers. Pausing the last
++/// surface — which happens a moment after output stops — destroys it, and the
++/// next burst builds a new `CVDisplayLink` thread with its own mach ports. On a
++/// terminal running agents that cycle repeats for the life of the app, parking
++/// short-lived threads and leaking ports at display speed. One subscriber with
++/// no work holds the link open; the keeper gives it back after a minute of
++/// quiet so an idle app still parks. This covers the primary display's link,
++/// which is the one `.main` and same-screen views resolve to.
++@MainActor
++enum TerminalDisplayLinkKeeper {
++    private static let idleTimeout: TimeInterval = 60
++    /// Frame ticks are frequent; only rearm the timer occasionally.
++    private static let rearmInterval: TimeInterval = 10
++    private static var link: DisplayLink?
++    private static var idleTimer: Timer?
++    private static var lastRearm: TimeInterval = 0
++
++    /// Called when a surface actually renders a frame.
++    static func noteActivity() {
++        if link == nil {
++            // No delegate: subscribing is the entire job.
++            link = DisplayLink(
++                context: .main,
++                preferredFrameRateRange: TerminalSurfaceCoordinator.displayLinkFrameRateRange,
++            )
++        }
++        let now = Date.timeIntervalSinceReferenceDate
++        guard now - lastRearm > rearmInterval else { return }
++        lastRearm = now
++        idleTimer?.invalidate()
++        idleTimer = Timer.scheduledTimer(withTimeInterval: idleTimeout, repeats: false) { _ in
++            MainActor.assumeIsolated { release() }
++        }
+     }
++
++    private static func release() {
++        idleTimer?.invalidate()
++        idleTimer = nil
++        lastRearm = 0
++        link = nil
++    }
+ }

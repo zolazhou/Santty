@@ -30,6 +30,15 @@ cp "$repo_dir/Patches/TerminalSurface+ScrollMode.swift" \
 if ! grep -q 'Santty retains detached panes' "$package_dir/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift"; then
     patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/TerminalSurfaceCoordinator+DetachedWakeups.patch"
 fi
+if ! grep -q 'retiringSurface' "$package_dir/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift"; then
+    patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/TerminalSurfaceCoordinator+DrainBeforeFree.patch"
+fi
+if ! grep -q 'idleFramesBeforeRelease = 240' "$package_dir/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift"; then
+    patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/TerminalSurfaceCoordinator+DisplayLinkLinger.patch"
+fi
+if ! grep -q 'enum TerminalDisplayLinkKeeper' "$package_dir/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift"; then
+    patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/TerminalSurfaceCoordinator+DisplayLinkKeeper.patch"
+fi
 if ! grep -q 'core.setWindowVisible(window?.occlusionState' "$package_dir/Sources/GhosttyTerminal/Platform/AppKit/AppTerminalView+Lifecycle.swift"; then
     patch -s -d "$package_dir" -p1 < "$repo_dir/Patches/AppTerminalView+Occlusion.patch"
 fi
