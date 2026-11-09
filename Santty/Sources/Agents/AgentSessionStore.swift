@@ -4,11 +4,19 @@ enum AgentSessionDisplayState: Equatable {
     case running, turnCompleted, waitingForUser, idle, failed, unknown, sessionEnded
 }
 
+/// Where an agent lives: the name of its pane (row title) and the
+/// workspace › tab breadcrumb shown beneath it.
+struct AgentTerminalContext: Equatable {
+    let paneName: String?
+    let location: String
+}
+
 struct AgentSessionSnapshot: Equatable, Identifiable {
     let id: String
     let agent: AgentKind
     let displayState: AgentSessionDisplayState
     let paneTitle: String
+    let location: String
     let workingDirectory: String?
     let message: String?
     let lastEventAt: Date
@@ -24,7 +32,7 @@ struct AgentMessage: Equatable, Identifiable {
     let agent: AgentKind
     let title: String
     let body: String?
-    let context: String
+    let context: AgentTerminalContext
     let timestamp: Date
     var isUnread: Bool
     let binding: HerdrTerminalBinding
@@ -54,7 +62,7 @@ final class AgentSessionStore {
     private(set) var messages: [AgentMessage] = []
     var onNotification: ((AgentMessage) -> Void)?
     var isTargetVisible: ((HerdrTerminalBinding) -> Bool)?
-    var context: ((HerdrTerminalBinding) -> String?)?
+    var context: ((HerdrTerminalBinding) -> AgentTerminalContext?)?
 
     static func key(_ binding: HerdrTerminalBinding) -> String { binding.coreID + "/" + binding.address }
     private func key(_ binding: HerdrTerminalBinding, _ record: String) -> String {
@@ -72,21 +80,26 @@ final class AgentSessionStore {
     }
     var messageSnapshots: [AgentSessionSnapshot] {
         messages.reversed().map { message in
-            .init(id: message.id, agent: message.agent, displayState: message.state,
-                  paneTitle: context?(message.binding) ?? message.context, workingDirectory: nil,
-                  message: [message.title, message.body].compactMap { $0 }.joined(separator: ": "),
-                  lastEventAt: message.timestamp, isUnread: message.isUnread,
-                  backendStatusAvailable: records[message.recordID]?.available == true,
-                  binding: message.binding, revision: message.revision, recordID: message.recordID)
+            let live = context?(message.binding)
+            return .init(
+                id: message.id, agent: message.agent, displayState: message.state,
+                paneTitle: live?.paneName ?? message.context.paneName ?? message.context.location,
+                location: live?.location ?? message.context.location, workingDirectory: nil,
+                message: [message.title, message.body].compactMap { $0 }.joined(separator: ": "),
+                lastEventAt: message.timestamp, isUnread: message.isUnread,
+                backendStatusAvailable: records[message.recordID]?.available == true,
+                binding: message.binding, revision: message.revision, recordID: message.recordID)
         }
     }
     var unreadCount: Int { messages.filter(\.isUnread).count }
 
     private func snapshot(_ id: String, _ record: Record) -> AgentSessionSnapshot {
-        .init(id: id, agent: record.agent, displayState: record.state,
-              paneTitle: context?(record.binding) ?? record.title, workingDirectory: record.cwd,
-              message: record.message, lastEventAt: record.updated, isUnread: record.unread,
-              backendStatusAvailable: record.available, binding: record.binding, revision: record.revision)
+        let live = context?(record.binding)
+        return .init(id: id, agent: record.agent, displayState: record.state,
+                     paneTitle: live?.paneName ?? record.title, location: live?.location ?? "",
+                     workingDirectory: record.cwd,
+                     message: record.message, lastEventAt: record.updated, isUnread: record.unread,
+                     backendStatusAvailable: record.available, binding: record.binding, revision: record.revision)
     }
 
     func replaceSnapshot(_ terminals: [(HerdrTerminalBinding, HerdrCoreTerminal)], now: Date = Date()) {
@@ -145,7 +158,8 @@ final class AgentSessionStore {
                     let verb = status.state == "done" ? "finished" : status.state == "error" ? "reported an error" : "needs attention"
                     let message = AgentMessage(id: UUID().uuidString, agent: record.agent,
                         title: record.agent.displayName + " " + verb, body: record.message,
-                        context: context?(binding) ?? title, timestamp: now, isUnread: true,
+                        context: context?(binding) ?? AgentTerminalContext(paneName: nil, location: title),
+                        timestamp: now, isUnread: true,
                         binding: binding, recordID: id, revision: record.revision, state: state)
                     record.unread = true
                     record.state = state

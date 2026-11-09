@@ -316,9 +316,10 @@ private final class AgentManagerRowView: NSControl {
     private let openButton = NSButton()
     let messagesButton = NSButton()
     private let iconView = NSImageView()
-    private let agentLabel = NSTextField(labelWithString: "")
+    private let titleLabel = NSTextField(labelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
+    private let metaLabel = NSTextField(labelWithString: "")
     private let messageLabel = NSTextField(labelWithString: "")
     private let dotView = NSView()
 
@@ -350,7 +351,7 @@ private final class AgentManagerRowView: NSControl {
         let textX: CGFloat = 36
         let rightPadding: CGFloat = 10
         let statusWidth = min(150, max(0, bounds.width - textX - rightPadding) * 0.55, statusLabel.intrinsicContentSize.width + 4)
-        agentLabel.frame = NSRect(
+        titleLabel.frame = NSRect(
             x: textX,
             y: 8,
             width: max(0, bounds.width - textX - statusWidth - rightPadding - 20),
@@ -363,10 +364,17 @@ private final class AgentManagerRowView: NSControl {
             height: 18
         )
         dotView.frame = NSRect(x: statusLabel.frame.minX - 12, y: 14, width: 8, height: 8)
+        let metaWidth = min(190, max(0, bounds.width - textX - rightPadding) * 0.45, metaLabel.intrinsicContentSize.width + 12)
+        metaLabel.frame = NSRect(
+            x: bounds.maxX - rightPadding - metaWidth,
+            y: 29,
+            width: metaWidth,
+            height: 16
+        )
         detailLabel.frame = NSRect(
             x: textX,
             y: 29,
-            width: max(0, bounds.width - textX - rightPadding),
+            width: max(0, bounds.maxX - rightPadding - metaWidth - 10 - textX),
             height: 16
         )
         messagesButton.frame = NSRect(x: max(0, bounds.maxX - 54), y: 44, width: 44, height: 24)
@@ -407,9 +415,10 @@ private final class AgentManagerRowView: NSControl {
         iconView.setAccessibilityElement(false)
         addSubview(iconView)
         addSubview(dotView)
-        addSubview(agentLabel)
+        addSubview(titleLabel)
         addSubview(statusLabel)
         addSubview(detailLabel)
+        addSubview(metaLabel)
         addSubview(messageLabel)
         addSubview(messagesButton)
         openButton.isBordered = false
@@ -425,17 +434,19 @@ private final class AgentManagerRowView: NSControl {
         messagesButton.controlSize = .small
         messagesButton.setButtonType(.momentaryPushIn)
 
-        for label in [agentLabel, statusLabel, detailLabel, messageLabel] {
+        for label in [titleLabel, statusLabel, detailLabel, metaLabel, messageLabel] {
             label.backgroundColor = .clear
             label.isBordered = false
             label.isEditable = false
             label.isSelectable = false
             label.lineBreakMode = .byTruncatingTail
         }
-        agentLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         statusLabel.font = .systemFont(ofSize: 11, weight: .medium)
         statusLabel.alignment = .right
         detailLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        metaLabel.font = .systemFont(ofSize: 11, weight: .regular)
+        metaLabel.alignment = .right
         messageLabel.font = .systemFont(ofSize: 11, weight: .regular)
         dotView.wantsLayer = true
     }
@@ -457,12 +468,18 @@ private final class AgentManagerRowView: NSControl {
     private func updateContent() {
         iconView.image = session.agent.brandIcon?.image() ?? NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
         iconView.contentTintColor = iconView.image?.isTemplate == true ? ListPaneStyle.primaryTextColor : nil
-        agentLabel.stringValue = session.agent.displayName
+        iconView.toolTip = session.agent.displayName
+        titleLabel.stringValue = session.paneTitle
+        titleLabel.toolTip = session.paneTitle
         statusLabel.stringValue = session.statusText
-        detailLabel.stringValue = session.detailText
-        setAccessibilityLabel("\(session.agent.displayName), \(session.statusText), \(session.detailText)")
-        openButton.setAccessibilityLabel("\(session.agent.displayName), \(session.statusText), \(session.detailText)")
-        openButton.setAccessibilityTitle("\(session.agent.displayName), \(session.statusText), \(session.detailText)")
+        detailLabel.stringValue = session.location
+        detailLabel.isHidden = session.location.isEmpty
+        metaLabel.stringValue = session.metaText
+        let accessibleText = [session.agent.displayName, session.statusText, session.paneTitle, session.location]
+            .filter { !$0.isEmpty }.joined(separator: ", ")
+        setAccessibilityLabel(accessibleText)
+        openButton.setAccessibilityLabel(accessibleText)
+        openButton.setAccessibilityTitle(accessibleText)
         setAccessibilityRole(.group)
         setAccessibilityElement(true)
         setAccessibilityChildren([openButton, messagesButton])
@@ -485,8 +502,9 @@ private final class AgentManagerRowView: NSControl {
             isSelected
             ? ListPaneStyle.selectedRowBackgroundColor.cgColor
             : ListPaneStyle.rowBackgroundColor.cgColor
-        agentLabel.textColor = ListPaneStyle.primaryTextColor
+        titleLabel.textColor = ListPaneStyle.primaryTextColor
         detailLabel.textColor = ListPaneStyle.secondaryTextColor
+        metaLabel.textColor = ListPaneStyle.tertiaryTextColor
         messageLabel.textColor = ListPaneStyle.tertiaryTextColor
         statusLabel.textColor = session.statusColor
         dotView.layer?.backgroundColor = session.statusColor.cgColor
@@ -518,9 +536,8 @@ extension AgentSessionSnapshot {
         return isUnread && displayState == .running ? "\(baseText) · unread" : baseText
     }
 
-    fileprivate var detailText: String {
+    fileprivate var metaText: String {
         [
-            paneTitle,
             workingDirectory.map(lastPathComponent),
             relativeTimeString(from: lastEventAt),
         ].compactMap { $0 }.joined(separator: " · ")
@@ -529,6 +546,8 @@ extension AgentSessionSnapshot {
     fileprivate var statusColor: NSColor {
         guard backendStatusAvailable else { return ListPaneStyle.secondaryTextColor }
         return switch displayState {
+        case .running:
+            .systemRed
         case .waitingForUser:
             .systemOrange
         case .failed:

@@ -449,7 +449,8 @@ final class HerdrWorkspaceTests: XCTestCase {
         XCTAssertTrue(sidebarTerminal.sendKey(.enter))
         try await waitFor { sidebarTerminal.readScreenText()?.contains("SIDEBAR-CORE-OK") == true }
         try await waitFor { client.agents.messages.contains { $0.binding == sidebarBinding && $0.body == "Sidebar ready" } }
-        XCTAssertEqual(client.agents.context?(sidebarBinding), "Sidebar › Sidebar shell")
+        XCTAssertEqual(client.agents.context?(sidebarBinding)?.paneName, "Sidebar shell")
+        XCTAssertEqual(client.agents.context?(sidebarBinding)?.location, "Sidebar")
         workspace!.newTerminalPane(nil)
         let sidebarSplitID = try XCTUnwrap(workspace!.debugSidebarFocusedPaneID)
         let sidebarSplit = try XCTUnwrap(workspace!.debugSidebarPane(sidebarSplitID) as? TerminalPaneController)

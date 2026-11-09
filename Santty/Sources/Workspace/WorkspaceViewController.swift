@@ -3240,13 +3240,17 @@ extension WorkspaceViewController {
         return nil
     }
 
-    private func agentContext(_ binding: HerdrTerminalBinding) -> String? {
+    private func agentContext(_ binding: HerdrTerminalBinding) -> AgentTerminalContext? {
         if let (workspaceID, tab, pane) = agentLocation(binding), let workspace = localWorkspaceStates.first(where: { $0.id == workspaceID }) {
-            if tab === sidebar.tab { return "Sidebar › " + (pane.name ?? pane.displayTitle) }
-            return [workspace.name, tab.displayTitle, pane.name ?? pane.displayTitle].joined(separator: " › ")
+            let paneName = pane.name ?? pane.displayTitle
+            if tab === sidebar.tab { return AgentTerminalContext(paneName: paneName, location: "Sidebar") }
+            return AgentTerminalContext(
+                paneName: paneName,
+                location: [workspace.name, tab.displayTitle].joined(separator: " › ")
+            )
         }
         let machine = binding.remote == true ? herdrCoreClient.machines.first { $0.id == binding.coreID }?.name ?? "Remote" : "Local herdr-core"
-        return machine + " › " + binding.address
+        return AgentTerminalContext(paneName: nil, location: machine + " › " + binding.address)
     }
 
     private func agentIsVisible(_ binding: HerdrTerminalBinding) -> Bool {
@@ -4096,7 +4100,7 @@ extension WorkspaceViewController {
         var items: [AppCommand] = herdrCoreClient.agents.snapshots.map { session in
             AppCommand(id: "navigate.Agents." + session.id, title: session.agent.displayName,
                 shortcut: nil, isEnabled: !isClosingWindow, kind: .agent,
-                subtitle: [session.paneTitle, session.statusText, session.message].compactMap { $0 }.joined(separator: " · "),
+                subtitle: [session.paneTitle, session.location, session.statusText, session.message].compactMap { $0 }.joined(separator: " · "),
                 symbol: "sparkles", brandIcon: session.agent.brandIcon,
                 perform: { [weak self] in self?.navigateToAgent(session.binding) })
         }

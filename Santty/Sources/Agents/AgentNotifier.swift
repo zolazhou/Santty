@@ -28,7 +28,9 @@ final class AgentNotifier: NSObject, UNUserNotificationCenterDelegate {
         guard let target = try? JSONEncoder().encode(message.binding).base64EncodedString() else { return nil }
         let content = UNMutableNotificationContent()
         content.title = shortened(message.title)
-        content.body = shortened([message.context, message.body].compactMap { $0 }.joined(separator: ": "))
+        let contextText = [message.context.location, message.context.paneName].compactMap { $0 }
+            .filter { !$0.isEmpty }.joined(separator: " › ")
+        content.body = shortened([contextText.isEmpty ? nil : contextText, message.body].compactMap { $0 }.joined(separator: ": "))
         content.sound = .default
         content.userInfo = ["herdrTarget": target]
         return UNNotificationRequest(identifier: "herdr.agent." + message.id, content: content, trigger: nil)
