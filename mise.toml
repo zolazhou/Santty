@@ -66,6 +66,19 @@ EOF
 xcodebuild -exportArchive -archivePath build/Santty.xcarchive -exportPath build/export -exportOptionsPlist build/ExportOptions.plist
 '''
 
+[tasks."release:install"]
+description = "Build, export, and install Santty.app into /Applications"
+depends = ["release:export"]
+run = '''
+set -eu
+INSTALL_DIR="$(mktemp -d /Applications/.santty-install.XXXXXX)"
+trap 'rm -rf "$INSTALL_DIR"' EXIT
+ditto build/export/Santty.app "$INSTALL_DIR/Santty.app"
+rm -rf /Applications/Santty.app
+mv "$INSTALL_DIR/Santty.app" /Applications/Santty.app
+echo "Installed /Applications/Santty.app"
+'''
+
 [tasks."release:notarize"]
 description = "Notarize the exported app with Apple and staple the ticket"
 depends = ["release:export"]

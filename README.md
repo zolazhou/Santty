@@ -183,6 +183,16 @@ mise run release:zip
 mise run sparkle:generate-appcast
 ```
 
+To build, export, and install locally (without notarization or packaging), quit
+Santty first, then run:
+
+```sh
+mise run release:install
+```
+
+This replaces `/Applications/Santty.app` with the Developer ID–signed Release
+build and does not launch it. It requires write access to `/Applications`.
+
 The packaged artifacts will be:
 
 ```text
