@@ -22,7 +22,7 @@ import Foundation
 let probeTimeout: Float = 1.0
 let hangThreshold: TimeInterval = 1.0
 let pollInterval: TimeInterval = 0.5
-let reportCooldown: TimeInterval = 20
+let reportCooldown: TimeInterval = 300
 let outputDirectory = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Logs/SanttyHangs", isDirectory: true)
 
@@ -75,6 +75,7 @@ func isAlive(_ pid: pid_t) -> Bool {
     kill(pid, 0) == 0
 }
 
+/// Cool-down between captures: one stuck process should not fill the disk.
 /// A responsive app answers in well under a millisecond. A hung one lets the
 /// request sit until `probeTimeout`, so the reported time is the *timeout*, not
 /// the stall length — compare against a threshold far below it, and treat the

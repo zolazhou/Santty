@@ -1,0 +1,168 @@
+--- a/Sources/GhosttyTerminal/Controller/TerminalController.swift
++++ b/Sources/GhosttyTerminal/Controller/TerminalController.swift
+@@ -66,12 +66,54 @@
+     private var wakeupObservers: [ObjectIdentifier: WakeupObserver] = [:]
+     nonisolated let wakeupGate = TerminalWakeupGate()
+ 
++    /// After system sleep the display server and CoreVideo settle on their own
++    /// schedule. A renderer shutting its CVDisplayLink down in that window holds
++    /// the surface lock, and every main-thread call into that surface waits on
++    /// it forever — no surface call and no app tick can be allowed through until
++    /// the system is done.
++    private static let wakeGraceInterval: TimeInterval = 2.5
++    private var wakeGraceWork: DispatchWorkItem?
++    private var wakeObserver: NSObjectProtocol?
++
++    var isInWakeGrace: Bool { wakeGraceWork != nil }
++
+     func addWakeupObserver(
+         _ key: ObjectIdentifier,
+         shouldProcess: @escaping () -> Bool,
+         onWakeup: @escaping () -> Void,
+     ) {
+         wakeupObservers[key] = WakeupObserver(shouldProcess: shouldProcess, onWakeup: onWakeup)
++        observeSystemWakeIfNeeded()
++    }
++
++    #if canImport(AppKit)
++        private func observeSystemWakeIfNeeded() {
++            guard wakeObserver == nil else { return }
++            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
++                forName: NSWorkspace.screensDidWakeNotification,
++                object: nil,
++                queue: .main,
++            ) { [weak self] _ in
++                MainActor.assumeIsolated { self?.beginWakeGrace() }
++            }
++        }
++    #else
++        private func observeSystemWakeIfNeeded() {}
++    #endif
++
++    private func beginWakeGrace() {
++        wakeGraceWork?.cancel()
++        TerminalDebugLog.log(.lifecycle, "wake grace start")
++        let work = DispatchWorkItem { [weak self] in
++            MainActor.assumeIsolated {
++                guard let self else { return }
++                self.wakeGraceWork = nil
++                TerminalDebugLog.log(.lifecycle, "wake grace end")
++                self.handleWakeup()
++            }
++        }
++        wakeGraceWork = work
++        DispatchQueue.main.asyncAfter(deadline: .now() + Self.wakeGraceInterval, execute: work)
+     }
+ 
+     func removeWakeupObserver(_ key: ObjectIdentifier) {
+@@ -335,11 +377,16 @@
+     // MARK: - Tick
+ 
+     public func tick() {
++        guard !isInWakeGrace else { return }
+         guard let app else { return }
+         ghostty_app_tick(app)
+     }
+ 
+     func handleWakeup() {
++        guard !isInWakeGrace else {
++            TerminalDebugLog.log(.lifecycle, "wakeup held after wake")
++            return
++        }
+         let observers = Array(wakeupObservers.values)
+         // One detached surface must not stop the tick for the others.
+         guard observers.isEmpty || observers.contains(where: { $0.shouldProcess() }) else {
+@@ -362,6 +409,9 @@
+     }
+ 
+     deinit {
++        // The wake observer holds only a weak reference and the controller
++        // outlives every surface, so it is left registered rather than touched
++        // from a nonisolated deinit.
+         if let app {
+             ghostty_app_free(app)
+         }
+--- a/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift
++++ b/Sources/GhosttyTerminal/Surface/TerminalSurfaceCoordinator.swift
+@@ -127,6 +127,13 @@
+     /// go to 120.
+     private var displayLink: DisplayLink?
+     private var idleFrameCount = 0
++    /// Focus asked for while the system was still settling after wake.
++    private var deferredFocusDuringWake: Bool?
++
++    /// No surface call may cross the post-wake grace window: a renderer that is
++    /// shutting its display link down holds the surface lock, and the call
++    /// would never return.
++    private var isInWakeGrace: Bool { controller?.isInWakeGrace == true }
+     private static let displayLinkFrameRateRange = DisplayLinkFrameRateRange(
+         minimum: 60,
+         maximum: 120,
+@@ -248,7 +255,14 @@
+                 return isApplicationActive
+             },
+             onWakeup: { [weak self] in
+-                self?.requestImmediateTick()
++                guard let self else { return }
++                if let deferred = deferredFocusDuringWake {
++                    deferredFocusDuringWake = nil
++                    setFocus(deferred)
++                }
++                surface?.setOcclusion(effectiveSurfaceVisible)
++                synchronizeMetrics()
++                requestImmediateTick()
+             },
+         )
+         TerminalDebugLog.log(.lifecycle, "surface rebuild succeeded")
+@@ -313,6 +327,7 @@
+     private var pendingRebuild = false
+ 
+     func synchronizeMetrics() {
++        if isInWakeGrace { return }
+         // Redeem a rebuild the zero-size guard deferred. Every caller that
+         // could restore a usable size lands here, so this is the one place
+         // that reliably observes the transition.
+@@ -469,6 +484,10 @@
+     }
+ 
+     func setDisplayVisible(_ visible: Bool) {
++        guard !isInWakeGrace else {
++            isDisplayVisible = visible
++            return
++        }
+         guard isDisplayVisible != visible else {
+             surface?.setOcclusion(effectiveSurfaceVisible)
+             return
+@@ -485,6 +504,10 @@
+     }
+ 
+     func setWindowVisible(_ visible: Bool) {
++        guard !isInWakeGrace else {
++            isWindowVisible = visible
++            return
++        }
+         guard isWindowVisible != visible else { return }
+ 
+         isWindowVisible = visible
+@@ -526,6 +549,10 @@
+     // MARK: - Frame Rendering
+ 
+     func tick() {
++        if isInWakeGrace {
++            releaseDisplayLink()
++            return
++        }
+         guard canRenderFrame else {
+             releaseDisplayLink()
+             return
+@@ -549,6 +576,10 @@
+     // MARK: - Focus
+ 
+     func setFocus(_ focused: Bool) {
++        if isInWakeGrace {
++            deferredFocusDuringWake = focused
++            return
++        }
+         requestImmediateTick()
+         TerminalDebugLog.log(.lifecycle, "focus=\(focused)")
+         surface?.setFocus(focused)
