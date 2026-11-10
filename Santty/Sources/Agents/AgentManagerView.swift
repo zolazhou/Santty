@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 
 @MainActor
 final class AgentManagerView: NSView, NSPopoverDelegate {
@@ -317,11 +318,10 @@ private final class AgentManagerRowView: NSControl {
     let messagesButton = NSButton()
     private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
-    private let statusLabel = NSTextField(labelWithString: "")
+    private let statusBadge = AgentStatusBadgeView()
     private let detailLabel = NSTextField(labelWithString: "")
     private let metaLabel = NSTextField(labelWithString: "")
     private let messageLabel = NSTextField(labelWithString: "")
-    private let dotView = NSView()
 
     override var isFlipped: Bool { true }
 
@@ -346,24 +346,22 @@ private final class AgentManagerRowView: NSControl {
         super.layout()
         openButton.frame = bounds
         iconView.frame = NSRect(x: 10, y: 8, width: 18, height: 18)
-        dotView.layer?.cornerRadius = 4
-
         let textX: CGFloat = 36
         let rightPadding: CGFloat = 10
-        let statusWidth = min(150, max(0, bounds.width - textX - rightPadding) * 0.55, statusLabel.intrinsicContentSize.width + 4)
+        let messagesWidth: CGFloat = messagesButton.isHidden ? 0 : messagesButton.intrinsicContentSize.width
+        let statusWidth = min(max(0, bounds.width - rightPadding * 2), statusBadge.intrinsicContentSize.width)
         titleLabel.frame = NSRect(
             x: textX,
             y: 8,
-            width: max(0, bounds.width - textX - statusWidth - rightPadding - 20),
+            width: max(0, bounds.width - textX - rightPadding),
             height: 18
         )
-        statusLabel.frame = NSRect(
+        statusBadge.frame = NSRect(
             x: bounds.maxX - rightPadding - statusWidth,
-            y: 8,
+            y: 46,
             width: statusWidth,
-            height: 18
+            height: 22
         )
-        dotView.frame = NSRect(x: statusLabel.frame.minX - 12, y: 14, width: 8, height: 8)
         let metaWidth = min(190, max(0, bounds.width - textX - rightPadding) * 0.45, metaLabel.intrinsicContentSize.width + 12)
         metaLabel.frame = NSRect(
             x: bounds.maxX - rightPadding - metaWidth,
@@ -377,13 +375,11 @@ private final class AgentManagerRowView: NSControl {
             width: max(0, bounds.maxX - rightPadding - metaWidth - 10 - textX),
             height: 16
         )
-        messagesButton.frame = NSRect(x: max(0, bounds.maxX - 54), y: 44, width: 44, height: 24)
-        messageLabel.frame = NSRect(
-            x: textX,
-            y: 49,
-            width: max(0, bounds.width - textX - rightPadding - (messagesButton.isHidden ? 0 : 50)),
-            height: 16
-        )
+        messagesButton.frame = NSRect(x: textX, y: 45, width: messagesWidth, height: 24)
+        let messageX = messagesButton.isHidden ? textX : messagesButton.frame.maxX + 8
+        let messageWidth = max(0, statusBadge.frame.minX - 8 - messageX)
+        messageLabel.frame = NSRect(x: messageX, y: 49, width: messageWidth, height: 16)
+        messageLabel.isHidden = session.message == nil || messageWidth == 0
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -414,9 +410,8 @@ private final class AgentManagerRowView: NSControl {
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.setAccessibilityElement(false)
         addSubview(iconView)
-        addSubview(dotView)
+        addSubview(statusBadge)
         addSubview(titleLabel)
-        addSubview(statusLabel)
         addSubview(detailLabel)
         addSubview(metaLabel)
         addSubview(messageLabel)
@@ -427,14 +422,17 @@ private final class AgentManagerRowView: NSControl {
         openButton.setAccessibilityRole(.button)
         openButton.target = self
         openButton.action = #selector(openSession)
-        addSubview(openButton, positioned: .below, relativeTo: dotView)
+        addSubview(openButton, positioned: .below, relativeTo: statusBadge)
         messagesButton.image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: nil)
         messagesButton.imagePosition = .imageLeading
-        messagesButton.bezelStyle = .rounded
+        messagesButton.imageHugsTitle = true
+        messagesButton.alignment = .left
+        messagesButton.font = .systemFont(ofSize: 11)
+        messagesButton.isBordered = false
         messagesButton.controlSize = .small
         messagesButton.setButtonType(.momentaryPushIn)
 
-        for label in [titleLabel, statusLabel, detailLabel, metaLabel, messageLabel] {
+        for label in [titleLabel, detailLabel, metaLabel, messageLabel] {
             label.backgroundColor = .clear
             label.isBordered = false
             label.isEditable = false
@@ -442,13 +440,10 @@ private final class AgentManagerRowView: NSControl {
             label.lineBreakMode = .byTruncatingTail
         }
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        statusLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        statusLabel.alignment = .right
         detailLabel.font = .systemFont(ofSize: 11, weight: .regular)
         metaLabel.font = .systemFont(ofSize: 11, weight: .regular)
         metaLabel.alignment = .right
         messageLabel.font = .systemFont(ofSize: 11, weight: .regular)
-        dotView.wantsLayer = true
     }
 
     func update(session: AgentSessionSnapshot, messageCount: Int, unreadCount: Int, showsMessagesButton: Bool) {
@@ -471,7 +466,6 @@ private final class AgentManagerRowView: NSControl {
         iconView.toolTip = session.agent.displayName
         titleLabel.stringValue = session.paneTitle
         titleLabel.toolTip = session.paneTitle
-        statusLabel.stringValue = session.statusText
         detailLabel.stringValue = session.location
         detailLabel.isHidden = session.location.isEmpty
         metaLabel.stringValue = session.metaText
@@ -497,17 +491,88 @@ private final class AgentManagerRowView: NSControl {
         _ = accessibilityPerformPress()
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateAppearance()
+    }
+
     private func updateAppearance() {
-        layer?.backgroundColor =
-            isSelected
-            ? ListPaneStyle.selectedRowBackgroundColor.cgColor
-            : ListPaneStyle.rowBackgroundColor.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor =
+                isSelected
+                ? ListPaneStyle.selectedRowBackgroundColor.cgColor
+                : ListPaneStyle.rowBackgroundColor.cgColor
+        }
         titleLabel.textColor = ListPaneStyle.primaryTextColor
         detailLabel.textColor = ListPaneStyle.secondaryTextColor
         metaLabel.textColor = ListPaneStyle.tertiaryTextColor
         messageLabel.textColor = ListPaneStyle.tertiaryTextColor
-        statusLabel.textColor = session.statusColor
-        dotView.layer?.backgroundColor = session.statusColor.cgColor
+        statusBadge.update(text: session.statusText, color: session.statusColor)
+    }
+}
+
+/// Draw text and dot in one unflipped coordinate system, without NSTextField cell insets.
+@MainActor
+final class AgentStatusBadgeView: NSView {
+    private let font = NSFont.systemFont(ofSize: 11, weight: .medium)
+    private var line: CTLine?
+    private(set) var text = ""
+    private(set) var color: NSColor = .secondaryLabelColor
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) { nil }
+
+    override var intrinsicContentSize: NSSize {
+        let textWidth = line.map { CTLineGetTypographicBounds($0, nil, nil, nil) } ?? 0
+        return NSSize(width: ceil(textWidth) + 27, height: 22)
+    }
+
+    func update(text: String, color: NSColor) {
+        if self.text != text {
+            self.text = text
+            line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: [
+                .font: font,
+                NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String): true,
+            ]))
+            invalidateIntrinsicContentSize()
+        }
+        self.color = color
+        toolTip = text
+        updateBackground()
+        needsDisplay = true
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateBackground()
+        needsDisplay = true
+    }
+
+    private func updateBackground() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = color.withAlphaComponent(0.12).cgColor
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let line, let context = NSGraphicsContext.current?.cgContext else { return }
+        context.saveGState()
+        defer { context.restoreGState() }
+        context.setFillColor(color.cgColor)
+        context.fillEllipse(in: NSRect(x: 8, y: bounds.midY - 3, width: 6, height: 6))
+        // Center the visible glyphs, including descenders, rather than the font's line box.
+        let inkBounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+        context.textMatrix = .identity
+        context.textPosition = CGPoint(x: 19, y: bounds.midY - inkBounds.midY)
+        CTLineDraw(line, context)
     }
 }
 
@@ -547,7 +612,7 @@ extension AgentSessionSnapshot {
         guard backendStatusAvailable else { return ListPaneStyle.secondaryTextColor }
         return switch displayState {
         case .running:
-            .systemRed
+            .systemBlue
         case .waitingForUser:
             .systemOrange
         case .failed:

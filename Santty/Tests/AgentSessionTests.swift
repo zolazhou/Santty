@@ -155,6 +155,104 @@ final class AgentSessionTests: XCTestCase {
         }
     }
 
+    func testStatusBadgesAlignDotsWithTextAndUseBlueForRunning() throws {
+        let store = AgentSessionStore()
+        store.apply(terminal("working"), binding: binding)
+        let manager = AgentManagerView(sessions: store.snapshots)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 280, height: 240),
+                              styleMask: [], backing: .buffered, defer: false)
+        window.contentView = manager
+        defer { window.contentView = nil }
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+
+        for width: CGFloat in [240, 280, 480] {
+            manager.setFrameSize(NSSize(width: width, height: 240))
+            for state in ["working", "blocked", "done", "error", "idle", "future-state", "unavailable"] {
+                if state == "unavailable" { store.markUnavailable() }
+                else { store.apply(terminal(state), binding: binding) }
+                manager.updateSessions(store.snapshots, messages: store.messageSnapshots)
+                manager.layoutSubtreeIfNeeded()
+                let badge = try XCTUnwrap(descendants(manager).compactMap { $0 as? AgentStatusBadgeView }.first)
+                XCTAssertEqual(badge.text, store.snapshots.first?.statusText)
+                let textWidth = (badge.text as NSString).size(withAttributes: [
+                    .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                ]).width
+                XCTAssertGreaterThanOrEqual(badge.bounds.width, ceil(textWidth) + 27, "Status must fit without truncation")
+                XCTAssertNotNil(badge.layer?.backgroundColor)
+                XCTAssertGreaterThan(badge.layer?.cornerRadius ?? 0, 0)
+                let row = try XCTUnwrap(badge.superview)
+                XCTAssertGreaterThanOrEqual(badge.frame.minX, 0)
+                XCTAssertLessThanOrEqual(badge.frame.maxX, row.bounds.maxX)
+                let title = try XCTUnwrap(row.subviews.compactMap { $0 as? NSTextField }.first)
+                let messages = try XCTUnwrap(row.subviews.compactMap { $0 as? NSButton }
+                    .first { $0.accessibilityIdentifier().hasPrefix("agent.messages.") })
+                XCTAssertEqual(title.frame.maxX, row.bounds.maxX - 10)
+                XCTAssertEqual(messages.frame.minX, title.frame.minX)
+                XCTAssertEqual(messages.frame.midY, badge.frame.midY)
+                XCTAssertLessThanOrEqual(messages.frame.maxX, badge.frame.minX)
+                XCTAssertTrue(messages.imageHugsTitle, "The message icon should sit directly beside the count")
+                XCTAssertEqual(messages.alignment, .left)
+                XCTAssertFalse(messages.isBordered, "Messages should display only the icon and count")
+                XCTAssertGreaterThanOrEqual(badge.frame.minY, 45)
+                XCTAssertLessThanOrEqual(badge.frame.maxY, row.bounds.maxY - 4)
+                let message = try XCTUnwrap(row.subviews.compactMap { $0 as? NSTextField }
+                    .first { $0.stringValue == store.snapshots.first?.message })
+                if !message.isHidden {
+                    XCTAssertGreaterThanOrEqual(message.frame.minX, messages.frame.maxX + 8)
+                    XCTAssertLessThanOrEqual(message.frame.maxX + 8, badge.frame.minX)
+                }
+                if state == "working" { XCTAssertEqual(badge.color, .systemBlue) }
+
+                // Inspect the actual 2x rendered pixels, not the layout's own alignment formula.
+                let pixelsWide = Int(ceil(badge.bounds.width * 2))
+                let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixelsWide, pixelsHigh: 44,
+                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+                let context = try XCTUnwrap(NSGraphicsContext(bitmapImageRep: bitmap))
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = context
+                context.cgContext.clear(CGRect(x: 0, y: 0, width: pixelsWide, height: 44))
+                context.cgContext.scaleBy(x: 2, y: 2)
+                badge.draw(badge.bounds)
+                NSGraphicsContext.restoreGraphicsState()
+                func inkRows(in columns: Range<Int>) -> [Int] {
+                    (0..<44).filter { y in
+                        columns.contains { x in (bitmap.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05 }
+                    }
+                }
+                let dotRows = inkRows(in: 16..<28)
+                let textRows = inkRows(in: 38..<pixelsWide)
+                let dotCenter = CGFloat(try XCTUnwrap(dotRows.first) + XCTUnwrap(dotRows.last)) / 2
+                let textCenter = CGFloat(try XCTUnwrap(textRows.first) + XCTUnwrap(textRows.last)) / 2
+                XCTAssertEqual(dotCenter, textCenter, accuracy: 1, "Rendered dot and text must align within half a point")
+                if width == 280 {
+                    let attachment = XCTAttachment(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])),
+                                                   uniformTypeIdentifier: "public.png")
+                    attachment.name = "Status badge — " + badge.text
+                    attachment.lifetime = .keepAlways
+                    add(attachment)
+                }
+            }
+        }
+    }
+
+    func testMessageListTitlesUseFullWidthWithoutMessagesButton() throws {
+        let store = AgentSessionStore()
+        store.apply(terminal("done"), binding: binding)
+        let manager = AgentManagerView(sessions: store.messageSnapshots, messageListTitle: "Messages")
+        manager.setFrameSize(NSSize(width: 240, height: 240))
+        manager.layoutSubtreeIfNeeded()
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let badge = try XCTUnwrap(descendants(manager).compactMap { $0 as? AgentStatusBadgeView }.first)
+        let row = try XCTUnwrap(badge.superview)
+        let title = try XCTUnwrap(row.subviews.compactMap { $0 as? NSTextField }.first)
+        let messages = try XCTUnwrap(row.subviews.compactMap { $0 as? NSButton }
+            .first { $0.accessibilityIdentifier().hasPrefix("agent.messages.") })
+        XCTAssertTrue(messages.isHidden)
+        XCTAssertEqual(title.frame.maxX, row.bounds.maxX - 10)
+        XCTAssertGreaterThan(badge.frame.minY, title.frame.maxY)
+    }
+
     func testAllAgentTypesNotifyAndTargetsAreValidated() throws {
         let store = AgentSessionStore()
         for app in ["claude", "codex", "opencode"] {
