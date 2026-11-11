@@ -35,6 +35,32 @@ retains them for retry. Closing Santty only detaches viewers. None of these acti
 remove the shared machine connection. Machine setup, SSH login, hc updates and
 core settings remain managed through `hc machine`.
 
+## Shared Workspaces
+
+**Settings → Herdr → Share workspaces with Herdr** (off by default) keeps each
+Herdr workspace's tabs and splits in the core's `herdr-app` document, so the Herdr
+desktop app and phone show the same structure. Turning it on adopts the document's
+structure for Herdr workspaces: tabs or panes only the document has open as
+read-only external viewers, and panes it no longer lists leave the window without
+ending their programs. Local Workspaces and Santty's sidebar are not shared, and
+neither is presentation state (focus, zoom, scroll mode, floating or hidden panes,
+auto-resize, window size).
+
+Changes flow both ways. Tab names, order, splits and terminal membership written
+here are published with the document's revision; edits made in Herdr (including
+from the phone) are adopted here. A tab edited on both sides keeps the shared
+document's version and the loss is reported in the toolbar, never applied silently.
+A tab deleted on one side and untouched on the other is deleted; if the other side
+also changed it, the surviving copy wins and that is reported. A workspace whose
+space is deleted in the document is not re-created from here, and no layout change
+ever ends a program by itself: only closing a pane, tab or workspace does that.
+
+Sharing requires panes Santty can express exactly. Floating or detached panes and
+mixed pane kinds keep that workspace out of the document instead of publishing a
+partial structure. Publishing writes `herdr.space` / `herdr.tab` on the terminals it
+contains and clears them when a terminal leaves the shared structure; other labels
+are untouched.
+
 ## Settings and Diagnostics
 
 **Settings → Herdr** configures the `hc` executable and the history loaded when a

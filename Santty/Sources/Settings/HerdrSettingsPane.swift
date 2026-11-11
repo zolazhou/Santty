@@ -7,6 +7,7 @@ struct HerdrSettingsPane: View {
     var createWorkspace: ((HerdrRemote) -> Bool)?
     @State private var executablePath = HerdrSettings.shared.executablePath ?? ""
     @State private var historyLines = HerdrSettings.shared.historyLines
+    @State private var shareWorkspaces = HerdrSettings.shared.shareWorkspaces
     @State private var isBusy = false
     @State private var message: String?
     @State private var copiedDiagnostics = false
@@ -70,6 +71,16 @@ struct HerdrSettingsPane: View {
             }
 
             Section {
+                Toggle("Share workspaces with Herdr", isOn: $shareWorkspaces)
+                    .accessibilityIdentifier("herdr.shareWorkspaces")
+                    .onChange(of: shareWorkspaces) { _, value in client.settings.shareWorkspaces = value }
+            } header: {
+                Text("Shared Workspaces")
+            } footer: {
+                Text("Keeps each Herdr workspace's tabs and splits in the core document, so the Herdr app and phone show the same structure. Enabling it adopts the shared structure: tabs or panes only the document has become read-only viewers, and panes removed there leave this window without ending their programs. Only structure is shared; focus, zoom, floating panes and window size stay on this Mac.")
+            }
+
+            Section {
                 if client.machines.isEmpty {
                     Text(client.details == nil ? "Check the connection to load machines." : "No machines configured. Add one with hc machine add.")
                         .foregroundStyle(.secondary)
@@ -126,6 +137,7 @@ struct HerdrSettingsPane: View {
         .task {
             executablePath = client.configuredExecutablePath ?? ""
             historyLines = client.settings.historyLines
+            shareWorkspaces = client.settings.shareWorkspaces
             perform { _ = try await client.configuredMachines() }
         }
     }

@@ -127,7 +127,15 @@ The codebase is organized into three layers that bridge AppKit to the Ghostty C 
   viewers persist `herdrViewer`; their explicit close only detaches and never
   kills the shared terminal. Such viewers must always have a binding and cannot
   create or reconcile a new program.
-  `Settings → Herdr` owns executable and attach-history preferences. Validate and
+  `Settings → Herdr` owns executable, attach-history and shared-workspace
+  preferences. Shared workspaces (off by default) keep Herdr workspaces' tabs and
+  splits in the core `herdr-app` document for the desktop app and phone: sync is an
+  idempotent base/local/remote tab merge that publishes only differences with the
+  document revision, adopts remote edits, reports conflicts instead of silently
+  overriding, and never ends a program for a layout deletion. Publishing also owns
+  `herdr.space`/`herdr.tab` (leave other labels alone), skips workspaces Santty
+  cannot express exactly, and never re-creates a space deleted in the document.
+  Validate and
   subscribe a replacement connection before swapping it; reconnect only Santty's
   viewers, never the core daemon. Keep observer bindings scoped to their core ID,
   and exclude connection commands, raw errors and environment values from copied diagnostics.

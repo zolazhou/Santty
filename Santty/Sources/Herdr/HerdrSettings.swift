@@ -5,6 +5,7 @@ struct HerdrSettings {
     static let shared = HerdrSettings()
     static let defaultHistoryLines = 2000
     static let historyRange = 0...10_000
+    static let didChangeNotification = Notification.Name("HerdrSettingsDidChange")
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
@@ -25,6 +26,18 @@ struct HerdrSettings {
     }
 
     static func clampedHistoryLines(_ value: Int) -> Int { min(max(value, historyRange.lowerBound), historyRange.upperBound) }
+
+    /// Keeps Herdr workspaces' tab/split structure in the core document, so the Herdr desktop app
+    /// and phone show the same structure as Santty. Off by default: enabling it adopts the shared
+    /// document's structure for Herdr workspaces.
+    var shareWorkspaces: Bool {
+        get { defaults.object(forKey: "herdr.shareWorkspaces") as? Bool ?? false }
+        nonmutating set {
+            guard shareWorkspaces != newValue else { return }
+            defaults.set(newValue, forKey: "herdr.shareWorkspaces")
+            NotificationCenter.default.post(name: Self.didChangeNotification, object: nil)
+        }
+    }
 
     static func executableURL(for path: String?) throws -> URL? {
         guard let path, !path.isEmpty else { return nil }

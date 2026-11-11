@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import GhosttyTerminal
 
 struct PaneFocusRatios: Codable, Sendable, Equatable {
@@ -164,6 +165,11 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     private var workspacePersistenceActivated = false
     private var suppressWorkspaceSaving = false
     private var workspaceSaveTask: Task<Void, Never>?
+    private var herdrSharing: HerdrWorkspaceSharing?
+    private var herdrSharingClient: HerdrCoreClient?
+    private var herdrSharingObservation: AnyCancellable?
+    private var herdrSettingsObserver: NSObjectProtocol?
+    private var applyingSharedView = false
     private(set) var workspacePersistenceError: String?
     private var workspaceEntries: [WorkspaceEntry] = []
     private var closingHerdrPaneIDs: Set<PaneID> = []
@@ -378,6 +384,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             agentNavigationTask?.cancel()
             if let sidebarMouseMonitor { NSEvent.removeMonitor(sidebarMouseMonitor) }
             workspaceSaveTask?.cancel()
+            herdrSharing?.reset()
+            herdrSharingObservation = nil
+            if let herdrSettingsObserver { NotificationCenter.default.removeObserver(herdrSettingsObserver) }
             for observer in paneNameFocusObservers {
                 NotificationCenter.default.removeObserver(observer)
             }
@@ -393,6 +402,15 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
     override func viewDidAppear() {
         super.viewDidAppear()
+
+        if herdrSettingsObserver == nil {
+            herdrSettingsObserver = NotificationCenter.default.addObserver(
+                forName: HerdrSettings.didChangeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.observedHerdrSettingsChange() }
+            }
+        }
+        refreshHerdrSharing()
 
         if !hasAppeared {
             hasAppeared = true
@@ -3955,6 +3973,7 @@ extension WorkspaceViewController {
     }
 
     private func scheduleWorkspaceSave() {
+        refreshHerdrSharing()
         guard workspaceStore?.canWrite == true, workspacePersistenceActivated, !suppressWorkspaceSaving else { return }
         workspaceSaveTask?.cancel()
         workspaceSaveTask = Task { [weak self] in
@@ -4520,5 +4539,117 @@ extension WorkspaceViewController {
         cliWindowClosePending = false
         cliWindowCloseRequestID = nil
         requestWindowClose(workspaceSaveConfirmed: true)
+    }
+}
+
+// MARK: - Shared Herdr workspaces (two-way)
+
+extension WorkspaceViewController {
+    /// Created on demand and kept cheap: this runs from every scheduled workspace save.
+    func refreshHerdrSharing() {
+        let enabled = herdrCoreClient.settings.shareWorkspaces
+        if !enabled {
+            herdrSharing?.reset()
+            herdrSharing = nil
+            herdrSharingClient = nil
+            herdrSharingObservation = nil
+            return
+        }
+        if herdrSharing == nil || herdrSharingClient !== herdrCoreClient {
+            herdrSharing?.reset()
+            let sharing = HerdrWorkspaceSharing(client: herdrCoreClient, settings: herdrCoreClient.settings)
+            sharing.localProvider = { [weak self] in self?.sharedLocalViews() ?? [] }
+            sharing.apply = { [weak self] applied in self?.adoptSharedView(applied) }
+            sharing.status = { [weak self] text in self?.rootView.toolbarView.showNavigationStatus(text) }
+            herdrSharingObservation = herdrCoreClient.$workspaceDocumentsGeneration
+                .dropFirst()
+                .sink { [weak sharing] _ in sharing?.schedule() }
+            herdrSharing = sharing
+            herdrSharingClient = herdrCoreClient
+        }
+        herdrSharing?.schedule()
+    }
+
+    private func observedHerdrSettingsChange() {
+        refreshHerdrSharing()
+    }
+
+    /// Only workspaces Santty can express exactly are published; anything else is left untouched.
+    private func sharedLocalViews() -> [HerdrWorkspaceSharing.Local] {
+        guard herdrCoreClient.settings.shareWorkspaces, !isClosingWindow, closingHerdrPaneIDs.isEmpty,
+              !applyingSharedView, !suppressWorkspaceSaving,
+              let localCoreID = herdrCoreClient.details?.coreID else { return [] }
+        var views: [HerdrWorkspaceSharing.Local] = []
+        for state in localWorkspaceStates where state.kind == .herdr {
+            let coreID = state.remote?.id ?? localCoreID
+            let saved = savedWorkspaceTabs(state.tabs, selected: state.selectedTabID).tabs
+            let workspace = SavedWorkspace.LocalWorkspace(id: state.id, name: state.name, kind: .herdr,
+                                                          herdrRemote: state.remote, selectedTabID: state.selectedTabID, tabs: saved)
+            guard let view = try? HerdrWorkspaceAdapter.view(workspace, coreID: coreID) else { continue }
+            views.append(.init(id: state.id, coreID: coreID, remote: state.remote != nil, view: view))
+        }
+        return views
+    }
+
+    /// Replaces one workspace's tabs with the merged structure. Existing panes keep their controller
+    /// and process; panes only the document knows become external viewers (close detaches).
+    private func adoptSharedView(_ applied: HerdrWorkspaceSharing.Applied) {
+        guard herdrCoreClient.settings.shareWorkspaces, !isClosingWindow, closingHerdrPaneIDs.isEmpty else { return }
+        let isCurrent = applied.id == localWorkspaceID
+        guard let state = localWorkspaceStates.first(where: { $0.id == applied.id }), state.kind == .herdr,
+              let coreID = state.remote?.id ?? herdrCoreClient.details?.coreID else { return }
+        var existingControllers: [UUID: any PaneControlling] = [:]
+        var existingTabs: [UUID: WorkspaceTabState] = [:]
+        for tab in state.tabs {
+            existingTabs[tab.id] = tab
+            for (id, controller) in tab.paneControllers { existingControllers[id] = controller }
+        }
+        var existingPanes: [UUID: SavedWorkspace.Pane] = [:]
+        for tab in savedWorkspaceTabs(state.tabs, selected: nil).tabs { for pane in tab.panes { existingPanes[pane.id] = pane } }
+        guard let saved = try? HerdrWorkspaceAdapter.tabs(applied.view, coreID: coreID, existing: existingPanes) else { return }
+
+        var rebuilt: [WorkspaceTabState] = []
+        for tab in saved {
+            var controllers: [UUID: any PaneControlling] = [:]
+            for pane in tab.panes {
+                if let controller = existingControllers[pane.id] {
+                    controllers[pane.id] = controller
+                } else if pane.kind == .herdrTerminal {
+                    controllers[pane.id] = makeTerminalPaneController(id: pane.id, workingDirectory: pane.cwd, kind: .herdr,
+                                                                      binding: pane.herdr, remote: state.remote, viewerOnly: true)
+                }
+            }
+            guard controllers.count == tab.panes.count, let first = tab.panes.first?.id else { continue }
+            let previous = existingTabs[tab.id]
+            let focused = previous?.focusedPaneID.flatMap { controllers[$0] != nil ? $0 : nil } ?? first
+            let tabState = WorkspaceTabState(id: tab.id, layoutNode: tab.layout, paneControllers: controllers,
+                                             paneAutoResizeConfigurations: (previous?.paneAutoResizeConfigurations ?? [:]).filter { controllers[$0.key] != nil },
+                                             focusedPaneID: focused, customTitle: tab.customTitle)
+            rebuilt.append(tabState)
+        }
+        guard !rebuilt.isEmpty else { return }
+        let identical = rebuilt.count == state.tabs.count && zip(rebuilt, state.tabs).allSatisfy {
+            $0.id == $1.id && $0.layoutNode == $1.layoutNode && $0.customTitle == $1.customTitle
+                && Set($0.paneControllers.keys) == Set($1.paneControllers.keys)
+        }
+        guard !identical else { return }
+        applyingSharedView = true
+        defer { applyingSharedView = false }
+        if isCurrent {
+            suspendLocalWorkspacePresentation()
+            let previousSelection = selectedTabID
+            tabs = rebuilt
+            selectedTabID = rebuilt.contains { $0.id == previousSelection } ? previousSelection : rebuilt.first?.id
+            rebuildWorkspaceLayout()
+            updateTabStrip()
+            if hasAppeared, let tab = selectedTabState { startPaneControllersIfNeeded(in: tab) }
+        } else if let index = otherLocalWorkspaces.firstIndex(where: { $0.id == applied.id }) {
+            otherLocalWorkspaces[index].tabs = rebuilt
+            if !rebuilt.contains(where: { $0.id == otherLocalWorkspaces[index].selectedTabID }) {
+                otherLocalWorkspaces[index].selectedTabID = rebuilt.first?.id
+            }
+        }
+        refreshWorkspacePicker()
+        scheduleWorkspaceSave()
     }
 }

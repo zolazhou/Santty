@@ -90,6 +90,8 @@ final class HerdrCoreClient: ObservableObject {
     @Published private(set) var lastError: HerdrCoreError?
     @Published private(set) var machines: [HerdrMachine] = []
     @Published private(set) var isReconnecting = false
+    /// Invalidation only, not a core document revision. Consumers must re-read after reconnect/missed/doc.
+    @Published private(set) var workspaceDocumentsGeneration: UInt64 = 0
 
     init(executable: URL? = nil, environment: [String: String] = ProcessInfo.processInfo.environment,
          settings: HerdrSettings = .shared) {
@@ -142,6 +144,8 @@ final class HerdrCoreClient: ObservableObject {
         }
     }
 
+    func isCurrentConnection(_ connection: HerdrCoreTransport) -> Bool { transport === connection }
+
     func connection() async throws -> HerdrCoreTransport {
         if let transport { return transport }
         if let connecting { return try await connecting.value }
@@ -184,6 +188,7 @@ final class HerdrCoreClient: ObservableObject {
                         coreID: transport.hello.core.id, coreName: transport.hello.core.name,
                         session: environment["HC_SESSION"] ?? "default")
         lastError = nil
+        workspaceDocumentsGeneration &+= 1
         sequence = snapshot.seq
         updateMachines(machines)
         replaceSnapshot(snapshot.terminals)
@@ -397,6 +402,7 @@ final class HerdrCoreClient: ObservableObject {
         transport = nil
         eventChannel = nil
         details = nil
+        workspaceDocumentsGeneration &+= 1
         recordError(error)
         agents.markUnavailable()
         scheduleMonitorReconnect()
@@ -431,6 +437,7 @@ final class HerdrCoreClient: ObservableObject {
             if envelope["method"] as? String == "missed", let snapshot = params["terminals"] {
                 let records = try JSONDecoder().decode([HerdrCoreTerminal].self, from: JSONSerialization.data(withJSONObject: snapshot))
                 sequence = seq
+                workspaceDocumentsGeneration &+= 1
                 replaceSnapshot(records)
                 for (binding, observer) in Array(observers.values) where binding.remote == true {
                     observer(nil, HerdrCoreError("Remote viewer must refresh", kind: "remote_resync"))
@@ -439,6 +446,11 @@ final class HerdrCoreClient: ObservableObject {
             }
             guard seq > sequence else { return }
             sequence = seq
+            // Document events have no terminal address. Handle them before terminal-only routing.
+            if params["type"] as? String == "doc" {
+                workspaceDocumentsGeneration &+= 1
+                return
+            }
             guard let rawAddress = params["terminal"] as? String, let address = canonicalAddress(rawAddress),
                   let kind = params["type"] as? String else { return }
             let body = params["data"] as? [String: Any] ?? [:]
