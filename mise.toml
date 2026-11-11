@@ -17,6 +17,15 @@ run = "tuist install"
 description = "Prepare pinned Ghostty Swift package with pane text reading API"
 run = "sh Scripts/prepare-ghostty.sh"
 
+[tasks."terminal-lab:prepare"]
+description = "Prepare pinned SwiftTerm and precompiled Ghostty VT for the isolated lab"
+run = "sh Scripts/prepare-native-terminal.sh"
+
+[tasks."terminal-lab:generate"]
+description = "Generate optional SanttyTerminalLab targets without changing production dependencies"
+depends = ["ghostty:prepare", "terminal-lab:prepare"]
+run = "TUIST_SANTTY_NATIVE_TERMINAL_LAB=1 tuist generate --no-open"
+
 [tasks."tuist:generate"]
 description = "Generate the Xcode workspace without opening Xcode"
 depends = ["ghostty:prepare"]

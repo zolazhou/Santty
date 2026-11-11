@@ -41,6 +41,57 @@ let signingSettings: SettingsDictionary =
         "PROVISIONING_PROFILE_SPECIFIER": "",
     ]
 
+// Keep the two Ghostty C libraries in separate executables: their static
+// archives export overlapping symbols. Normal generation does not even add
+// these dependencies. See docs/plans/terminal-framework-rendering.md.
+let nativeTerminalLabEnabled = environment["TUIST_SANTTY_NATIVE_TERMINAL_LAB"] == "1"
+let labPackages: [Package] = nativeTerminalLabEnabled
+    ? [.local(path: "Vendor/native-terminal/SwiftTerm")] : []
+let labTargets: [Target] = nativeTerminalLabEnabled ? [
+    .target(
+        name: "SanttyTerminalLab",
+        destinations: .macOS,
+        product: .app,
+        bundleId: "\(bundleIdentifier).terminal-lab",
+        deploymentTargets: .macOS("14.0"),
+        infoPlist: .extendingDefault(with: ["NSPrincipalClass": "NSApplication"]),
+        sources: ["Experiments/NativeTerminalLab/Sources/**"],
+        resources: ["Experiments/NativeTerminalLab/Licenses/**"],
+        dependencies: [
+            .package(product: "SwiftTerm"),
+            .xcframework(path: "Vendor/native-terminal/ghostty-vt.xcframework"),
+            .sdk(name: "AppKit", type: .framework),
+            .sdk(name: "Metal", type: .framework),
+            .sdk(name: "MetalKit", type: .framework),
+            .sdk(name: "CoreText", type: .framework),
+            .sdk(name: "QuartzCore", type: .framework),
+        ],
+        settings: .settings(base: signingSettings.merging([
+            "OTHER_LDFLAGS": ["$(inherited)", "-lc++"],
+        ]) { _, new in new })
+    ),
+    .target(
+        name: "SanttyTerminalLabTests",
+        destinations: .macOS,
+        product: .unitTests,
+        bundleId: "\(bundleIdentifier).terminal-lab.tests",
+        deploymentTargets: .macOS("14.0"),
+        infoPlist: .default,
+        sources: ["Experiments/NativeTerminalLab/Tests/**"],
+        dependencies: [
+            .target(name: "SanttyTerminalLab"),
+            .package(product: "SwiftTerm"),
+        ]
+    ),
+] : []
+let labSchemes: [Scheme] = nativeTerminalLabEnabled ? [.scheme(
+    name: "SanttyTerminalLab",
+    shared: true,
+    buildAction: .buildAction(targets: ["SanttyTerminalLab"]),
+    testAction: .targets(["SanttyTerminalLabTests"], configuration: "Debug"),
+    runAction: .runAction(configuration: "Debug", executable: "SanttyTerminalLab")
+)] : []
+
 let project = Project(
     name: "Santty",
     options: .options(
@@ -61,7 +112,7 @@ let project = Project(
             url: "https://github.com/sparkle-project/Sparkle",
             requirement: .upToNextMajor(from: "2.8.0")
         ),
-    ],
+    ] + labPackages,
     settings: .settings(
         base: [
             "SWIFT_VERSION": "6.0",
@@ -162,5 +213,6 @@ let project = Project(
                 .package(product: "KeyboardShortcuts"),
             ]
         ),
-    ]
+    ] + labTargets,
+    schemes: labSchemes
 )
