@@ -1,6 +1,6 @@
 # Native Terminal Lab
 
-隔离的 AppKit 渲染原型：官方预编译 Ghostty VT → SwiftTerm 外部网格渲染 → NSScrollView 虚拟化历史视口。**不是正式终端后端，不创建 shell、不连接 Herdr、不读取或保存工作区。**
+隔离的 AppKit 终端原型：官方预编译 Ghostty VT → SwiftTerm 外部网格渲染 → NSScrollView 虚拟化历史视口。默认使用 fixture；可由用户显式启动私有 Herdr 测试 shell。**不是正式终端后端，不连接用户现有终端，不读取或保存工作区。**
 
 ## 构建、测试、运行
 
@@ -13,7 +13,46 @@ flowdeck test -s SanttyTerminalLab
 flowdeck run -s SanttyTerminalLab
 ```
 
-窗口显示 2000 行固定 ANSI / Unicode fixture，可以追加 100 行、重置，以及在 Core Graphics 和 Metal 之间切换。切换的只是同一个外部帧源的绘制方式，不会产生第二个终端模拟器或会话。
+窗口默认显示 2000 行固定 ANSI / Unicode fixture，可以追加、重置，以及切换 Core Graphics / Metal。两种 renderer 使用同一个 Ghostty VT 实例，不会产生第二个模拟器。
+
+### 测试真实输入与输出
+
+1. 点击 **Start private Herdr shell**，等待状态为 live，再点击终端输入。
+2. 可测试 `pwd`、`printf 'hello\\n'`、方向键、Ctrl+C、中文输入和 Cmd+V。
+3. 输出较多行后测试原生历史滚动；在历史中输入会回到实时屏幕。
+4. 点击 **Reconnect viewer**，确认原 shell 保留，画面重建后可继续输入。断开期间输入不排队重放。
+5. 点击 **End private test session** 返回 fixture；关闭实验 app 也会清理自己创建的测试环境。
+
+启动需要 PATH 中可用的 `hc`。每次创建独立的临时 socket、session、HOME 和 XDG 目录，子进程环境使用白名单，不继承任意 HC 路由、shell 启动钩子、凭据或本地控制 socket。所有命令只作用于这个测试环境，不列举或操作用户已有终端。不会 restart 共享 core；退出时只结束自身测试 terminal 和经私有 socket 验证的测试 core。
+
+### 鼠标、滚轮与复制
+
+- 程序开启鼠标报告时，点击／拖动／滚轮经 Ghostty 编码送往程序，不再同时滚动本地历史。按住 Shift 可在手势开始时选择本地操作；中途改变修饰键不会转移已按下按钮的归属。
+- 没有鼠标报告时，滚轮交给原生 NSScrollView；alternate screen 开启 1007 时，可按 VT 模式编码为程序方向键。动量期间切换模式／路由丢弃余下 travel，不把分数余量转交另一接收者；resize／失焦取消原手势，无 phase 的精细滚轮也可继续使用。
+- 拖动选择、双击词、三击行、Cmd+A 全选、Cmd+C 复制，以及拖出视口后的自动滚动已接通。选择由 Ghostty tracked gesture 管理，复制直接来自其 formatter，保留 Unicode、宽字符与软换行语义；只显式复制，不自动写剪贴板，默认限制 32 MiB。
+- 历史阅读时，首次面向程序的点击只回到实时画面，不点击尚未看到的程序内容。鼠标释放可穿过同步输出 hold，避免程序按钮卡住；重连／屏幕切换／resize 清理过期选择和手势。
+
+图片、矩形选择和完整交互对等仍未完成。鼠标／滚动／锚点两轮已获用户当前环境的人工确认；不等于完整输入法、跨设备或协议认证。
+
+### 普通 URL／OSC 8 链接与受审阅复制
+
+- OSC 8 的 URI 从 VT 获取并复制到有界拥有数据的帧；普通 `http://`／`https://`／`mailto:` 文本按 SwiftTerm 的 scheme URL tokens 与单元格范围思路识别，OSC 8 优先。Cmd-hover 实际绘制下划线并显示目标／手形光标；原地按放 Cmd、滚动或字号／宽度改变都会更新命中，不抢 first responder。
+- Cmd-click 只在同一链接的 mouse-up 打开；允许 4 pt 内跨相邻字符的微小位移，拖动、输入、reset、目标变化或过期画面会取消。普通 URL 在 VT 锁内重新采样校验，不能打开尚未呈现的改写目标。该手势（含空白处）不同时发给程序；宽字符尾格归到头格。
+- Native 只允许 `http`／`https`／`mailto`，拒绝凭据、控制／不可见字符（含百分号编码）、相对路径、file 和自定义 handler。路径在调用共享 parser 前就拒绝，不查询本地文件系统，也不将远端文件映射到本地。未实现裸域名、隐式路径或本地文件打开。
+- 普通 URL 只检查已发布有界帧中的 VT 软换行组，最多 64 Ki UTF-16 units；支持宽字、组合字符和 wrap spacer 的格子映射，不跨硬换行猜测，也不打开断在帧边界的截断前缀。超出捕获范围的长链接仍是明确限制，不另存历史文本。Reset fixture 底部提供普通 URL 和 OSC 8 label 两个自然体验样例。
+- URI 原始 UTF-8 字节参与行复用和 release 校验，不把 NFC／NFD 等价字符串当作相同目标；每条提取最多 8 KiB、单帧 URI 总量最多 128 KiB。固定 VT 自身可能更早拒绝长 OSC 8，8 KiB 不是实际可用长度承诺。
+- 程序写剪贴板只产生一个待审阅 offer（最多 1 MiB、120 s 单调时钟有效期），**不会自动写系统剪贴板**。私有 shell 发出请求后点击 **Review Copy… → Copy Once** 才复制；新请求、断线、重连、rebind、reset／RIS 或过期会使旧确认失效。取消不会复制，也不会自动弹出下一个对话框。
+- **VT 1.0 的 clipboard reply 必须在同步回调内完成**，不能保存借用指针做旧 surface 式异步确认。本轮原协议写始终同步拒绝，不提前回报 SUCCESS／DONE；后续是用户显式复制已提供的文本。OSC 52 无写入 ACK，Kitty 写入会收到 EPERM；这不是完整的 Kitty 写权限协议实现。
+- 没有 clipboard-read callback：OSC 52 查询被忽略，Kitty 读取被拒绝，不读系统剪贴板、不记住程序 grant。保留现有用户主动 Cmd+V，与程序读取权限严格分开。空 OSC 52 写在此 VT 中表示 clear，同样须确认；Kitty 的空 text/plain 表示与 clear 分开处理。
+
+例如仅在自己的私有测试 shell 中：
+
+```sh
+printf '\033]8;;https://example.com\033\\Example\033]8;;\033\\\n'
+printf '\033]52;c;aGVsbG8=\007'
+```
+
+第一行需你 Cmd-click 才打开；第二行仅启用 Review Copy，确认后才复制 `hello`。本轮 GUI 体验仍待用户验证。
 
 普通生成不包含实验 target，也不添加 SwiftTerm 或独立 VT 依赖：
 
@@ -36,34 +75,127 @@ flowdeck test
 
 VT 二进制来自 `https://release.files.ghostty.org/libghostty-vt/1.0.0/ghostty-vt-1.0.0.xcframework.zip`；校验值对应官方 SHA256SUMS。没有执行 Zig 编译，没有改动生产 GhosttyKit。
 
-现有完整 Ghostty C archive 不导出独立 `ghostty_terminal_*` / `ghostty_render_state_*` 接口。对 arm64 archive 进行 `nm -gU` 检查发现两库有 859 个重合的全局定义，包括 SIMD 和第三方 C++ 符号。因此本阶段单独链接成实验 app，**尚未证明两库可安全共存于 Santty 主进程**；生产集成前需解决符号隔离并做共存测试。
+现有完整 Ghostty C archive 不导出独立 `ghostty_terminal_*` / `ghostty_render_state_*` 接口。对 arm64 archive 进行 `nm -gU` 检查发现两库有 859 个重合的全局定义，包括 SIMD 和第三方 C++ 符号。因此本阶段单独链接成实验 app，尚未验证两库同进程共存。迁移策略现已调整为**分阶段开发、主应用整体替换**：最终移除旧 surface C core，只链接预编译 VT，不再为双后端共存预先实现符号隔离层。
 
-SwiftTerm 只增加一处本地补丁：`Patches/SwiftTerm+ExternalFramePresentation.patch` 暴露同步 `presentExternalFrame()`。虚拟视口跨行时先准备新快照，再合成移动后的有界 surface，避免新文档位置显示旧快照；行内分数像素移动不生成新帧。补丁没有修改模拟器、字形逻辑或 Metal shader。
+SwiftTerm 的本地补丁：`Patches/SwiftTerm+ExternalFramePresentation.patch` 暴露同步 `presentExternalFrame()`，跨行时先准备快照再移动有界 surface，行内移动不生成新帧；`Patches/SwiftTerm+AppKitCaretDrawing.patch` 补齐 CaretView 的 AppKit `draw(_:)` 入口，保留原有 Core Animation 闪烁；`Patches/SwiftTerm+ExternalStylePresentation.patch` 在现有属性表与装饰线／caret 路径中补 overline 和显式 hollow 标记。保持 8-byte packed cell、8-bit legacy style 和原有字形绘制，不修改终端解析器、编码器或 Metal shader。补丁依赖固定 revision，prepare 可重复运行。
 
-两项目的顶层许可位于 `Licenses/` 并随实验 app 打包；完整第三方依赖许可证清单仍是正式分发前的检查项。
+SwiftTerm、Ghostty 及适配参考 herdr-app 的许可证／NOTICE 位于 `Licenses/` 并随实验 app 打包；完整第三方依赖许可证清单仍是正式分发前的检查项。
 
 ## 实现边界
 
-- `GhosttyVTDriver`：主线程上的 fixture 解析和有界 render-state 采样；完整复制 cell 的 grapheme、宽度、颜色、样式与软换行 continuation，不保留借用的 C 指针。
-- `NativeTerminalFrame`：拥有数据的快照；行标识使用 Ghostty 的两个 opaque word。只缓存当前视口和 overscan，不复制全部 scrollback。
+- `GhosttyVTDriver`：以锁串行化所有 C 访问和回调状态；在 Herdr stream 队列解析，主线程采样拥有数据的帧，不保留借用的 C 指针。处理自动应答、尺寸查询、键盘／粘贴／焦点编码，以及跨批次的同步输出 hold。hold 最长 1 s，期间继续解析、应答和返还 credit。
+- `NativeTerminalOutput`：实现共用 `TerminalStreamEndpoint`，receive 返回前完成解析，绘制通知合并为最多一个待执行主线程任务；回复立即交给当前 channel，不等待 UI，也不保存离线输入。
+- `NativeHerdrLab`：复用生产 `HerdrTerminalSession` / `HerdrCoreClient` / transport，仅注入 native endpoint。旧 InMemory 适配留在 `HerdrTerminalSession+Ghostty.swift`，不混链两套 C core。私有测试环境的启动／退出竞争和重复清理有测试覆盖。
+- `NativeAppKitKeySnapshot` / `NativeKeyNormalizer`：平台数据采集与纯函数归一化分离，保留物理／逻辑身份、文本、未修饰码点、原始／已消费修饰符、Option 左右侧策略和 action；C0/C1/DEL／功能键不作为编码器文本。
+- `NativeKeySequence`：只记录实际发送过的 press；repeat／release 复用身份，失焦／重连清理后丢弃孤立事件。
+- `NativeTerminalInputView`：参考 SwiftTerm 的 AppKit／NSTextInputClient 分层，仅负责平台分发与 preedit 呈现；键、提交文本、粘贴和焦点经明确意图送到唯一 user writer，不启用第二套 SwiftTerm 编码器。
+- `NativeClipboardInbox` / `NativeClipboardReview`：参考 Herdr 的有界 last-value 数据捕获和 Santty 的确认语义；C 同步拒绝原请求，UI 只在用户点击后审阅并复制当前 token，不持有 C 回调指针、不阻塞解析。
+- `NativeTerminalLink` / 共用 `TerminalLinkValidation`：复用 Santty parser，参考 SwiftTerm 的不可信字符策略；native 使用更保守的 scheme 白名单。主应用旧 URL 打开／确认行为未改变。
+- `NativePointerInput` / `NativeTerminalInteraction`：纯 wheel 路由与 AppKit 事件所有权分开；原生历史滚动和程序报告互斥，选择自动滚动只在拖选中运行，不获取新的 first responder。
+- `GhosttyVTPointerCore`：在 driver 同一把锁下使用 C mouse encoder、tracked selection gesture 和 formatter；位置参考在调用内获取，跨输出／历史滚动的选择由 VT 跟踪，不另建 selection buffer。
+- `NativeTerminalFrame`：拥有数据的快照和逐行选择范围；行标识使用 Ghostty 的两个 opaque word。只缓存当前视口和 overscan，不复制全部 scrollback。
 - `SwiftTermFrameSource`：增量构建 BufferLine，不创建 SwiftTerm.Terminal；复用未改变的行，保留调色板索引，接近 arena 容量时重建 store。
 - `NativeViewport`：纯几何计算，把连续偏移拆为整数行和行内像素；输入坐标同时考虑弹性区域。
-- `NativeTerminalScrollView`：非 layer-backed 的高文档只表达历史范围；一个带少量预取行的 renderer 随视口复用。保留 AppKit 原生滚动，不叠加 easing 或另造动量。
-- 输出追加在原本位于底部时跟随；阅读历史时保持当前偏移。尚未实现历史淘汰／reflow 时的稳定内容锚点。
+- `NativeTerminalScrollView`：高文档只表达历史范围，renderer 保持有界；保留 AppKit 原生滚动。live 窗口未显示时仅标记待更新，不转换／绘制输出，重新显示再恢复。同步输出 hold 期间暂时固定已发布视口，解除或超时后更新，避免将旧快照移动到新行。
+- `GhosttyVTHistoryAnchor`：每个 driver 持有一个 VT tracked grid reference，跟踪上次发布内容的单元格；淘汰／reflow 后先解析引用，再在同一把锁下采样帧，不靠行号、文本搜索或另一份历史缓冲。行内移动不重建帧。
+- 输出追加在原本位于底部时跟随；阅读历史时保留内容单元格及行内比例。resize／字号变化后引用继续跟随原单元格，底部范围约束生效时恢复尾随；原内容被淘汰则回到最早可用行，reset／RIS／已呈现屏幕切换／重连回到实时画面。锚点不冻结程序正在改写的内容。
+
+## 后续实施路线
+
+完整路线见[实现计划](../../docs/plans/terminal-framework-rendering.md)。阶段 2 的本地私有 Herdr 链路与双私有 core 的 native 远端代理回归已通过；阶段 3 已补鼠标／滚轮／选择复制及稳定历史锚点。已接保守的普通 scheme URL／OSC 8 与剪贴板 offer 安全边界；接下来收敛完整呈现、辅助功能及平台输入缺口，再完成本地 PTY，最后整体迁移主应用。
+
+本地 PTY 后续优先复用 SwiftTerm 的独立 LocalProcess。选择参考其算法，不直接使用依赖 SwiftTerm.Terminal 的 SelectionService；MacAccessibilityService 为占位，需单独实现。当前最小键盘／IME 实现不代表 KeyboardRouter 的全部平台细节已覆盖。
+
+旧版通过 Git／旧构建回退，不计划运行时双后端切换；Core Graphics / Metal 切换仍是同一个新后端内的呈现选择。
 
 ## 验证范围与缺口
 
-本轮 FlowDeck 验证：实验 scheme 构建成功，21 项测试通过、无跳过（包含 Metal 像素回读）；普通生成后 Santty 构建成功，原有测试 343 项通过、2 项跳过。测试没有打开前台实验窗口或操作用户终端。
+阶段 2、输入兼容、鼠标／选择及历史锚点专项 FlowDeck 验证：实验 scheme 构建成功，139 项测试通过、无跳过（含 Metal 像素回读与私有真实 hc 会话）；普通生成后主应用构建成功，本轮全量 362 项通过、1 项跳过（当前 macOS 无私有 effective corner radius getter）。本轮安全／真实消费者专项复跑曾有一项 nvim 快速粘贴＋Enter 超时，后经独立 PTY 对照定位为消费者输入调度竞争；保留诊断脚本，端到端测试等实际粘贴应用后再送 Enter，未加长超时或改变生产字节。该单项随后连续 10 次通过，安全／真实消费者联合专项最终复跑 31 项通过。此前首次全量有一项旧远程测试在机器重命名后的 agent 元数据阶段超时，单独复跑及全量复跑均通过，未改测试或加长等待；时序问题未稳定复现，未宣称已修复。后续额外复跑遇到旧 DerivedData 目录缺失、SPM 提取／JSON 失败，未清公共缓存；改用独立临时 DerivedData 重新构建和全量验证，实验仍 139 项通过。该目录的默认 scheme 合计 501 项通过、1 项跳过（含主应用 362 与实验 139），不将两套测试混报为主应用 501。FlowDeck 保存的 My Mac／Santty 默认配置不变。测试没有打开前台实验窗口或操作用户终端。
 
 自动测试覆盖 Unicode / 字节分片、宽字符尾格、样式、调色板与擦除背景、行复用、6000 行输出保留、overscan、alternate screen、reset / resize、分数像素几何、输出跟随和有界 surface。Core Graphics 截图和 Metal 离屏纹理回读验证实际字形／背景绘制与调色板变化；只“有像素”不算通过。
 
-尚未实现或验证：
+新增回归覆盖跨批次 hold、超时无新输出仍刷新、reset 后首批同步输出、自动应答、键盘／粘贴／焦点模式、尺寸查询、后台解析不依赖主线程绘制、离线输入不重放、最小 IME 提交／取消及候选框坐标。真实私有 core 测试验证超过初始 credit 的 8000 行输出、6000 行以上历史保留、尺寸更新、身份不匹配拒绝、viewer-only 关闭仅 detach、同绑定重连，以及启动与退出竞争时清理私有环境。
 
-- Herdr transport、credit、身份绑定、关闭／重连和本地 exec。
-- 键盘输入、IME、鼠标报告、选择复制、链接、CLI、Scroll Mode 和辅助功能。
-- 图片、overline、精确 hollow cursor 策略以及其他尚未映射的完整终端能力。
-- 跨输出批次的 synchronized-output hold 与超时调度；当前 fixture 一次性喂入，不得把本 driver 直接接到 live stream。
-- 稳定历史锚点、输入事件路由、睡眠唤醒、跨显示器 scale 切换。
-- 物理触控板惯性／弹性体验、真实呈现帧率、延迟、多 Pane 和能耗基准。
+光标回归通过 AppKit 的实际 view 绘制入口检查空白提示符上的像素，覆盖聚焦／失焦、block／bar／underline、程序隐藏／恢复及历史滚动位置；Metal 单独回读隐藏前后像素差异。真实私有 shell 测试检查首次输入与重连后的光标状态。VT 快照以 active-screen 光标位置计算绝对行，允许显示 native 视口中落在 Ghostty overscan 的最后一行，不读取 `viewport_has_value == false` 时未定义的位置字段。
+
+控制键回归从 AppKit `keyDown` 验证 Ctrl+C/D/Z/A/E/U/L、NUL、退格及传统控制别名，并检查 Kitty 与 modifyOtherKeys 模式下保留原始组合键。macOS 的 C0/DEL 转换结果不再作为 UTF-8 按键文本传入；非组合输入中的 Ctrl 直接走 VT 编码，active composition 仍由 IME 处理。固定版本的编码器将 Ctrl+I/M/[/- 的 legacy 别名留给调用者，adapter 参考 Herdr 的处理方式：Kitty 不替换原组合键，modifyOtherKeys 通过编码器探测，其他情况使用标准别名，不自建协议状态机。真实私有 shell 中曾复现 Ctrl+C 发出 `CSI 3;5u` 且前台程序未中断，修复后验证实际发送 ETX、收到 SIGINT、退出前台程序后仍可输入。
+
+修饰键回归覆盖 Neovim 使用的 Kitty disambiguation 模式下 `:`、`?`、`!`、`+`、大写字母、Option 生成文本，以及 Kitty press／release。AppKit 已用于生成可打印文本的 Shift／Option 通过 consumed modifiers 传入编码器，不再将 `:` 重复报告成 Shift+分号；控制字符、Shift+Tab 和 Shift+方向键保留原修饰符。真实私有 `nvim --clean -n -i NONE` 通过 CmdlineEnter 记录确认原生 Shift+分号进入命令行，再通过提交文本和原生 Enter 执行命令写入私有结果文件；不只检查屏幕是否出现冒号。输入专项另有独立的括号粘贴测试：确认 VT 2004 已开启后，在私有 clean nvim 的普通、插入及命令模式验证实际缓冲区／命令执行结果。就绪确认来自程序事件循环，不加固定延迟。原观察仍保留为回归，不武断宣称单一生产根因。
+
+### 鼠标／选择与 native 远端回归
+
+固定字节向量覆盖 X10／普通／button／any tracking、legacy／UTF-8／SGR／urxvt／SGR-pixel、修饰键、扩展按钮、运动去重、同格像素移动、分数行高／Retina、1007 与过期模式／几何拒绝。前端测试验证程序滚轮不移动本地历史、Shift 选择不发程序输入、键盘输入不丢失程序拥有的 mouse release。选择测试覆盖词／行、软换行／宽字符／组合字符、历史与 scroll/reset/resize，CG 与 Metal 均检查选中／清除前后的实际像素。
+
+私有 `nvim --clean` 验证点击改变实际光标行列、滚轮改变窗口 topline；独立 `tmux -S <私有 socket> -f /dev/null` 验证点击切换 pane、滚轮进入 copy mode。就绪由模式、输出与消费者事件确认，不以固定 sleep 猜测。测试仅结束自己的 tmux server 与 Herdr core。
+
+两个临时私有 Herdr core 通过真实 `hc machine --via` 代理连接，native endpoint 验证远端解析、远端 PTY 收到固定鼠标字节、同永久 core／terminal 身份和 PID 重连、选择清除、离线输入不重放，以及 viewer-only detach 不结束原程序。此项不是实际 SSH／跨机器网络验收；只在私有 socket 存在并验证后执行可变操作／清理，不改用户机器 profile 或共享 core。
+
+本轮专项复跑复现了 nvim 0.12.5 的命令行括号粘贴＋CR burst 竞争：wire 是完整正确的 `CSI 200~…CSI 201~ CR`，但消费者先留下空 CmdlineLeave，随后把文本放进普通缓冲区。独立私有 PTY、不经过 Santty／Herdr／VT adapter 的对照中，burst 3/3 失败、等 CmdlineChanged 确认粘贴已应用再发 Enter 的 control 3/3 成功，与该版本 `vim.paste` 用 `nvim_feedkeys` 入队的实现相符。端到端用消费者事件确认后继续，不插入生产延时或 nvim 专用输入改写；这不是完整快速 burst 兼容性的修复，也不武断回溯为原观察的唯一根因。
+
+可独立复查（只创建／结束自己的 PTY 与进程）：
+
+```sh
+python3 Experiments/NativeTerminalLab/Tools/check-nvim-paste-order.py
+```
+
+脚本将 burst 结果作为观察报告，不把失败算通过，gated control 失败会报错。此消费者限制仍保留，不由协议测试数掩盖。
+
+隐藏测试窗口中的无 window CG wheel 不能证明 AppKit 的真实滚动手感；自动测试检查独占分发边界，实体设备的惯性／弹性与跨屏手感仍是独立验收项。
+
+本轮 Cmd URL 诊断先复现普通 URL 点击、hover 不绘制、原地按 Cmd 不刷新、轻微跨字符位移取消四项失败，再修复并补充回归。FlowDeck 实验全量 **153 通过／0 跳过**；主应用 **361 通过／2 环境跳过**（旧 Ghostty Metal 图形显示条件与私有圆角 getter），无失败。未修改保存的 My Mac／Santty 默认配置，未自动操作用户会话；本轮 GUI 仍待用户重启实验版复验。
+
+### Overline／hollow cursor 呈现回归
+
+`NativeTerminalStyleTests.swift` 的 12 项专项先复现四项实际像素缺口，再覆盖 CG／Metal 的 overline 空白格、SGR 53／55、行顶位置、前景色而非 SGR 58 颜色、ASCII／粗斜体／宽字／组合字符、palette 更新、选择与链接 hover 叠加、conceal，以及 focused hollow 的空心形状、宽字尾格定位与恢复实心。属性身份回归覆盖全部旧样式位并存、彩色 nil cell 不被 background shortcut 丢失装饰，确认 packed cell 仍为 8 bytes。
+
+Hollow 复用 SwiftTerm 原有失焦 outline 几何，但不伪造 `hasFocus`，blink／隐藏仍独立。`GhosttyVTDriver.setDefaultCursorStyle` 通过 VT 1.0 的 default cursor options 提供宿主默认值；程序 DECSCUSR 覆盖仍优先，CSI 0 q 按 VT 规则恢复默认，CG 的 Core Animation 闪烁有检查。此 API 尚未接主应用偏好 UI。fixture 文字已加 overline 样例。
+
+扩展测试曾有三项前提差异：CG 的 calibrated RGB 红转换到 sRGB 为约 `(255, 38, 0)`，独立 `NSColor` 参考得到相同结果；VT 对全空白终端的 selectAll 不产生范围。测试按各后端既有色彩合同与含真实文本的选区验证，未改变生产颜色／选择策略，不将 CG 与 Metal 的精确色彩空间一致性计为已验收。
+
+本轮 FlowDeck 实验全量 **165 通过／0 跳过**；主应用 **362 通过／1 系统能力跳过**（私有 effective corner radius getter 不可用）。准备脚本幂等、固定基线补丁应用和打包 NOTICE 已检查。仍未操作用户终端或取得本轮 GUI 人工验收；仅验证 macOS，补丁中的 iOS caret 字段连接不等于 iOS 认证。
+
+### 稳定历史锚点回归
+
+`NativeHistoryAnchorTests.swift` 覆盖真实页面淘汰、丢失引用降级、重复缩窄／扩宽后的原单元格及非零 column、字号／行内比例、仅改变窗口高度、底部跟随、程序 RIS／soft reset／alternate screen、重连 reset、reset 不携带旧弹性位移、同步输出 hold，以及并发解析和原子锚点帧采样。诊断用 `snapshot` 不替换 UI 的内容引用；分数行移动也不把 reflow 后的原单元格偷偷改成新行首。
+
+选择命中按已发布帧的引用重定位，覆盖“解析先淘汰旧页，主线程还未呈现”的窗口；引用已失效或 reset 后直接丢弃该次选择，不命中无关的新行。AppKit 回归验证淘汰前后的选中文本、显式复制、新选区与画面一致，以及淘汰后拖选自动滚动复制预期原始行，不抢 first responder。resize 后选择仍按既定策略失效，阅读锚点与选择生命周期分开。
+
+组合回归另复现并修正了 AppKit 普通 mouse release 清掉多击序列的问题：正常 release 保留 VT 的双／三击判断，只有未应用的 release（如 hold 期间）才取消手势。现在从 AppKit 事件入口验证词／行选择，而不只测 C 手势函数。
+
+淘汰夹具显式设置较小的 line cap，并确认实际发生 page pruning；未调低默认 8 MiB byte budget，原 6000 宽行／真实 credit 回归仍运行。测试通过不等于实体设备／跨屏体验或性能验收。
+
+### 链接／剪贴板回归与参考边界
+
+`NativeTerminalLinkTests.swift` 覆盖固定危险 URL、Unicode 路径、NFC／NFD 目标变化、碎片／软换行／宽字 URI、只改 URI 的行缓存更新、总量上限，以及 Cmd-click 与程序鼠标报告互斥、普通点击／孤立 release／拖动／reset／目标改写不打开。新增普通 scheme URL、标点／IPv6、UTF-16 与格子映射、软换行／wrap spacer、截断前缀与 OSC 8 预算耗尽后的 fallback 拒绝；AppKit 回归包含原地 Cmd、退出／释放修饰键、分数滚动／字体／宽度改变、微小跨格点击和未呈现的普通 URL 改写。CG／Metal 像素回读确认下划线真正出现并恢复，保留程序自带下划线与颜色。所有 URL opener 都注入假实现，不会在测试中启动浏览器。
+
+`NativeClipboardTests.swift` 移植 Herdr 的 OSC 52 固定字节与大小／UTF-8／selection-location 用例，并单测本次 ABI 的同步拒绝、clear 与空 MIME 表示、原子多 MIME 拒绝、隐形字符预览、过期与一次性 token、替换／离线／重绑／reset 后的确认拒绝。测试只操作唯一命名的私有 pasteboard，不读取或写入用户的 general pasteboard。主线程等待期间后台解析和自动回复仍完成。
+
+真实私有 Herdr 回归验证 offer 与 OSC 8 经同一 transport 到达、确认待定时超过初始 credit 的输出仍排空、重连保留 binding 但旧 offer 不能复制，新请求需新确认。未重启共享 core。
+
+参考固定 herdr-app `vt.rs` 的 last-value、1 MiB／严格 UTF-8／无 read callback，以及 SwiftTerm `UntrustedTerminalLink.swift` 的字符策略、平台 delegate／无 `main.sync` 经验。不照搬 Herdr 的旧 `request.size` ABI 或提前 SUCCESS，也不照搬 SwiftTerm 自己的异步 OSC 回复编码器。所有 protocol 回复仍由 VT 负责。许可／差异见 `Licenses/Keyboard-Adaptation-NOTICE.txt` 与 `Licenses/Link-Adaptation-NOTICE.txt`。
+
+### 系统输入对照
+
+详见 [INPUT-COMPATIBILITY.md](INPUT-COMPATIBILITY.md)：固定上游来源、许可证、架构边界、行为差异、自动覆盖与未认证项。新增 herdr-app 26 类按键 × 3 模式的独立固定字节向量，以及全部 31 种 Kitty flags 的重复／释放、模式 push/pop、Num Lock／应用小键盘、Cocoa 修饰键、95 个可打印 ASCII、Unicode、非拉丁／ISO 控制键翻译和 IME 生命周期用例。数据矩阵不通过被测编码器自行生成 expected。测试另发现并修复未括号粘贴 CRLF 变成双 CR 的问题；AppKit Option/AltGr 文本在 report-all 下采用 SwiftTerm 的文本提交策略，避免丢失合成字符和产生孤立 release。
+
+### 人工验收
+
+用户启动实验 app 后，针对提供的测试清单反馈“一切正常，符合预期”：滚动与惯性／弹性、滚动条、新输出跟随及历史阅读位置、Core Graphics / Metal 切换、窗口 resize、Unicode／样式显示与 fixture 重置，当前环境下未报告异常。
+
+后续真实 private shell 人工测试报告光标不可见、Ctrl+C 等控制键无效以及 nvim 无法输入 `:`；分别以像素、私有 shell SIGINT、按键编码和 clean nvim 命令行测试复现并修复，同时修复 overscan 光标定位和传统控制键别名。自动回归已通过，最新 GUI 修复效果仍待用户复验。
+
+这是用户人工体验验收，不是自动化测量；未记录具体输入设备、显示器配置或帧时间。不能据此宣称跨设备一致、性能优于 Ghostty 或已具备真实终端的完整交互。
+
+用户随后自行验证鼠标／滚轮／选择复制与稳定历史锚点两轮，并反馈“正常”；记录为当前环境人工验收，不推断已枚举所有协议／设备组合。本轮新链接／剪贴板功能未包含在该反馈中。用户随后报告 Cmd-click 不开 URL、hover 无下划线；已用上述四项失败回归定位并修复，不能将修复后的自动通过记作新的 GUI 人工验收。
+
+### 尚未实现或验证
+
+- native endpoint 的真实 SSH／跨机器网络与故障验收；本地 exec／PTY runner；主应用整体迁移。
+- 完整键盘布局、Option／修饰键事件、各类 IME 和实体指针设备的人工验收；矩形选择、裸域名／隐式路径、超出捕获帧的长链接、自定义 URL／本地文件、CLI、Scroll Mode 和辅助功能；新链接／复制 offer 的 GUI 验收。
+- 旧的 nvim 命令行粘贴观察已纳入真实回归，目前三模式粘贴通过；nvim 0.12.5 的 paste+CR 同批输入另有已复现的消费者竞争，保留独立 PTY 诊断脚本，不承诺该快速 burst 组合已修复。
+- 图片、其他尚未映射的终端能力、hollow 默认值的主应用设置接入，以及跨后端精确校色／跨设备视觉验收。
+- 程序剪贴板读取授权、完整 Kitty clipboard 协议／多 MIME 和异步完成语义；不能用同步 VT 1.0 回调或本轮手动 copy offer 冒充已支持。
+- 更广泛的输入／模式变化压力、睡眠唤醒、跨显示器 scale 切换及实际设备上的锚点／滚动手感验收。
+- 更多输入设备／显示配置下的滚动体验，以及真实呈现帧率、延迟、多 Pane 和能耗基准。
 
 这些缺口是生产／真实会话集成门槛，不是默认回退为“看起来支持”。当前测试和实现不能用于宣称已完成计划、终端功能对等或性能优于 Ghostty。

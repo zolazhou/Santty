@@ -1,0 +1,12 @@
+--- a/Sources/SwiftTerm/Mac/MacCaretView.swift
++++ b/Sources/SwiftTerm/Mac/MacCaretView.swift
+@@ -176,6 +176,9 @@
+     }
+     
+     override func draw(_ dirtyRect: NSRect) {
++        // AppKit owns a layer-backed NSView's delegate; paint via draw(_:) too.
++        guard let context = NSGraphicsContext.current?.cgContext else { return }
++        drawCursor(in: context, hasFocus: tracksFocus ? (terminal?.hasFocus ?? true) : true)
+     }
+     
+     override func hitTest(_ point: NSPoint) -> NSView? {

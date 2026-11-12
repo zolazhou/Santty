@@ -65,6 +65,48 @@ final class NativeTerminalMetalTests: XCTestCase {
         XCTAssertFalse(before == after, "cached rows must respect a new palette")
     }
 
+    func testMetalSelectionPixelsAppearAndClearWithOwnedRows() throws {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              MetalTerminalRenderer.shaderLibraryIsAvailable else { throw XCTSkip("Metal unavailable") }
+        let driver = try GhosttyVTDriver(columns: 20, rows: 4)
+        driver.feed("\u{1b}[?25lhello world")
+        let source = SwiftTermFrameSource()
+        let view = TerminalRenderView(frame: .zero, font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        view.frameSource = source
+        view.nativeBackgroundColor = .black; view.nativeForegroundColor = .white
+        view.setFrameSize(NSSize(width: view.cellSize.width * 20, height: view.cellSize.height * 4))
+        let target = TerminalMetalLayerView(frame: view.bounds)
+        target.renderDevice = device; target.metalLayer.framebufferOnly = false
+        let scale = NSScreen.main?.backingScaleFactor ?? 1
+        target.renderContentsScale = scale
+        target.renderDrawableSize = CGSize(width: view.bounds.width * scale, height: view.bounds.height * scale)
+        let renderer = try MetalTerminalRenderer(target: target)
+        renderer.waitForCompletionAfterCommit = true; renderer.capturesRenderedTexture = true
+        func pixels() throws -> [UInt8] {
+            source.apply(try driver.snapshot(topRow: 0), topLine: 0, renderRows: 4)
+            XCTAssertTrue(view.renderSnapshotForMetal(renderer: renderer, target: target))
+            let texture = try XCTUnwrap(renderer.lastRenderedTexture)
+            var bytes = [UInt8](repeating: 0, count: texture.width * texture.height * 4)
+            bytes.withUnsafeMutableBytes { raw in
+                texture.getBytes(raw.baseAddress!, bytesPerRow: texture.width * 4,
+                    from: MTLRegionMake2D(0, 0, texture.width, texture.height), mipmapLevel: 0)
+            }
+            return bytes
+        }
+        let before = try pixels()
+        try driver.selectAll()
+        let selected = try pixels()
+        XCTAssertFalse(selected == before)
+        source.selectionBackground = NativeRGB(red: 10, green: 130, blue: 20)
+        XCTAssertFalse(try pixels() == selected, "selection color changes must invalidate cached owned rows")
+        driver.clearSelection()
+        XCTAssertEqual(try pixels(), before)
+        source.highlightedLink = [0: 0..<5]
+        XCTAssertNotEqual(try pixels(), before, "hover must produce real Metal underline pixels")
+        source.highlightedLink = [:]
+        XCTAssertEqual(try pixels(), before, "clearing hover must invalidate the same cached rows")
+    }
+
     func testMetalSurfaceRemainsViewportSizedAndCanReturnToCoreGraphics() throws {
         guard MTLCreateSystemDefaultDevice() != nil,
               MetalTerminalRenderer.shaderLibraryIsAvailable else { throw XCTSkip("Metal unavailable") }

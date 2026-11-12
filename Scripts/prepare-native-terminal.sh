@@ -28,6 +28,14 @@ if ! grep -q 'public func presentExternalFrame()' "$root/SwiftTerm/Sources/Swift
     patch -s -d "$root/SwiftTerm" -p1 < "$repo_dir/Patches/SwiftTerm+ExternalFramePresentation.patch"
 fi
 
+if ! grep -Fq 'NSGraphicsContext.current?.cgContext' "$root/SwiftTerm/Sources/SwiftTerm/Mac/MacCaretView.swift"; then
+    patch -s -d "$root/SwiftTerm" -p1 < "$repo_dir/Patches/SwiftTerm+AppKitCaretDrawing.patch"
+fi
+
+if ! grep -Fq 'var hasOverline: Bool' "$root/SwiftTerm/Sources/SwiftTerm/CharData.swift"; then
+    patch -s -d "$root/SwiftTerm" -p1 < "$repo_dir/Patches/SwiftTerm+ExternalStylePresentation.patch"
+fi
+
 vt_version=1.0.0
 vt_checksum=2c32b7409b2b6c2ef6cfd606526de357762ad458bdc27134ad074e86506a8bc2
 if [ ! -d "$root/ghostty-vt.xcframework" ]; then

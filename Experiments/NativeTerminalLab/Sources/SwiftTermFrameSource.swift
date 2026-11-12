@@ -6,7 +6,15 @@ import SwiftTerm
 final class SwiftTermFrameSource: TerminalExternalFrameSource {
     private(set) var store = TerminalRowStore()
     private(set) var lines: [Int: BufferLine] = [:]
-    private var cached: [NativeRowID: (row: NativeTerminalRow, line: BufferLine)] = [:]
+    private typealias CachedRow = (row: NativeTerminalRow, line: BufferLine, selection: ClosedRange<Int>?, link: Range<Int>?)
+    private var cached: [NativeRowID: CachedRow] = [:]
+    var highlightedLink: [Int: Range<Int>] = [:]
+    var selectionForeground = NativeRGB(red: 255, green: 255, blue: 255) {
+        didSet { if oldValue != selectionForeground { invalidateSelectionColors() } }
+    }
+    var selectionBackground = NativeRGB(red: 60, green: 90, blue: 145) {
+        didSet { if oldValue != selectionBackground { invalidateSelectionColors() } }
+    }
     private var frame = TerminalExternalFrame(
         columns: 1, rows: 0, topLine: 0, cursorLine: 0, cursorColumn: 0,
         cursorVisible: false, cursorStyle: .steadyBlock, isAlternateBuffer: false,
@@ -18,23 +26,35 @@ final class SwiftTermFrameSource: TerminalExternalFrameSource {
             store = TerminalRowStore()
             cached = [:]
         }
-        var next: [NativeRowID: (row: NativeTerminalRow, line: BufferLine)] = [:]
+        var next: [NativeRowID: CachedRow] = [:]
         var lines: [Int: BufferLine] = [:]
         for (index, row) in snapshot.rows {
             let line: BufferLine
-            if let old = cached[row.id], old.row === row {
+            let selected = snapshot.selection[index], link = highlightedLink[index]
+            if let old = cached[row.id], old.row === row, old.selection == selected, old.link == link {
                 line = old.line
             } else {
                 line = store.makeLine(columns: snapshot.columns)
                 for (column, cell) in row.cells.enumerated() {
-                    store.setCell(line, column: column, text: cell.text, width: cell.width,
-                                  attribute: attribute(cell))
+                    var value = attribute(cell)
+                    if link?.contains(column) == true {
+                        value = Attribute(foreground: value.fg, background: value.bg,
+                            style: value.style.union(.underline),
+                            underlineStyle: value.underlineStyle == .none ? .single : value.underlineStyle,
+                            underlineColor: value.underlineColor, hasOverline: value.hasOverline)
+                    }
+                    if selected?.contains(column) == true {
+                        value = Attribute(foreground: color(.rgb(selectionForeground)), background: color(.rgb(selectionBackground)),
+                            style: value.style.subtracting(.inverse), underlineStyle: value.underlineStyle,
+                            underlineColor: value.underlineColor, hasOverline: value.hasOverline)
+                    }
+                    store.setCell(line, column: column, text: cell.text, width: cell.width, attribute: value)
                 }
                 store.setLineState(line, isWrapped: row.isWrapped)
                 convertedRows += 1
             }
             lines[index] = line
-            next[row.id] = (row, line)
+            next[row.id] = (row, line, selected, link)
         }
         self.lines = lines
         cached = next
@@ -51,7 +71,10 @@ final class SwiftTermFrameSource: TerminalExternalFrameSource {
             cursorVisible: cursor.visible, cursorStyle: style,
             isAlternateBuffer: snapshot.isAlternateScreen,
             palette: snapshot.palette.map { SwiftTerm.Color(red8: UInt16($0.red), green8: UInt16($0.green), blue8: UInt16($0.blue)) })
+        if case .hollow = cursor.shape { frame.cursorHollow = true }
     }
+
+    func invalidateSelectionColors() { cached = [:] }
 
     func withFrame(_ body: (TerminalExternalFrame, TerminalRowStore, (Int) -> BufferLine?) -> Void) {
         // Source, store and driver are main-actor isolated. No parse/network
@@ -73,7 +96,8 @@ final class SwiftTermFrameSource: TerminalExternalFrameSource {
         return Attribute(foreground: color(cell.foreground),
                          background: color(cell.background),
                          style: style, underlineStyle: underline,
-                         underlineColor: cell.underlineColor == .defaultColor ? nil : color(cell.underlineColor))
+                         underlineColor: cell.underlineColor == .defaultColor ? nil : color(cell.underlineColor),
+                         hasOverline: cell.style.contains(.overline))
     }
 
     private func color(_ value: NativeCellColor) -> Attribute.Color {

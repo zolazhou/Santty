@@ -1,0 +1,7 @@
+Keyboard/pointer compatibility policy and test vectors include adaptations from herdr-app
+https://github.com/herdrdev/herdr-app
+Revision: a547b16ccb5e8811b2dd8b3b901d31df8f05e55a
+Licensed under Apache-2.0; see Herdr-app.txt.
+Upstream files: src/terminal.rs (key_bytes, control_alias_bytes, keyboard/mouse tests and platform routing), src/vt.rs (encode_key, pointer/selection API policy, bounded clipboard capture and hyperlink URI lookup).
+Changes: Swift/AppKit semantic input boundary and tests against official precompiled libghostty-vt 1.0.0. Clipboard requests use a bounded, explicitly reviewed offer and a synchronous denial, not an early-success acknowledgement; reads remain disabled. No GPUI code or emulator is linked.
+SwiftTerm platform behavior is referenced at revision 28c6d1d95de156a36a2eaa278177ee7f8a15d322; see SwiftTerm.txt.

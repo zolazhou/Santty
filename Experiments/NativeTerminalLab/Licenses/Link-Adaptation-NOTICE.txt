@@ -1,0 +1,36 @@
+Link character-policy adaptations reference SwiftTerm 28c6d1d95de156a36a2eaa278177ee7f8a15d322,
+Sources/SwiftTerm/Mac/UntrustedTerminalLink.swift, originally adapted from Ghostty:
+https://github.com/ghostty-org/ghostty/commit/77537c8065f3055d214144caab7d137543a6e133
+Changes: use Santty's shared URL parser; reject encoded controls, credentials,
+local files and custom handlers without probing the local filesystem.
+
+Scheme URL tokens and cell-range mapping also reference SwiftTerm Terminal.swift
+(ghosttyImplicitLinkRegex / implicitLinkMatch) at the same pinned revision;
+modifier/hover lifecycle references MacTerminalView.swift. Changes: only the
+scheme-URL branch, bounded owned VT soft-wrap groups, UTF-16-to-cell mapping,
+no path heuristics or filesystem access, no truncated-prefix activation, and
+fresh implicit-target verification under the VT lock. SwiftTerm's linear regex
+tokens are retained rather than upstream's ambiguous nested repetitions.
+SwiftTerm copyright and MIT permission are preserved in SwiftTerm.txt.
+
+MIT License
+
+Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

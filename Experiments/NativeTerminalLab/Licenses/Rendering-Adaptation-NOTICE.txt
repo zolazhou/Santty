@@ -1,0 +1,18 @@
+External style presentation additions target SwiftTerm
+28c6d1d95de156a36a2eaa278177ee7f8a15d322 (MIT; full license and copyright
+are preserved in SwiftTerm.txt).
+
+References: SwiftTerm's Attribute/CellArena intern tables, SnapshotTextBuilder,
+Core Graphics run decorations, Metal PreparedDecoration, and CaretView's
+inactive outline path. Herdr-app a547b16ccb5e8811b2dd8b3b901d31df8f05e55a
+vt.rs provides the already-adapted owned cursor-shape boundary (Apache-2.0;
+see Herdr-app.txt and Keyboard-Adaptation-NOTICE.txt).
+
+Changes: an external hasOverline attribute in a spare intern-key bit (not a
+wider packed cell or legacy style byte); foreground-colored cell-top decoration
+through both renderers' existing paths; selection/hover/conceal propagation;
+and an explicit external hollow-cursor flag reusing the existing outline
+geometry independently of focus, visibility and blink style. Defaults remain
+false for existing SwiftTerm clients. No terminal parser, encoder, Metal shader,
+or precompiled Ghostty artifact is replaced. Validation is macOS-only; shared
+iOS caret wiring is included for source consistency, not iOS certification.

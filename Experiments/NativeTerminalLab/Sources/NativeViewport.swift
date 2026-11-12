@@ -1,5 +1,17 @@
 import Foundation
 
+/// Owned result of an atomic anchor resolution + bounded VT frame capture.
+struct NativeTerminalPresentation {
+    enum Anchor: Equatable {
+        case following
+        case preserved(column: Int)
+        case oldestAvailable
+    }
+    let viewport: NativeViewport
+    let frame: NativeTerminalFrame
+    let anchor: Anchor
+}
+
 /// Pure geometry. The scroll view owns motion; this type never adds easing.
 struct NativeViewport: Equatable {
     let rowHeight: CGFloat
@@ -32,6 +44,8 @@ struct NativeViewport: Equatable {
         return Int(floor(documentY / rowHeight))
     }
 
+    /// Geometry-only fallback for callers with unchanged logical row indices.
+    /// Live terminal presentation must resolve the driver's content reference.
     func offsetAfterUpdate(totalRows: Int, viewportHeight: CGFloat, rowHeight: CGFloat) -> CGFloat {
         let next = NativeViewport(rowHeight: rowHeight, viewportHeight: viewportHeight,
                                   totalRows: totalRows, offset: 0)

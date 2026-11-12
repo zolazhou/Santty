@@ -1,0 +1,152 @@
+--- a/Sources/SwiftTerm/CharData.swift
++++ b/Sources/SwiftTerm/CharData.swift
+@@ -117,0 +118,2 @@
++    /// External-render decoration; kept outside the eight legacy style bits.
++    public private(set) var hasOverline: Bool = false
+@@ -125 +127,2 @@
+-            lhs.underlineColor == rhs.underlineColor
++            lhs.underlineColor == rhs.underlineColor &&
++            lhs.hasOverline == rhs.hasOverline
+@@ -161,0 +165 @@
++        if hasOverline { params.append("53") }
+--- a/Sources/SwiftTerm/CellStorage.swift
++++ b/Sources/SwiftTerm/CellStorage.swift
+@@ -253 +253 @@
+-/// style. Word one contains the optional underline color. This key is an
++/// style. Word one contains the optional underline color and external overline. This key is an
+@@ -267,5 +267,3 @@
+-        if let underlineColor = attribute.underlineColor {
+-            word1 = Self.colorKey(underlineColor) | (1 << 26)
+-        } else {
+-            word1 = 0
+-        }
++        let underline = attribute.underlineColor.map { Self.colorKey($0) | (1 << 26) } ?? 0
++        // Spare key bit, not a wider packed cell or legacy CharacterStyle.
++        word1 = underline | (attribute.hasOverline ? (1 << 27) : 0)
+@@ -780 +778 @@
+-            attribute.underlineStyle == .none && attribute.underlineColor == nil
++            attribute.underlineStyle == .none && attribute.underlineColor == nil && !attribute.hasOverline
+--- a/Sources/SwiftTerm/TerminalRowStore.swift
++++ b/Sources/SwiftTerm/TerminalRowStore.swift
+@@ -127 +127,2 @@
+-                 underlineStyle: UnderlineStyle = .none, underlineColor: Color? = nil)
++                 underlineStyle: UnderlineStyle = .none, underlineColor: Color? = nil,
++                 hasOverline: Bool = false)
+@@ -130 +131 @@
+-                  underlineStyle: underlineStyle, underlineColor: underlineColor)
++                  underlineStyle: underlineStyle, underlineColor: underlineColor, hasOverline: hasOverline)
+--- a/Sources/SwiftTerm/Apple/AppleTerminalView.swift
++++ b/Sources/SwiftTerm/Apple/AppleTerminalView.swift
+@@ -21,0 +22 @@
++let SwiftTermOverlineColorKey = NSAttributedString.Key("SwiftTermOverlineColor")
+@@ -388,0 +390 @@
++    let overlineColor = SwiftTermOverlineColorKey.rawValue
+@@ -405,0 +408 @@
++    let overlineColor: NSString
+@@ -415,0 +419 @@
++        overlineColor = names.overlineColor as NSString
+@@ -3216,0 +3221,11 @@
++            }
++        }
++
++        if let color = attributes[SwiftTermOverlineColorKey] as? TTColor {
++            let thickness = max(round(scale * fontSet.underlineThickness()) / scale, 0.5)
++            let baseline = CellGeometry.baselineOffset(normalFont: fontSet.normal, cellHeight: cellDimension.height)
++            currentContext.setShouldAntialias(false)
++            currentContext.setFillColor(coreGraphicsRenderCache.cgColor(for: color))
++            for p in positions {
++                currentContext.fill(CGRect(x: p.x, y: p.y + cellDimension.height - baseline - thickness,
++                                           width: cellWidth, height: thickness))
+@@ -3649 +3664,2 @@
+-                                    forKey: runAttributeKeys.strikethroughStyle) != nil,
++                                    forKey: runAttributeKeys.strikethroughStyle) != nil
++                                || attrs.object(forKey: runAttributeKeys.overlineColor) != nil,
+--- a/Sources/SwiftTerm/Apple/SnapshotTextBuilder.swift
++++ b/Sources/SwiftTerm/Apple/SnapshotTextBuilder.swift
+@@ -89,0 +90 @@
++    var overline: PlainColor? = nil
+@@ -378,0 +380 @@
++        if attribute.hasOverline { result[SwiftTermOverlineColorKey] = foregroundColor }
+@@ -622,0 +625,3 @@
++                        if batchAttributes[SwiftTermOverlineColorKey] != nil {
++                            batchAttributes[SwiftTermOverlineColorKey] = context.selectedTextForegroundColor
++                        }
+@@ -633,0 +639 @@
++                        batchAttributes.removeValue(forKey: SwiftTermOverlineColorKey)
+@@ -829,0 +836 @@
++                if style.overline != nil { style.overline = .color(context.selectedTextForegroundColor) }
+@@ -837,0 +845 @@
++                style.overline = nil
+@@ -898,0 +907 @@
++        if attribute.hasOverline { style.overline = foregroundColor }
+@@ -1003 +1012,2 @@
+-              (a.strikethrough == nil) == (b.strikethrough == nil) else {
++              (a.strikethrough == nil) == (b.strikethrough == nil),
++              (a.overline == nil) == (b.overline == nil) else {
+@@ -1024,0 +1035,2 @@
++        if let overlineA = a.overline, let overlineB = b.overline,
++           !sameColor(overlineA, overlineB, context: context) { return false }
+--- a/Sources/SwiftTerm/Apple/TerminalSnapshot.swift
++++ b/Sources/SwiftTerm/Apple/TerminalSnapshot.swift
+@@ -319,0 +320 @@
++    var cursorHollow = false
+@@ -426,0 +428 @@
++        cursorHollow = false
+@@ -686,0 +689 @@
++        cursorHollow = frame.cursorHollow
+--- a/Sources/SwiftTerm/Apple/TerminalExternalFrame.swift
++++ b/Sources/SwiftTerm/Apple/TerminalExternalFrame.swift
+@@ -76,0 +77,2 @@
++    /// Explicit hollow shape, independent of focus and blink timing.
++    public var cursorHollow: Bool = false
+--- a/Sources/SwiftTerm/Apple/ExternalRenderOwner.swift
++++ b/Sources/SwiftTerm/Apple/ExternalRenderOwner.swift
+@@ -53,0 +54 @@
++        var hollow: Bool
+@@ -94 +95,2 @@
+-                CursorKey(row: $0.screenRow, column: $0.visualCol, hidden: $0.hidden, style: frame.cursorStyle)
++                CursorKey(row: $0.screenRow, column: $0.visualCol, hidden: $0.hidden,
++                          style: frame.cursorStyle, hollow: frame.cursorHollow)
+--- a/Sources/SwiftTerm/Apple/CaretView.swift
++++ b/Sources/SwiftTerm/Apple/CaretView.swift
+@@ -28 +28 @@
+-        if !hasFocus {
++        if !hasFocus || forceHollow {
+--- a/Sources/SwiftTerm/Apple/Metal/MetalTerminalRenderer.swift
++++ b/Sources/SwiftTerm/Apple/Metal/MetalTerminalRenderer.swift
+@@ -2251,0 +2252,8 @@
++                }
++
++                if let color = runAttributes[SwiftTermOverlineColorKey] as? TTColor {
++                    prepared.decorations.append(PreparedDecoration(
++                        style: .single, isDouble: false, color: colorToSIMD(color),
++                        thicknessPx: underlineThickness * scale,
++                        position: context.cellDimension.height - yOffset - underlineThickness / 2,
++                        doubleGap: 0, spans: decorationSpans()))
+@@ -2461,0 +2470,7 @@
++            if let overline = style.overline {
++                prepared.decorations.append(PreparedDecoration(
++                    style: .single, isDouble: false, color: colorToSIMD(overline),
++                    thicknessPx: underlineThickness * scale,
++                    position: context.cellDimension.height - yOffset - underlineThickness / 2,
++                    doubleGap: 0, spans: decorationSpans()))
++            }
+@@ -3983 +3998 @@
+-        if !hasFocus {
++        if !hasFocus || snapshot.cursorHollow {
+--- a/Sources/SwiftTerm/Mac/MacCaretView.swift
++++ b/Sources/SwiftTerm/Mac/MacCaretView.swift
+@@ -24,0 +25 @@
++    var forceHollow = false { didSet { if oldValue != forceHollow { updateView() } } }
+--- a/Sources/SwiftTerm/Mac/MacTerminalRenderView.swift
++++ b/Sources/SwiftTerm/Mac/MacTerminalRenderView.swift
+@@ -458,0 +459 @@
++        caretView.forceHollow = owner.snapshot.cursorHollow
+--- a/Sources/SwiftTerm/iOS/iOSCaretView.swift
++++ b/Sources/SwiftTerm/iOS/iOSCaretView.swift
+@@ -22,0 +23 @@
++    var forceHollow = false { didSet { if oldValue != forceHollow { updateView() } } }
+--- a/Sources/SwiftTerm/iOS/iOSTerminalRenderView.swift
++++ b/Sources/SwiftTerm/iOS/iOSTerminalRenderView.swift
+@@ -452,0 +453 @@
++        caretView.forceHollow = owner.snapshot.cursorHollow

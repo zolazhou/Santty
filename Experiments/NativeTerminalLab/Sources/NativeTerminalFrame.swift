@@ -32,6 +32,27 @@ struct NativeTerminalCell: Equatable, Sendable {
     var underlineColor: NativeCellColor
     var style: NativeCellStyle
     var underline: UInt8
+    var hyperlink: String? = nil
+    var hasExplicitHyperlink = false
+    var isWrapSpacer = false
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        // URL paths can distinguish canonically equivalent Unicode bytes.
+        // String's normalized equality must not hide a target-only change.
+        sameBytes(lhs.text, rhs.text) && sameBytes(lhs.hyperlink, rhs.hyperlink)
+            && lhs.width == rhs.width && lhs.foreground == rhs.foreground
+            && lhs.background == rhs.background && lhs.underlineColor == rhs.underlineColor
+            && lhs.style == rhs.style && lhs.underline == rhs.underline
+            && lhs.hasExplicitHyperlink == rhs.hasExplicitHyperlink && lhs.isWrapSpacer == rhs.isWrapSpacer
+    }
+
+    private static func sameBytes(_ lhs: String?, _ rhs: String?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil): return true
+        case let (lhs?, rhs?): return lhs.utf8.elementsEqual(rhs.utf8)
+        default: return false
+        }
+    }
 }
 
 struct NativeRowID: Hashable, Sendable {
@@ -44,11 +65,13 @@ final class NativeTerminalRow: Sendable {
     let id: NativeRowID
     let cells: [NativeTerminalCell]
     let isWrapped: Bool
+    let hyperlinkBytes: Int
 
     init(id: NativeRowID, cells: [NativeTerminalCell], isWrapped: Bool) {
         self.id = id
         self.cells = cells
         self.isWrapped = isWrapped
+        self.hyperlinkBytes = cells.reduce(0) { $0 + ($1.hyperlink?.utf8.count ?? 0) }
     }
 }
 
@@ -73,4 +96,5 @@ struct NativeTerminalFrame: Sendable {
     let cursorColor: NativeRGB
     let palette: [NativeRGB]
     let isAlternateScreen: Bool
+    var selection: [Int: ClosedRange<Int>] = [:]
 }

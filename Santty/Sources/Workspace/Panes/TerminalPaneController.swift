@@ -489,13 +489,7 @@ private final class PromptEditorTextView: NSTextView {
 
 extension TerminalPaneController: TerminalSurfaceOpenURLDelegate {
     static func linkURL(_ text: String) -> URL? {
-        guard !text.isEmpty,
-              text.rangeOfCharacter(from: .controlCharacters) == nil else { return nil }
-        if text.hasPrefix("/") { return URL(fileURLWithPath: text) }
-        guard let url = URL(string: text, encodingInvalidCharacters: false),
-              let scheme = url.scheme?.lowercased() else { return nil }
-        if ["http", "https"].contains(scheme), url.host?.isEmpty != false { return nil }
-        return url
+        TerminalLinkValidation.url(text)
     }
 
     func terminalDidRequestOpenURL(_ text: String, kind _: TerminalOpenURLKind) {
