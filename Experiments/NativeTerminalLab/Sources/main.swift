@@ -1,7 +1,7 @@
 import AppKit
 
 @MainActor
-private final class LabAppDelegate: NSObject, NSApplicationDelegate {
+private final class LabAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var window: NSWindow?
     private var terminal: NativeTerminalScrollView?
     private let rendererPicker = NSPopUpButton()
@@ -73,6 +73,9 @@ private final class LabAppDelegate: NSObject, NSApplicationDelegate {
             let menu = NSMenu()
             let app = NSMenuItem()
             let submenu = NSMenu()
+            let imageFixture = submenu.addItem(withTitle: "Image fixture", action: #selector(showImageFixture), keyEquivalent: "")
+            imageFixture.target = self
+            submenu.addItem(NSMenuItem.separator())
             submenu.addItem(withTitle: "Quit Terminal Lab", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
             app.submenu = submenu
             menu.addItem(app)
@@ -182,6 +185,22 @@ private final class LabAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(showImageFixture) { return lab == nil && sessionButton.isEnabled }
+        return true
+    }
+
+    @objc private func showImageFixture() {
+        guard lab == nil, sessionButton.isEnabled else { return }
+        terminal?.reset(with: "\u{1b}[?25lVT-owned RGBA + PNG transport images — no animation yet\r\n"
+            + "Switch Core Graphics / Metal; Reset fixture restores the text sample.\r\n"
+            + "\u{1b}[4;3H\u{1b}_Ga=T,f=32,s=2,v=2,i=7,p=3,c=12,r=6,C=1;/wAA/wD/AP8AAP///////w==\u{1b}\\"
+            + "\u{1b}[4;22H\u{1b}_Ga=p,i=7,p=4,x=1,w=1,h=2,c=6,r=6,C=1\u{1b}\\"
+            + "\u{1b}[4;34H\u{1b}_Ga=T,f=100,i=9,p=1,c=12,r=6,C=1;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGP4z8DAAMIM/4EAAB/uBfsL2WiLAAAAAElFTkSuQmCC\u{1b}\\"
+            + "\u{1b}[12;1HLeft: RGBA quadrants. Middle: green / white crop. Right: f=100 PNG quadrants.\r\n")
+        nextLine = 0
+    }
+
     @objc private func appendRows() {
         terminal?.feed(Self.fixture(start: nextLine, count: 100))
         nextLine += 100
@@ -204,6 +223,10 @@ private final class LabAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 private final class LabTestAppDelegate: NSObject, NSApplicationDelegate {}
+
+// Before NSApplication, tests or transport tasks can enter the VT library.
+do { try GhosttyVTSystem.prepare() }
+catch { fatalError("Ghostty VT system initialization failed: \(error)") }
 
 MainActor.assumeIsolated {
     let app = NSApplication.shared

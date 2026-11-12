@@ -36,8 +36,13 @@ final class SwiftTermFrameSource: TerminalExternalFrameSource {
             } else {
                 line = store.makeLine(columns: snapshot.columns)
                 for (column, cell) in row.cells.enumerated() {
-                    var value = attribute(cell)
-                    if link?.contains(column) == true {
+                    // The VT row marks this reserved placeholder. Suppress
+                    // its text/ID colors/decorations, not its cell background;
+                    // resolved image placements come from VT, never SwiftTerm's
+                    // separate placeholder decoder.
+                    var value = cell.isImagePlaceholder
+                        ? Attribute(foreground: .defaultColor, background: color(cell.background), style: []) : attribute(cell)
+                    if !cell.isImagePlaceholder, link?.contains(column) == true {
                         value = Attribute(foreground: value.fg, background: value.bg,
                             style: value.style.union(.underline),
                             underlineStyle: value.underlineStyle == .none ? .single : value.underlineStyle,
@@ -48,7 +53,7 @@ final class SwiftTermFrameSource: TerminalExternalFrameSource {
                             style: value.style.subtracting(.inverse), underlineStyle: value.underlineStyle,
                             underlineColor: value.underlineColor, hasOverline: value.hasOverline)
                     }
-                    store.setCell(line, column: column, text: cell.text, width: cell.width, attribute: value)
+                    store.setCell(line, column: column, text: cell.isImagePlaceholder ? nil : cell.text, width: cell.width, attribute: value)
                 }
                 store.setLineState(line, isWrapped: row.isWrapped)
                 convertedRows += 1
@@ -72,6 +77,32 @@ final class SwiftTermFrameSource: TerminalExternalFrameSource {
             isAlternateBuffer: snapshot.isAlternateScreen,
             palette: snapshot.palette.map { SwiftTerm.Color(red8: UInt16($0.red), green8: UInt16($0.green), blue8: UInt16($0.blue)) })
         if case .hollow = cursor.shape { frame.cursorHollow = true }
+        let pictures = snapshot.imageSnapshot
+        if !pictures.placements.isEmpty {
+            let live = Set(pictures.placements.map(\.imageID))
+            let images = pictures.images.filter { live.contains($0.key) }.mapValues {
+                KittyGraphicsRenderImage(imageId: $0.id, imageNumber: nil, width: $0.width, height: $0.height,
+                    rgba: $0.rgba, contentGeneration: $0.generation)
+            }
+            let placements = pictures.placements.enumerated().map { index, p in
+                KittyGraphicsRenderPlacement(token: UInt64(index + 1), placementId: p.placementID, imageId: p.imageID,
+                    visibleSource: .init(x: p.sourceX, y: p.sourceY, width: p.sourceWidth, height: p.sourceHeight),
+                    geometry: .init(column: p.column, row: p.row - topLine, columns: p.columns, rows: p.rows),
+                    pixelOffsetX: p.offsetX, pixelOffsetY: p.offsetY, zIndex: p.z,
+                    isVirtual: false, insertionOrder: UInt64(index),
+                    resolvedSize: .init(width: p.pixelWidth, height: p.pixelHeight))
+            }
+            frame.kitty = .init(storageGeneration: pictures.revision, imagesById: images, placements: placements)
+        }
+    }
+
+    /// Drop old pixels/text before reconnect/reset can begin a held restore.
+    /// A frame-driver tick during that hold must see empty host presentation.
+    func resetPresentation() {
+        store = TerminalRowStore(); lines = [:]; cached = [:]; highlightedLink = [:]
+        frame = TerminalExternalFrame(columns: 1, rows: 0, topLine: 0, cursorLine: 0, cursorColumn: 0,
+            cursorVisible: false, cursorStyle: .steadyBlock, isAlternateBuffer: false,
+            palette: TerminalExternalFrame.makePalette())
     }
 
     func invalidateSelectionColors() { cached = [:] }

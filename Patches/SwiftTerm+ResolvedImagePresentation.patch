@@ -1,0 +1,196 @@
+--- a/Sources/SwiftTerm/KittyGraphicsSnapshot.swift
++++ b/Sources/SwiftTerm/KittyGraphicsSnapshot.swift
+@@ -44,0 +45,7 @@
++/// Already-resolved destination size in protocol pixels, not AppKit points.
++public struct KittyGraphicsPixelSize: Sendable, Hashable {
++    public let width: Int
++    public let height: Int
++    public init(width: Int, height: Int) { self.width = width; self.height = height }
++}
++
+@@ -119,0 +127,2 @@
++    /// External VT resolved size. Nil preserves the original grid-based path.
++    public let resolvedSize: KittyGraphicsPixelSize?
+@@ -131 +140,2 @@
+-        insertionOrder: UInt64
++        insertionOrder: UInt64,
++        resolvedSize: KittyGraphicsPixelSize? = nil
+@@ -142,0 +153 @@
++        self.resolvedSize = resolvedSize
+@@ -143,0 +155,18 @@
++
++    /// Shared CG/Metal destination geometry. Resolved offsets are measured
++    /// right/down from the top-left cell; never infer size from grid extent.
++    func destinationRect(cellWidth: CGFloat, cellHeight: CGFloat, imageScale: CGFloat,
++                         screenRow: Int, lineOrigin: CGPoint) -> CGRect {
++        let x = CGFloat(pixelOffsetX) / imageScale, y = CGFloat(pixelOffsetY) / imageScale
++        if let size = resolvedSize {
++            let height = CGFloat(size.height) / imageScale
++            return CGRect(x: CGFloat(geometry.column) * cellWidth + x,
++                y: lineOrigin.y + CGFloat(screenRow - geometry.row + 1) * cellHeight - y - height,
++                width: CGFloat(size.width) / imageScale, height: height)
++        }
++        let rowsBelow = geometry.row + geometry.rows - 1 - screenRow
++        return CGRect(x: CGFloat(geometry.column) * cellWidth + x,
++            y: lineOrigin.y - CGFloat(rowsBelow) * cellHeight + y,
++            width: max(0, CGFloat(geometry.columns) * cellWidth - x),
++            height: max(0, CGFloat(geometry.rows) * cellHeight - y))
++    }
+--- a/Sources/SwiftTerm/Apple/AppleTerminalView.swift
++++ b/Sources/SwiftTerm/Apple/AppleTerminalView.swift
+@@ -1335,0 +1336 @@
++    var imageId: UInt32 = 0
+@@ -3447,0 +3449,7 @@
++        func kittyCacheKey(_ placement: KittyGraphicsRenderPlacement, _ image: KittyGraphicsRenderImage) -> KittyPlacementImageKey {
++            let resolved = placement.resolvedSize != nil
++            return KittyPlacementImageKey(token: resolved ? UInt64(image.imageId) : placement.token,
++                contentGeneration: image.contentGeneration,
++                source: resolved ? KittyGraphicsPixelRect(x: 0, y: 0, width: image.width, height: image.height) : placement.visibleSource,
++                imageId: image.imageId)
++        }
+@@ -3465,4 +3473 @@
+-                liveKittyImageKeys.insert(KittyPlacementImageKey(
+-                    token: placement.token,
+-                    contentGeneration: image.contentGeneration,
+-                    source: placement.visibleSource))
++                liveKittyImageKeys.insert(kittyCacheKey(placement, image))
+@@ -3490,5 +3495,4 @@
+-            let source = placement.visibleSource
+-            let key = KittyPlacementImageKey(
+-                token: placement.token,
+-                contentGeneration: image.contentGeneration,
+-                source: source)
++            // Resolved placements share one full bitmap per image, not one
++            // near-full copied crop per placement (which can amplify memory).
++            let key = kittyCacheKey(placement, image)
++            let source = key.source
+@@ -3514 +3517,0 @@
+-            let offsetScale = kittyImageScale
+@@ -3524,2 +3527,4 @@
+-                guard screenRow >= geometry.row,
+-                      screenRow < geometry.row + geometry.rows,
++                guard placement.resolvedSize != nil || (screenRow >= geometry.row && screenRow < geometry.row + geometry.rows) else { continue }
++                let rect = placement.destinationRect(cellWidth: kittyCellWidth, cellHeight: kittyCellHeight,
++                    imageScale: kittyImageScale, screenRow: screenRow, lineOrigin: lineOrigin)
++                guard rect.width > 0, rect.height > 0, rect.intersects(lineRect),
+@@ -3527,9 +3531,0 @@
+-                let offsetX = CGFloat(placement.pixelOffsetX) / offsetScale
+-                let offsetY = CGFloat(placement.pixelOffsetY) / offsetScale
+-                let rowsBelow = geometry.row + geometry.rows - 1 - screenRow
+-                let rect = CGRect(
+-                    x: CGFloat(geometry.column) * kittyCellWidth + offsetX,
+-                    y: lineOrigin.y - CGFloat(rowsBelow) * kittyCellHeight + offsetY,
+-                    width: max(0, CGFloat(geometry.columns) * kittyCellWidth - offsetX),
+-                    height: max(0, CGFloat(geometry.rows) * kittyCellHeight - offsetY))
+-                guard rect.width > 0, rect.height > 0 else { continue }
+@@ -3538 +3534,18 @@
+-                image.draw(in: rect)
++                if placement.resolvedSize != nil {
++                    let source = placement.visibleSource
++                    // Crop the provider-backed CGImage before interpolation so
++                    // neighboring source pixels cannot bleed into the crop.
++                    #if os(macOS)
++                    let full = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
++                    #else
++                    let full = image.cgImage
++                    #endif
++                    if let cropped = full?.cropping(to: CGRect(x: source.x, y: source.y,
++                                                              width: source.width, height: source.height)) {
++                        #if os(macOS)
++                        context.draw(cropped, in: rect)
++                        #else
++                        TTImage(cgImage: cropped, size: rect.size).draw(in: rect)
++                        #endif
++                    }
++                } else { image.draw(in: rect) }
+--- a/Sources/SwiftTerm/Apple/Metal/MetalTerminalRenderer.swift
++++ b/Sources/SwiftTerm/Apple/Metal/MetalTerminalRenderer.swift
+@@ -364,0 +365 @@
++    var sourceClamp: SIMD4<Float>? = nil
+@@ -370,0 +372 @@
++    var sourceClamp: SIMD4<Float>? = nil
+@@ -1055,0 +1058 @@
++    private let imageCropPipeline: MTLRenderPipelineState
+@@ -1259,0 +1263,2 @@
++              let imageCropPipeline = MetalTerminalRenderer.makeTextPipeline(device: device, library: library,
++                  pixelFormat: pixelFormat, vertexName: "terminal_text_vertex", fragmentName: "terminal_image_crop_fragment"),
+@@ -1293,0 +1299 @@
++        self.imageCropPipeline = imageCropPipeline
+@@ -2714,2 +2720 @@
+-                guard screenRow >= geometry.row,
+-                      screenRow < geometry.row + geometry.rows,
++                guard placement.resolvedSize != nil || (screenRow >= geometry.row && screenRow < geometry.row + geometry.rows),
+@@ -2720,8 +2725,2 @@
+-                let offsetX = CGFloat(placement.pixelOffsetX) / context.imageScale
+-                let offsetY = CGFloat(placement.pixelOffsetY) / context.imageScale
+-                let rowsBelow = geometry.row + geometry.rows - 1 - screenRow
+-                let rect = CGRect(
+-                    x: CGFloat(geometry.column) * cellWidth + offsetX,
+-                    y: lineOrigin.y - CGFloat(rowsBelow) * cellHeight + offsetY,
+-                    width: max(0, CGFloat(geometry.columns) * cellWidth - offsetX),
+-                    height: max(0, CGFloat(geometry.rows) * cellHeight - offsetY))
++                let rect = placement.destinationRect(cellWidth: cellWidth, cellHeight: cellHeight,
++                    imageScale: context.imageScale, screenRow: screenRow, lineOrigin: lineOrigin)
+@@ -2742 +2741 @@
+-                    scale: scale) else { continue }
++                    scale: scale, clampSource: placement.resolvedSize != nil) else { continue }
+@@ -3751 +3750 @@
+-            result.append(ImageDrawBuffer(texture: draw.texture, buffer: buffer, vertexCount: count))
++            result.append(ImageDrawBuffer(texture: draw.texture, buffer: buffer, vertexCount: count, sourceClamp: draw.sourceClamp))
+@@ -3878,0 +3878 @@
++            bindImagePipeline(draw.sourceClamp, encoder: encoder)
+@@ -3921,0 +3922,7 @@
++    private func bindImagePipeline(_ bounds: SIMD4<Float>?, encoder: MTLRenderCommandEncoder) {
++        if var bounds {
++            encoder.setRenderPipelineState(imageCropPipeline)
++            encoder.setFragmentBytes(&bounds, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
++        } else { encoder.setRenderPipelineState(textPipeline) }
++    }
++
+@@ -3941,0 +3949 @@
++                bindImagePipeline(draw.sourceClamp, encoder: encoder)
+@@ -4384 +4392 @@
+-                           scale: CGFloat) -> ImageDraw? {
++                           scale: CGFloat, clampSource: Bool = false) -> ImageDraw? {
+@@ -4400 +4408,7 @@
+-        return ImageDraw(texture: texture, vertices: vertices)
++        var draw = ImageDraw(texture: texture, vertices: vertices)
++        if clampSource {
++            let halfX = 0.5 / Float(texture.width), halfY = 0.5 / Float(texture.height)
++            let minU = u0 + halfX, minV = v0 + halfY
++            draw.sourceClamp = SIMD4(minU, minV, max(minU, u1 - halfX), max(minV, v1 - halfY))
++        }
++        return draw
+@@ -4716,0 +4731,4 @@
++    #if DEBUG
++    var capturedKittyTextureCount: Int { kittyTextureCache.count }
++    #endif
++
+@@ -4775,0 +4794 @@
++            "terminal_image_crop_fragment",
+--- a/Sources/SwiftTerm/Apple/Metal/Shaders.metal
++++ b/Sources/SwiftTerm/Apple/Metal/Shaders.metal
+@@ -75,0 +76,10 @@
++// Resolved image crops clamp to source pixel centers, not to the whole
++// texture. Clipping destination quads must not change these source bounds.
++fragment float4 terminal_image_crop_fragment(GlyphOut in [[stage_in]],
++                                              texture2d<float> atlas [[texture(0)]],
++                                              sampler samp [[sampler(0)]],
++                                              constant float4 &bounds [[buffer(0)]]) {
++    float4 tex = atlas.sample(samp, clamp(in.texCoord, bounds.xy, bounds.zw));
++    return float4(tex.rgb * in.color.rgb, tex.a * in.color.a);
++}
++
+--- a/Sources/SwiftTerm/Apple/Metal/MetalShaderSource.swift
++++ b/Sources/SwiftTerm/Apple/Metal/MetalShaderSource.swift
+@@ -80,0 +81,10 @@
++// Resolved image crops clamp to source pixel centers, not to the whole
++// texture. Clipping destination quads must not change these source bounds.
++fragment float4 terminal_image_crop_fragment(GlyphOut in [[stage_in]],
++                                              texture2d<float> atlas [[texture(0)]],
++                                              sampler samp [[sampler(0)]],
++                                              constant float4 &bounds [[buffer(0)]]) {
++    float4 tex = atlas.sample(samp, clamp(in.texCoord, bounds.xy, bounds.zw));
++    return float4(tex.rgb * in.color.rgb, tex.a * in.color.a);
++}
++

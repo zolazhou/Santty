@@ -152,7 +152,7 @@ final class NativeTerminalScrollView: NSScrollView {
     }
 
     func reset(with fixture: String) {
-        renderer.resetInputState()
+        resetPresentation()
         driver.reset()
         driver.feed(fixture)
         geometry = nil
@@ -171,6 +171,13 @@ final class NativeTerminalScrollView: NSScrollView {
         presentedFrame = nil
         lastRenderedRow = nil
         renderer.resetInputState()
+        source.resetPresentation()
+        linkHighlightDirty = false
+        // showEmpty hides the Metal surface/caret without asking an occluded
+        // drawable to render. Pending ticks then see the emptied source.
+        renderer.frameSource = nil
+        renderer.presentExternalFrame()
+        renderer.frameSource = source
     }
 
     var viewport: TerminalStreamViewport {
@@ -346,7 +353,9 @@ final class NativeTerminalScrollView: NSScrollView {
     }
 
     private func reportViewport(_ next: NativeViewport) {
-        onStatusChange?("\(driver.columns)×\(driver.rows) · row \(next.firstRow) + \(String(format: "%.2f", next.fraction)) pt · cached \(source.lines.count) rows · \(renderer.isUsingMetalRenderer ? "Metal" : "Core Graphics")")
+        let images = presentedFrame?.imageSnapshot
+        let imageStatus = images?.limited == true ? " · images limited" : images?.placements.isEmpty == false ? " · images \(images?.placements.count ?? 0)" : ""
+        onStatusChange?("\(driver.columns)×\(driver.rows) · row \(next.firstRow) + \(String(format: "%.2f", next.fraction)) pt · cached \(source.lines.count) rows · \(renderer.isUsingMetalRenderer ? "Metal" : "Core Graphics")\(imageStatus)")
     }
 
     private func report(_ error: Error) {

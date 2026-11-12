@@ -61,6 +61,33 @@ final class NativeHerdrSessionTests: XCTestCase {
         }
     }
 
+    func testPNGTransportThroughAnOwnedHerdrShellDrainsCreditAndDeletes() async throws {
+        let driver = try GhosttyVTDriver(columns: 120, rows: 30)
+        let lab: NativeHerdrLab
+        do { lab = try NativeHerdrLab(driver: driver) { _ in } }
+        catch let error as HerdrCoreError where error.kind == "not_installed" { throw XCTSkip("hc is required") }
+        do {
+            try await lab.start(viewport: .init(columns: 120, rows: 30))
+            try await waitFor { lab.session.state == .live }
+            let binding = try XCTUnwrap(lab.session.binding), vector = NativePNGFixtures.vectors[0]
+            let command = "printf '\\033[H\\033_Ga=T,f=100,i=7,p=3,c=4,r=4,C=1,q=2;\(vector.encoded)\\033\\\\'\r"
+            XCTAssertTrue(try lab.output.sendText(command))
+            try await waitFor("private f=100 PNG") { try driver.snapshot(topRow: max(0, driver.totalRows - driver.rows)).imageSnapshot.images[7]?.rgba == vector.rgba }
+            let image = try XCTUnwrap(driver.snapshot(topRow: max(0, driver.totalRows - driver.rows)).imageSnapshot.images[7])
+            XCTAssertTrue(try lab.output.sendText(#"awk 'BEGIN{for(i=0;i<3000;i++) print "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnop"; print "PNG-CREDIT-DONE"}'"# + "\r"))
+            try await waitFor("PNG output drains initial credit") { try self.hasText("PNG-CREDIT-DONE", in: driver) }
+            XCTAssertEqual(lab.session.binding, binding)
+            XCTAssertEqual(image.rgba, vector.rgba)
+            XCTAssertTrue(try lab.output.sendText(#"printf '\033_Ga=d,d=I,i=7,q=2\033\\'; printf 'PNG-DELETE-DONE\n'"# + "\r"))
+            try await waitFor("private PNG deletion") { try self.hasText("PNG-DELETE-DONE", in: driver) }
+            XCTAssertNil(try driver.snapshot(topRow: 0).imageSnapshot.images[7])
+            try await lab.stop()
+        } catch {
+            try? await lab.stop()
+            throw error
+        }
+    }
+
     func testShiftColonEntersCommandLineInPrivateCleanNeovim() async throws {
         try await checkCleanNeovimCommandLine(paste: false)
     }

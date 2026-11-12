@@ -35,6 +35,7 @@ struct NativeTerminalCell: Equatable, Sendable {
     var hyperlink: String? = nil
     var hasExplicitHyperlink = false
     var isWrapSpacer = false
+    var isImagePlaceholder = false
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         // URL paths can distinguish canonically equivalent Unicode bytes.
@@ -44,6 +45,7 @@ struct NativeTerminalCell: Equatable, Sendable {
             && lhs.background == rhs.background && lhs.underlineColor == rhs.underlineColor
             && lhs.style == rhs.style && lhs.underline == rhs.underline
             && lhs.hasExplicitHyperlink == rhs.hasExplicitHyperlink && lhs.isWrapSpacer == rhs.isWrapSpacer
+            && lhs.isImagePlaceholder == rhs.isImagePlaceholder
     }
 
     private static func sameBytes(_ lhs: String?, _ rhs: String?) -> Bool {
@@ -97,4 +99,5 @@ struct NativeTerminalFrame: Sendable {
     let palette: [NativeRGB]
     let isAlternateScreen: Bool
     var selection: [Int: ClosedRange<Int>] = [:]
+    var imageSnapshot: NativeImageSnapshot = .empty
 }

@@ -38,6 +38,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
     private let keyEvent: GhosttyKeyEvent
     private let pointer: GhosttyVTPointerCore
     private let history: GhosttyVTHistoryAnchor
+    private let images: GhosttyVTImages
     private var published: NativeTerminalFrame?
     private var storedColumns: Int
     private var storedRows: Int
@@ -45,10 +46,12 @@ final class GhosttyVTDriver: @unchecked Sendable {
     var rows: Int { lock.withLock { storedRows } }
 
     init(columns: Int = 80, rows: Int = 24, scrollbackLines: UInt? = nil,
+         imageLimits: NativeImageSnapshotLimits = .init(),
          clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) throws {
         guard (1...4096).contains(columns), (1...1024).contains(rows) else {
             throw NativeTerminalError.invalidSize
         }
+        try GhosttyVTSystem.prepare()
         var terminal: GhosttyTerminal?
         var state: GhosttyRenderState?
         var iterator: GhosttyRenderStateRowIterator?
@@ -56,10 +59,15 @@ final class GhosttyVTDriver: @unchecked Sendable {
         var encoder: GhosttyKeyEncoder?
         var keyEvent: GhosttyKeyEvent?
         var pointer: GhosttyVTPointerCore?
+        var images: GhosttyVTImages?
         let callbacks = VTCallbackState(clock: clock)
         callbacks.size = .init(rows: UInt16(rows), columns: UInt16(columns), cell_width: 8, cell_height: 16)
         do {
             try checkVT(ghostty_terminal_new(nil, &terminal, UInt16(columns), UInt16(rows)), "terminal_new")
+            // VT starts with zero physical cell dimensions. Match the 8x16
+            // size callback/default resize metrics before pre-layout output
+            // can create images; an OK reply alone is not a render placement.
+            try checkVT(ghostty_terminal_resize(terminal, UInt16(columns), UInt16(rows), 8, 16), "initial_metrics")
             try checkVT(ghostty_render_state_new(nil, &state), "render_state_new")
             try checkVT(ghostty_render_state_row_iterator_new(nil, &iterator), "row_iterator_new")
             try checkVT(ghostty_render_state_row_cells_new(nil, &cells), "row_cells_new")
@@ -90,7 +98,9 @@ final class GhosttyVTDriver: @unchecked Sendable {
             var overscan = GhosttyRenderStateOverscan(above: 1, below: 3)
             try checkVT(ghostty_render_state_set(state, GHOSTTY_RENDER_STATE_OPT_OVERSCAN, &overscan), "overscan")
             pointer = try GhosttyVTPointerCore(terminal: terminal!)
+            images = try GhosttyVTImages(terminal: terminal!, limits: imageLimits)
         } catch {
+            images?.dispose()
             pointer?.dispose()
             ghostty_key_event_free(keyEvent)
             ghostty_key_encoder_free(encoder)
@@ -108,6 +118,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
         self.encoder = encoder!
         self.keyEvent = keyEvent!
         self.pointer = pointer!
+        self.images = images!
         self.history = GhosttyVTHistoryAnchor(terminal: terminal!)
         self.storedColumns = columns
         self.storedRows = rows
@@ -117,6 +128,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
     deinit {
         history.invalidate()
         pointer.dispose()
+        images.dispose()
         ghostty_key_event_free(keyEvent)
         ghostty_key_encoder_free(encoder)
         ghostty_render_state_row_cells_free(cellIterator)
@@ -179,6 +191,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
             callbacks.clipboard.clear()
             pointer.reset()
             ghostty_terminal_reset(terminal)
+            images.reset()
             previousRows = [:]
             callbacks.heldSince = nil
             callbacks.replies = Data()
@@ -481,8 +494,9 @@ final class GhosttyVTDriver: @unchecked Sendable {
             try checkVT(ghostty_render_state_row_get(iterator, GHOSTTY_RENDER_STATE_ROW_DATA_VIEWPORT_Y, &position), "row_position")
             try checkVT(ghostty_render_state_row_get(iterator, GHOSTTY_RENDER_STATE_ROW_DATA_ID, &identity), "row_identity")
             try checkVT(ghostty_render_state_row_get(iterator, GHOSTTY_RENDER_STATE_ROW_DATA_RAW, &raw), "row_raw")
-            var wrapped = false
+            var wrapped = false, imagePlaceholderRow = false
             try checkVT(ghostty_row_get(raw, GHOSTTY_ROW_DATA_WRAP_CONTINUATION, &wrapped), "row_wrap")
+            try checkVT(ghostty_row_get(raw, GHOSTTY_ROW_DATA_KITTY_VIRTUAL_PLACEHOLDER, &imagePlaceholderRow), "row_image_placeholder")
             let id = NativeRowID(first: identity.bits.0, second: identity.bits.1)
             var selected = GhosttyRenderStateRowSelection()
             selected.size = MemoryLayout<GhosttyRenderStateRowSelection>.size
@@ -504,7 +518,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
             values.reserveCapacity(columns)
             while ghostty_render_state_row_cells_next(cellIterator) {
                 values.append(try readCell(column: values.count, row: Int(clamping: scrollbar.offset) + Int(position),
-                    linkBudget: &linkBudget))
+                    linkBudget: &linkBudget, imagePlaceholderRow: imagePlaceholderRow))
             }
             // Dirty can mean a row moved, not that its content changed.
             let row: NativeTerminalRow
@@ -517,6 +531,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
             nextRows[id] = row
         }
         previousRows = nextRows  // Bounded to the viewport + overscan, never all history.
+        let imageSnapshot = try images.capture(terminal: terminal, state: state, topRow: Int(clamping: scrollbar.offset))
         ghostty_render_state_clean(state)
 
         var cursor = GhosttyRenderStateCursor()
@@ -551,7 +566,8 @@ final class GhosttyVTDriver: @unchecked Sendable {
             foreground: NativeRGB(colors.foreground), background: NativeRGB(colors.background),
             cursorColor: NativeRGB(colors.cursor_has_value ? colors.cursor : colors.foreground),
             palette: palette, isAlternateScreen: screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE,
-            selection: selection)
+            selection: selection,
+            imageSnapshot: imageSnapshot)
     }
 
     var pointerModes: NativePointerModes { get throws { try lock.withLock { try pointer.modes() } } }
@@ -668,7 +684,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
         }
     }
 
-    private func readCell(column: Int, row: Int, linkBudget: inout Int) throws -> NativeTerminalCell {
+    private func readCell(column: Int, row: Int, linkBudget: inout Int, imagePlaceholderRow: Bool) throws -> NativeTerminalCell {
         var raw: GhosttyCell = 0
         var style = GhosttyStyle()
         try checkVT(ghostty_render_state_row_cells_get(cellIterator, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_RAW, &raw), "cell_raw")
@@ -716,7 +732,8 @@ final class GhosttyVTDriver: @unchecked Sendable {
                      background: background, underlineColor: color(style.underline_color),
                      style: NativeCellStyle(rawValue: style.flags),
                      underline: UInt8((style.flags >> 8) & 7), hyperlink: uri,
-                     hasExplicitHyperlink: linked, isWrapSpacer: wide == GHOSTTY_CELL_WIDE_SPACER_HEAD)
+                     hasExplicitHyperlink: linked, isWrapSpacer: wide == GHOSTTY_CELL_WIDE_SPACER_HEAD,
+                     isImagePlaceholder: imagePlaceholderRow && text?.unicodeScalars.first?.value == 0x10EEEE)
     }
 
     private func color(_ value: GhosttyStyleColor) -> NativeCellColor {

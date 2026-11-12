@@ -32,7 +32,7 @@ flowdeck run -s SanttyTerminalLab
 - 拖动选择、双击词、三击行、Cmd+A 全选、Cmd+C 复制，以及拖出视口后的自动滚动已接通。选择由 Ghostty tracked gesture 管理，复制直接来自其 formatter，保留 Unicode、宽字符与软换行语义；只显式复制，不自动写剪贴板，默认限制 32 MiB。
 - 历史阅读时，首次面向程序的点击只回到实时画面，不点击尚未看到的程序内容。鼠标释放可穿过同步输出 hold，避免程序按钮卡住；重连／屏幕切换／resize 清理过期选择和手势。
 
-图片、矩形选择和完整交互对等仍未完成。鼠标／滚动／锚点两轮已获用户当前环境的人工确认；不等于完整输入法、跨设备或协议认证。
+原始 Kitty RGB／RGBA 与直接 `f=100` 静态 PNG 图片已接 CG／Metal 并有实际像素回归；动画调度未接入，完整设备／协议对等仍未完成，细节与零尺寸虚拟切片限制见 [IMAGE-COMPATIBILITY.md](IMAGE-COMPATIBILITY.md)。矩形选择和完整交互对等仍未完成。鼠标／滚动／锚点两轮已获用户当前环境的人工确认；不等于完整输入法、跨设备或协议认证。
 
 ### 普通 URL／OSC 8 链接与受审阅复制
 
@@ -77,7 +77,7 @@ VT 二进制来自 `https://release.files.ghostty.org/libghostty-vt/1.0.0/ghostt
 
 现有完整 Ghostty C archive 不导出独立 `ghostty_terminal_*` / `ghostty_render_state_*` 接口。对 arm64 archive 进行 `nm -gU` 检查发现两库有 859 个重合的全局定义，包括 SIMD 和第三方 C++ 符号。因此本阶段单独链接成实验 app，尚未验证两库同进程共存。迁移策略现已调整为**分阶段开发、主应用整体替换**：最终移除旧 surface C core，只链接预编译 VT，不再为双后端共存预先实现符号隔离层。
 
-SwiftTerm 的本地补丁：`Patches/SwiftTerm+ExternalFramePresentation.patch` 暴露同步 `presentExternalFrame()`，跨行时先准备快照再移动有界 surface，行内移动不生成新帧；`Patches/SwiftTerm+AppKitCaretDrawing.patch` 补齐 CaretView 的 AppKit `draw(_:)` 入口，保留原有 Core Animation 闪烁；`Patches/SwiftTerm+ExternalStylePresentation.patch` 在现有属性表与装饰线／caret 路径中补 overline 和显式 hollow 标记。保持 8-byte packed cell、8-bit legacy style 和原有字形绘制，不修改终端解析器、编码器或 Metal shader。补丁依赖固定 revision，prepare 可重复运行。
+SwiftTerm 的本地补丁：`Patches/SwiftTerm+ExternalFramePresentation.patch` 暴露同步 `presentExternalFrame()`，跨行时先准备快照再移动有界 surface，行内移动不生成新帧；`Patches/SwiftTerm+AppKitCaretDrawing.patch` 补齐 CaretView 的 AppKit `draw(_:)` 入口，保留原有 Core Animation 闪烁；`Patches/SwiftTerm+ExternalStylePresentation.patch` 在现有属性表与装饰线／caret 路径中补 overline 和显式 hollow 标记。前三项补丁保持 8-byte packed cell、8-bit legacy style 和原有字形绘制，不修改终端解析器、编码器或 Metal shader。另有 `Patches/SwiftTerm+ResolvedImagePresentation.patch` 增加可选精确像素尺寸、共享矩形换算、原图缓存和 crop-edge 采样限制；此图片补丁新增专用 Metal fragment，传统 glyph／未指定 resolvedSize 的客户端路径不变。补丁依赖固定 revision，prepare 可重复运行，并校验两份 shader 定义均已安装。
 
 SwiftTerm、Ghostty 及适配参考 herdr-app 的许可证／NOTICE 位于 `Licenses/` 并随实验 app 打包；完整第三方依赖许可证清单仍是正式分发前的检查项。
 
@@ -93,6 +93,7 @@ SwiftTerm、Ghostty 及适配参考 herdr-app 的许可证／NOTICE 位于 `Lice
 - `NativeTerminalLink` / 共用 `TerminalLinkValidation`：复用 Santty parser，参考 SwiftTerm 的不可信字符策略；native 使用更保守的 scheme 白名单。主应用旧 URL 打开／确认行为未改变。
 - `NativePointerInput` / `NativeTerminalInteraction`：纯 wheel 路由与 AppKit 事件所有权分开；原生历史滚动和程序报告互斥，选择自动滚动只在拖选中运行，不获取新的 first responder。
 - `GhosttyVTPointerCore`：在 driver 同一把锁下使用 C mouse encoder、tracked selection gesture 和 formatter；位置参考在调用内获取，跨输出／历史滚动的选择由 VT 跟踪，不另建 selection buffer。
+- `GhosttyVTImages`：在同一 driver 锁下采样当前捕获图片的 generation／RGBA 与 VT 已解析的 placement，缓存只留捕获图片；保留网格、像素、crop、offset、layer 及 kind，不重解 Unicode placeholder。禁用并核对 file／temp／shared-memory transport；原始数据可用不等于已显示图片。
 - `NativeTerminalFrame`：拥有数据的快照和逐行选择范围；行标识使用 Ghostty 的两个 opaque word。只缓存当前视口和 overscan，不复制全部 scrollback。
 - `SwiftTermFrameSource`：增量构建 BufferLine，不创建 SwiftTerm.Terminal；复用未改变的行，保留调色板索引，接近 arena 容量时重建 store。
 - `NativeViewport`：纯几何计算，把连续偏移拆为整数行和行内像素；输入坐标同时考虑弹性区域。
@@ -173,6 +174,42 @@ Hollow 复用 SwiftTerm 原有失焦 outline 几何，但不伪造 `hasFocus`，
 真实私有 Herdr 回归验证 offer 与 OSC 8 经同一 transport 到达、确认待定时超过初始 credit 的输出仍排空、重连保留 binding 但旧 offer 不能复制，新请求需新确认。未重启共享 core。
 
 参考固定 herdr-app `vt.rs` 的 last-value、1 MiB／严格 UTF-8／无 read callback，以及 SwiftTerm `UntrustedTerminalLink.swift` 的字符策略、平台 delegate／无 `main.sync` 经验。不照搬 Herdr 的旧 `request.size` ABI 或提前 SUCCESS，也不照搬 SwiftTerm 自己的异步 OSC 回复编码器。所有 protocol 回复仍由 VT 负责。许可／差异见 `Licenses/Keyboard-Adaptation-NOTICE.txt` 与 `Licenses/Link-Adaptation-NOTICE.txt`。
+
+### 图片 API／快照阶段
+
+新增 `NativeImageSnapshotTests.swift` 的 15 项固定数据回归，确认预编译 VT 的图片迭代器／像素／generation 在运行时可用；覆盖 RGB／RGBA／straight alpha、source crop／offset、仅几何 resize 的像素复用、等尺寸替换、分块、VT 解压缩、历史／delete／reset／screen 隔离、图层、virtual／relative placement、限额、hold 期间继续解析／应答及外部传输拒绝。默认 scrollback 仍为 8 MiB。
+
+保留 `Tools/probe-vt-image-api.{c,sh}` 独立 C 对照：1×1 图片放大为虚拟 4×4 格后的首个切片由固定 VT 返回 0×0 source crop，4×4 源图对照正常。适配器对该条目显式报 `limited`，不偷用另一套 placeholder／crop 解析，也不以测试总数掩盖此缺口。该快照里程碑当时未装 PNG decoder；后续静态 PNG 传输已接通，见下节。
+
+本轮 FlowDeck 实验全量 **180 通过／0 跳过**；主应用 **362 通过／1 系统能力跳过**（私有 effective corner radius getter）。未修改保存的 My Mac／Santty 默认配置。
+
+### 图片呈现阶段
+
+已完成可选精确目标像素尺寸输入、点／像素换算、图层、裁剪与 cache 生命周期。`NativeImageRenderingTests.swift` 的 21 项回归覆盖实际 CG／Metal 像素、非网格整数尺寸和偏移、方向／横纵裁剪、crop 串色修复、透明度、三层顺序、等尺寸替换、delete／reset／screen／history 淘汰、负坐标裁剪、有效 virtual slice 与退化拒绝、共用原图缓存、1×／2× 几何、分数滚动／不抢焦点及 hold 中重连清旧图。
+
+两条路径的裁剪放大初测均出现相邻像素串色：CG 改为插值前裁剪 CGImage；Metal 用专用 fragment 将采样钳在源矩形像素中心，同时保持一个整图 texture，不改 nearest 采样掩盖问题。重连／reset 先清宿主 source，hold 中排队 tick 不可再展示旧图片。调色板测试显式声明颜色，有效 virtual 控制使用匹配物理网格的源图；原始退化向量仍保留为受限案例。
+
+本轮 FlowDeck 实验全量 **199 通过／0 跳过**；主应用 **362 通过／1 系统能力跳过**（私有 effective corner radius getter）。四项 SwiftTerm 补丁已从还原基线按 prepare 顺序重新应用并逐文件比对，脚本幂等、shader 双形式一致；保存的 My Mac／Santty 默认配置未变。
+
+重启实验版后，应用菜单 **Image fixture** 可显示 RGBA 四色图、源裁剪和直接 PNG 四色图；真实 private shell 活动时该操作不可用，不向 Herdr 注入夹具。**动画仍未接入，新 PNG 路径的 GUI／跨设备效果仍待人工复验**。完整边界和后续门槛见 [IMAGE-COMPATIBILITY.md](IMAGE-COMPATIBILITY.md)。
+
+### 静态 PNG 传输阶段
+
+这里补的是 Kitty **`f=100` 直接传 PNG**，不是“PNG 文件此前无法预览”：Yazi 26.9.1 的 KGP 路径会自行解码／缩放文件，再发送 RGB／RGBA；用户截图已证明那条路径在当前 CG 环境可用，不代表新 PNG callback 已获 GUI 验收。
+
+`GhosttyVTSystem.prepare()` 在 NSApplication／测试／transport 线程前一次安装回调，driver 工厂共享同一 once guard。ImageIO 解 PNG，vImage 直接转换为 sRGB、top-first、straight-alpha RGBA8，避免先预乘再反预乘损失低 alpha；所有输出由 VT 提供的 allocator 分配／释放，只有完全成功后转交所有权。输入／输出各限 16 MiB、单边 8192；VT 可更早拒绝，ImageIO 内部缓冲不计入该 allocator，不能据此承诺整个进程只用 16 MiB。
+
+11 项 decoder 回归使用 Python stdlib 独立生成的 10 种 RGB／RGBA、灰度、palette/tRNS、16-bit、Adam7 向量，另覆盖额度、allocator 拒绝／失败释放、损坏／截尾、已识别多帧 APNG 拒绝、分块／generation 和多线程解析。CG／Metal 新增两项 `f=100` 四色方向／低零 alpha 实际像素验证；私有 Herdr shell 检查 PNG、超初始信用额度输出、binding 和删除。本轮实验全量 **213 通过／0 跳过**；主应用 **362 通过／1 系统能力跳过**。
+
+实际复现并修正：ImageIO complete 状态甚至 vImage success 都可能伴随 nil pixel provider／黑图，且 ImageIO 容忍缺少 IEND。现在额外校验真实 provider、stride 和最终 IEND；坏图仍拒绝，失败精确归还 VT 分配。VT 初建物理 cell size 为零也会使“OK”没有 placement，driver 现以自己已报告的 8×16 默认 metrics 初始化，布局后再按真实字体／scale 更新。`Tools/probe-png-host.swift` 和 C probe 独立保留证据；没有延长等待或修改原始字节冒充修复。
+
+同 ID 重传时，固定 VT 在传输开始即撤下旧图片，未完成／失败都不保留旧 storage，独立 raw-image C 对照同样复现。因此测试明确记录非原子替换，而非让适配器显示陈旧图片伪造原子性；旧 owned snapshot 的字节仍有效。动画调度、多帧 PNG 播放、零 crop 和完整设备／协议门槛继续开放。
+
+```sh
+python3 Experiments/NativeTerminalLab/Tools/generate-png-vectors.py
+xcrun swift Experiments/NativeTerminalLab/Tools/probe-png-host.swift
+sh Experiments/NativeTerminalLab/Tools/probe-vt-image-api.sh
+```
 
 ### 系统输入对照
 

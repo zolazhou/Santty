@@ -36,6 +36,17 @@ if ! grep -Fq 'var hasOverline: Bool' "$root/SwiftTerm/Sources/SwiftTerm/CharDat
     patch -s -d "$root/SwiftTerm" -p1 < "$repo_dir/Patches/SwiftTerm+ExternalStylePresentation.patch"
 fi
 
+if ! grep -Fq 'public let resolvedSize: KittyGraphicsPixelSize?' "$root/SwiftTerm/Sources/SwiftTerm/KittyGraphicsSnapshot.swift"; then
+    patch -s -d "$root/SwiftTerm" -p1 < "$repo_dir/Patches/SwiftTerm+ResolvedImagePresentation.patch"
+fi
+
+for shader in Shaders.metal MetalShaderSource.swift; do
+    if ! grep -Fq 'fragment float4 terminal_image_crop_fragment' "$root/SwiftTerm/Sources/SwiftTerm/Apple/Metal/$shader"; then
+        echo "Incomplete SwiftTerm image patch. Move $root/SwiftTerm aside and rerun $0." >&2
+        exit 1
+    fi
+done
+
 vt_version=1.0.0
 vt_checksum=2c32b7409b2b6c2ef6cfd606526de357762ad458bdc27134ad074e86506a8bc2
 if [ ! -d "$root/ghostty-vt.xcframework" ]; then
