@@ -28,5 +28,15 @@ Recognized multi-frame APNG refusal, independent struct/zlib test vectors and a 
 ImageIO diagnostic document the host boundary. ImageIO internal memory is not
 charged to the VT allocator, and full PNG/color-profile parity is not claimed.
 The independent C probe also records same-ID replacement retirement.
-Animation scheduling remains absent. No new terminal/image protocol parser is
+
+Animation deadline/lifetime and independent wire tests adapt SwiftTerm's
+KittyGraphicsParityTests.swift, KittyGraphicsHardeningTests.swift and
+KittyRendererTests.swift (same pinned MIT source). VT alone ticks/selects/
+composes/loops frames. The host supplies one monotonic clock, one weak deadline
+wake and visibility/hold cancellation, not an emulator or playback model.
+ImageGeometryVisibility exports the existing renderer rectangle for real-clip
+intersection with the cell-bottom origin contract. Tests use synthetic owned
+window/app visibility without activating GUI, plus actual CG/Metal readbacks
+and an owned Herdr shell. GIF/APNG playback and device/power certification are
+not included. No new terminal/image protocol parser is
 installed, and the precompiled Ghostty core is unchanged.

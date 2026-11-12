@@ -61,6 +61,46 @@ final class NativeHerdrSessionTests: XCTestCase {
         }
     }
 
+    func testAnimationThroughOwnedHerdrShellThenHiddenOutputStillDrains() async throws {
+        let driver = try GhosttyVTDriver()
+        let view = NativeTerminalScrollView(driver: driver, frame: CGRect(x: 0, y: 0, width: 640, height: 240), applicationIsHidden: { false })
+        let window = NativeAnimationTestWindow(contentRect: view.frame, styleMask: [], backing: .buffered, defer: false)
+        window.contentView = view; view.layoutSubtreeIfNeeded()
+        defer { view.resetPresentation(); window.contentView = nil }
+        let lab: NativeHerdrLab
+        do { lab = try NativeHerdrLab(driver: driver) { [weak view] reset in view?.parsedOutput(reset: reset) } }
+        catch let error as HerdrCoreError where error.kind == "not_installed" { throw XCTSkip("hc is required") }
+        view.renderer.output = lab.output
+        view.onViewportChange = { [weak lab] viewport in lab?.updateViewport(viewport) }
+        view.onAutomaticReplies = { [weak lab] data in lab?.output.sendAutomaticReplies(data) }
+        var sawGreen = false
+        view.onStatusChange = { _ in if view.presentedFrame?.imageSnapshot.images[7]?.rgba == [0,255,0,255] { sawGreen = true } }
+        do {
+            try await lab.start(viewport: view.viewport)
+            try await waitFor { lab.session.state == .live }
+            let binding = try XCTUnwrap(lab.session.binding)
+            // A private-shell variant suppresses protocol ACKs: printf does
+            // not read replies. The image/frame/timing bytes are unchanged.
+            let wire = NativeAnimationFixture.finite.replacingOccurrences(of: "\u{1b}_G", with: "\u{1b}_Gq=2,")
+            let octal = wire.utf8.map { String(format: "\\%03o", UInt32($0)) }.joined()
+            XCTAssertTrue(try lab.output.sendText("printf '\(octal)'\r"))
+            try await waitFor("private VT animated green frame") { sawGreen }
+            view.isHidden = true
+            XCTAssertNil(view.scheduledImageAnimationDeadline)
+            XCTAssertTrue(try lab.output.sendText(#"awk 'BEGIN{for(i=0;i<3000;i++) print "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnop"; print "ANIMATION-CREDIT-DONE"}'"# + "\r"))
+            try await waitFor("hidden animation credit drain") { try self.hasText("ANIMATION-CREDIT-DONE", in: driver) }
+            XCTAssertTrue(view.hasPendingOutput)
+            XCTAssertNil(view.scheduledImageAnimationDeadline)
+            XCTAssertEqual(lab.session.binding, binding)
+            view.onStatusChange = nil
+            try await lab.stop()
+        } catch {
+            view.onStatusChange = nil
+            try? await lab.stop()
+            throw error
+        }
+    }
+
     func testPNGTransportThroughAnOwnedHerdrShellDrainsCreditAndDeletes() async throws {
         let driver = try GhosttyVTDriver(columns: 120, rows: 30)
         let lab: NativeHerdrLab

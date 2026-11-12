@@ -118,7 +118,42 @@ static void replacement_probe(void) {
     ghostty_terminal_free(terminal);
 }
 
+static void animation_probe(void) {
+    GhosttyTerminal terminal = NULL;
+    checked(ghostty_terminal_new(NULL, &terminal, 12, 6));
+    checked(ghostty_terminal_resize(terminal, 12, 6, 8, 16));
+    const char *wire = "\033_Ga=T,f=32,s=1,v=1,i=7,p=3,c=2,r=2,C=1;/wAA/w==\033\\"
+        "\033_Ga=f,f=32,s=1,v=1,i=7,z=150,X=1;AP8A/w==\033\\"
+        "\033_Ga=f,f=32,s=1,v=1,i=7,z=200,X=1;AAD//w==\033\\"
+        "\033_Ga=a,i=7,r=1,z=100,s=3,c=1,v=2\033\\";
+    ghostty_terminal_vt_write(terminal, (const uint8_t *)wire, strlen(wire));
+    const uint64_t times[] = {1, 100, 101, 250, 251, 1000, 1001};
+    const uint64_t expected_next[] = {101, 101, 251, 251, 451, 0, 0};
+    const uint8_t expected_rgb[][3] = {{255,0,0}, {255,0,0}, {0,255,0}, {0,255,0}, {0,0,255}, {0,0,255}, {0,0,255}};
+    for (size_t i = 0; i < sizeof(times) / sizeof(times[0]); ++i) {
+        GhosttyKittyGraphics graphics = NULL;
+        checked(ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &graphics));
+        uint64_t next = 0, generation = 0;
+        GhosttyResult tick = ghostty_kitty_graphics_animation_tick(graphics, times[i], &next);
+        GhosttyKittyGraphicsImage image = ghostty_kitty_graphics_image(graphics, 7);
+        GhosttyString pixels = {0};
+        checked(ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_GENERATION, &generation));
+        checked(ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_PIXELS, &pixels));
+        if (!pixels.ptr || pixels.len != 4 || generation == 0 || next != expected_next[i]
+            || tick != (i < 5 ? GHOSTTY_SUCCESS : GHOSTTY_NO_VALUE)
+            || memcmp(pixels.ptr, expected_rgb[i], 3) != 0) {
+            fputs("Animation API/time/pixel control changed; revisit the pinned ledger.\n", stderr);
+            exit(1);
+        }
+        printf("animation: now=%llu result=%d next=%llu generation=%llu rgb=%u,%u,%u\n",
+            (unsigned long long)times[i], (int)tick, (unsigned long long)next,
+            (unsigned long long)generation, pixels.ptr[0], pixels.ptr[1], pixels.ptr[2]);
+    }
+    ghostty_terminal_free(terminal);
+}
+
 int main(void) {
+    animation_probe();
     replacement_probe();
     if (probe("fixed_1x1_control", 1, 0, 1, 0) != 1) return 1;
     if (probe("virtual_4x4_control", 4, 1, 1, 0) != 1) return 1;

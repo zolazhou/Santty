@@ -6,6 +6,30 @@ import XCTest
 
 @MainActor
 final class NativeImageRenderingTests: XCTestCase {
+    func testCoreGraphicsPaintsVTAnimationGenerationChanges() throws { try animation(.coreGraphics) }
+    func testMetalPaintsVTAnimationGenerationChanges() throws { try animation(.metal) }
+
+    private func animation(_ backend: ImageRaster.Backend) throws {
+        let clock = NativeAnimationTestClock()
+        let raster = try ImageRaster(backend, animationClock: { clock.milliseconds })
+        raster.driver.feed(NativeAnimationFixture.finite)
+        let first = try raster.apply(animation: true), old = try XCTUnwrap(first.imageSnapshot.images[7])
+        let p = try XCTUnwrap(first.imageSnapshot.placements.first)
+        let red = try raster.pixels(), rect = raster.pixelRect(p, in: red, top: first.topRow)
+        assertColor(red.sample(rect, x: 0.5, y: 0.5), .red)
+        let conversions = raster.source.convertedRows
+        clock.set(101)
+        let next = try raster.apply(animation: true)
+        XCTAssertNotEqual(next.imageSnapshot.images[7]?.generation, old.generation)
+        assertColor(try raster.pixels().sample(rect, x: 0.5, y: 0.5), .green)
+        XCTAssertEqual(raster.source.convertedRows, conversions)
+        clock.set(251)
+        try raster.apply(animation: true)
+        assertColor(try raster.pixels().sample(rect, x: 0.5, y: 0.5), .blue)
+        XCTAssertEqual(old.rgba, [255, 0, 0, 255])
+        XCTAssertEqual(raster.cacheCount, 1)
+    }
+
     func testCoreGraphicsPaintsPNGTransportPixels() throws { try png(.coreGraphics) }
     func testMetalPaintsPNGTransportPixels() throws { try png(.metal) }
 
@@ -313,8 +337,8 @@ private final class ImageRaster {
     let target: TerminalMetalLayerView?
     let metal: MetalTerminalRenderer?
 
-    init(_ backend: Backend) throws {
-        driver = try GhosttyVTDriver(columns: 12, rows: 6)
+    init(_ backend: Backend, animationClock: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds / 1_000_000 }) throws {
+        driver = try GhosttyVTDriver(columns: 12, rows: 6, animationClock: animationClock)
         view = TerminalRenderView(frame: .zero, font: .monospacedSystemFont(ofSize: 16, weight: .regular))
         view.nativeForegroundColor = .white; view.nativeBackgroundColor = .black
         view.bidiHostPolicy = .legacyLeftToRight
@@ -350,8 +374,12 @@ private final class ImageRaster {
     }
 
     @discardableResult
-    func apply(top: Int = 0) throws -> NativeTerminalFrame {
-        let frame = try driver.snapshot(topRow: top)
+    func apply(top: Int = 0, animation: Bool = false) throws -> NativeTerminalFrame {
+        let frame: NativeTerminalFrame
+        if animation {
+            frame = try XCTUnwrap(driver.presentation(rowHeight: view.cellSize.height,
+                viewportHeight: view.cellSize.height * 6, previous: nil)).frame
+        } else { frame = try driver.snapshot(topRow: top) }
         source.apply(frame, topLine: frame.topRow, renderRows: 6)
         view.presentExternalFrame()
         return frame

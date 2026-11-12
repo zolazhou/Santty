@@ -39,6 +39,9 @@ final class GhosttyVTDriver: @unchecked Sendable {
     private let pointer: GhosttyVTPointerCore
     private let history: GhosttyVTHistoryAnchor
     private let images: GhosttyVTImages
+    private let animationClock: @Sendable () -> UInt64
+    private var lastAnimationTime: UInt64 = 0
+    private var animationDeadline: UInt64?
     private var published: NativeTerminalFrame?
     private var storedColumns: Int
     private var storedRows: Int
@@ -47,6 +50,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
 
     init(columns: Int = 80, rows: Int = 24, scrollbackLines: UInt? = nil,
          imageLimits: NativeImageSnapshotLimits = .init(),
+         animationClock: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds / 1_000_000 },
          clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) throws {
         guard (1...4096).contains(columns), (1...1024).contains(rows) else {
             throw NativeTerminalError.invalidSize
@@ -119,6 +123,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
         self.keyEvent = keyEvent!
         self.pointer = pointer!
         self.images = images!
+        self.animationClock = animationClock
         self.history = GhosttyVTHistoryAnchor(terminal: terminal!)
         self.storedColumns = columns
         self.storedRows = rows
@@ -192,6 +197,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
             pointer.reset()
             ghostty_terminal_reset(terminal)
             images.reset()
+            animationDeadline = nil
             previousRows = [:]
             callbacks.heldSince = nil
             callbacks.replies = Data()
@@ -240,14 +246,33 @@ final class GhosttyVTDriver: @unchecked Sendable {
         }
     }
 
+    /// The same monotonic millisecond epoch is kept for this terminal's whole
+    /// lifetime, including resets. Clamp test/host clock regressions; never
+    /// rewind or implement per-image playback time in the host.
+    private func animationNowLocked() -> UInt64 {
+        lastAnimationTime = max(lastAnimationTime, animationClock())
+        return lastAnimationTime
+    }
+
+    var imageAnimationWake: NativeImageAnimationWake? {
+        lock.withLock {
+            guard let deadline = animationDeadline else { return nil }
+            let now = animationNowLocked()
+            return .init(deadlineMilliseconds: deadline, delayMilliseconds: deadline > now ? deadline - now : 0)
+        }
+    }
+
     /// Resolve the last published content reference and capture the resulting
     /// viewport atomically with parsing. A requested offset is a user movement
     /// relative to the previously published document, not a stale live row ID.
     /// A hold that begins between the UI's check and this lock publishes nothing.
     func presentation(rowHeight: CGFloat, viewportHeight: CGFloat, previous: NativeViewport?,
-                      requestedOffset: CGFloat? = nil) throws -> NativeTerminalPresentation? {
+                      requestedOffset: CGFloat? = nil, advanceAnimations: Bool = true) throws -> NativeTerminalPresentation? {
         try lock.withLock {
             guard holdRemainingLocked() == nil else { return nil }
+            if advanceAnimations {
+                animationDeadline = try images.advanceAnimations(terminal: terminal, now: animationNowLocked())
+            }
             try history.synchronize(resetEpoch: callbacks.resetEpoch)
             let total = try totalRows
             let bounds = NativeViewport(rowHeight: rowHeight, viewportHeight: viewportHeight, totalRows: total, offset: 0)

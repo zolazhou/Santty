@@ -40,6 +40,10 @@ if ! grep -Fq 'public let resolvedSize: KittyGraphicsPixelSize?' "$root/SwiftTer
     patch -s -d "$root/SwiftTerm" -p1 < "$repo_dir/Patches/SwiftTerm+ResolvedImagePresentation.patch"
 fi
 
+if ! grep -Fq 'public func destinationRect(' "$root/SwiftTerm/Sources/SwiftTerm/KittyGraphicsSnapshot.swift"; then
+    patch -s -d "$root/SwiftTerm" -p1 < "$repo_dir/Patches/SwiftTerm+ImageGeometryVisibility.patch"
+fi
+
 for shader in Shaders.metal MetalShaderSource.swift; do
     if ! grep -Fq 'fragment float4 terminal_image_crop_fragment' "$root/SwiftTerm/Sources/SwiftTerm/Apple/Metal/$shader"; then
         echo "Incomplete SwiftTerm image patch. Move $root/SwiftTerm aside and rerun $0." >&2

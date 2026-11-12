@@ -31,10 +31,17 @@ final class NativeTerminalScrollView: NSScrollView {
     var onAutomaticReplies: ((Data) -> Void)?
     private var lastViewport: TerminalStreamViewport?
     private var holdTask: Task<Void, Never>?
+    private var imageAnimationTask: Task<Void, Never>?
+    private var imageAnimationToken: UUID?
+    private(set) var scheduledImageAnimationDeadline: UInt64?
+    private var displayAsleep = false
+    private let applicationIsHidden: @MainActor () -> Bool
     private(set) var hasPendingOutput = false
 
-    init(driver: GhosttyVTDriver, frame: NSRect = .zero) {
+    init(driver: GhosttyVTDriver, frame: NSRect = .zero,
+         applicationIsHidden: @escaping @MainActor () -> Bool = { NSApp.isHidden }) {
         self.driver = driver
+        self.applicationIsHidden = applicationIsHidden
         renderer = NativeTerminalInputView(frame: .zero, font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         super.init(frame: frame)
         interaction = NativeTerminalInteraction(view: self)
@@ -69,28 +76,42 @@ final class NativeTerminalScrollView: NSScrollView {
 
     isolated deinit {
         holdTask?.cancel()
+        imageAnimationTask?.cancel()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
         interaction?.cancelGesture()
         NotificationCenter.default.removeObserver(self)
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.didDeminiaturizeNotification] {
+        for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.didDeminiaturizeNotification,
+                     NSWindow.didMiniaturizeNotification] {
             NotificationCenter.default.removeObserver(self, name: name, object: nil)
             if let window {
                 NotificationCenter.default.addObserver(self, selector: #selector(presentPendingOutput),
                     name: name, object: window)
             }
         }
-        NotificationCenter.default.removeObserver(self, name: NSApplication.didUnhideNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(presentPendingOutput),
-            name: NSApplication.didUnhideNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.willCloseNotification, object: nil)
+        if let window {
+            NotificationCenter.default.addObserver(self, selector: #selector(cancelPresentationTimers),
+                name: NSWindow.willCloseNotification, object: window)
+        }
+        for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
+            NotificationCenter.default.removeObserver(self, name: name, object: nil)
+            NotificationCenter.default.addObserver(self, selector: #selector(presentPendingOutput), name: name, object: nil)
+        }
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.removeObserver(self)
+        workspace.addObserver(self, selector: #selector(displaysSlept), name: NSWorkspace.screensDidSleepNotification, object: nil)
+        workspace.addObserver(self, selector: #selector(displaysWoke), name: NSWorkspace.screensDidWakeNotification, object: nil)
         presentPendingOutput()
     }
 
     private var canPresentOutput: Bool {
-        window?.occlusionState.contains(.visible) == true && window?.isMiniaturized == false
-            && !isHiddenOrHasHiddenAncestor && !NSApp.isHidden
+        !displayAsleep && window?.isVisible == true
+            && window?.occlusionState.contains(.visible) == true && window?.isMiniaturized == false
+            && !isHiddenOrHasHiddenAncestor && !applicationIsHidden()
     }
 
     func parsedOutput(reset: Bool) {
@@ -99,10 +120,26 @@ final class NativeTerminalScrollView: NSScrollView {
         presentPendingOutput()
     }
 
-    @objc private func presentPendingOutput() {
-        guard !isUpdating, canPresentOutput else { return }
-        if hasPendingOutput { refresh(resizeTerminal: true) }
+    @objc func presentPendingOutput() {
+        guard !isUpdating else { return }
+        guard canPresentOutput else { cancelPresentationTimers(); return }
+        if hasPendingOutput || (scheduledImageAnimationDeadline == nil && presentedFrame?.imageSnapshot.placements.isEmpty == false) {
+            refresh(resizeTerminal: true)
+        }
         else if linkHighlightDirty { presentCachedFrame() }
+    }
+
+    @objc private func displaysSlept() { setDisplaysAsleep(true) }
+    @objc private func displaysWoke() { setDisplaysAsleep(false) }
+
+    func setDisplaysAsleep(_ asleep: Bool) {
+        displayAsleep = asleep
+        if asleep { cancelPresentationTimers() } else { presentPendingOutput() }
+    }
+
+    override func viewDidHide() {
+        super.viewDidHide()
+        cancelPresentationTimers()
     }
 
     override func viewDidUnhide() {
@@ -166,7 +203,7 @@ final class NativeTerminalScrollView: NSScrollView {
     }
 
     func resetPresentation() {
-        holdTask?.cancel(); holdTask = nil
+        cancelPresentationTimers()
         geometry = nil
         presentedFrame = nil
         lastRenderedRow = nil
@@ -190,11 +227,45 @@ final class NativeTerminalScrollView: NSScrollView {
             cellHeightPixels: UInt32(max(1, (cell.height * scale).rounded())))
     }
 
+    @objc private func cancelPresentationTimers() {
+        if holdTask != nil { hasPendingOutput = true }
+        holdTask?.cancel(); holdTask = nil
+        cancelImageAnimation()
+    }
+
+    private func cancelImageAnimation() {
+        imageAnimationTask?.cancel(); imageAnimationTask = nil
+        imageAnimationToken = nil; scheduledImageAnimationDeadline = nil
+    }
+
+    private func scheduleImageAnimation() {
+        guard canPresentOutput, holdTask == nil,
+              source.hasImages(intersecting: renderer.visibleRect, cell: renderer.cellSize,
+                  scale: window?.backingScaleFactor ?? 1, height: renderer.bounds.height),
+              let wake = driver.imageAnimationWake else { cancelImageAnimation(); return }
+        if scheduledImageAnimationDeadline == wake.deadlineMilliseconds { return }
+        cancelImageAnimation()
+        let token = UUID()
+        imageAnimationToken = token
+        scheduledImageAnimationDeadline = wake.deadlineMilliseconds
+        imageAnimationTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(Double(wake.delayMilliseconds))) } catch { return }
+            // Unwrap only after sleeping: a repeating animation must not own
+            // the view/driver. Epoch tokens reject an already queued old wake.
+            guard !Task.isCancelled, let self, self.imageAnimationToken == token else { return }
+            self.imageAnimationTask = nil
+            self.imageAnimationToken = nil; self.scheduledImageAnimationDeadline = nil
+            guard self.canPresentOutput else { return }
+            self.refresh() // one VT tick, not catch-up loops or a 60-Hz poll
+        }
+    }
+
     private func holdPresentationIfNeeded() -> Bool {
         guard let remaining = driver.renderHoldRemaining else {
             holdTask?.cancel(); holdTask = nil
             return false
         }
+        cancelImageAnimation()
         if holdTask == nil {
             holdTask = Task { @MainActor [weak self] in
                 do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
@@ -210,7 +281,7 @@ final class NativeTerminalScrollView: NSScrollView {
         guard !isUpdating, contentSize.width > 0, contentSize.height > 0 else { return }
         if renderer.output != nil, !canPresentOutput {
             hasPendingOutput = true
-            holdTask?.cancel(); holdTask = nil
+            cancelPresentationTimers()
             return
         }
         isUpdating = true
@@ -241,7 +312,7 @@ final class NativeTerminalScrollView: NSScrollView {
             lastCellSize = renderer.cellSize
             lastError = nil
             hasPendingOutput = false
-        } catch { report(error) }
+        } catch { cancelImageAnimation(); report(error) }
     }
 
     @objc private func clipBoundsChanged() {
@@ -274,11 +345,13 @@ final class NativeTerminalScrollView: NSScrollView {
                 interaction.presentationChanged()
                 if linkHighlightDirty { presentCachedFrame() }
                 reportViewport(movement)
+                scheduleImageAnimation()
                 return
             }
         }
         guard let presentation = try driver.presentation(rowHeight: renderer.cellSize.height,
-            viewportHeight: contentSize.height, previous: geometry, requestedOffset: requestedOffset) else {
+            viewportHeight: contentSize.height, previous: geometry, requestedOffset: requestedOffset,
+            advanceAnimations: canPresentOutput) else {
             _ = holdPresentationIfNeeded()
             return
         }
@@ -322,6 +395,7 @@ final class NativeTerminalScrollView: NSScrollView {
         }
         geometry = next
         reportViewport(next)
+        scheduleImageAnimation()
     }
 
     /// Host-only decoration: repaint the published bounded cells, never sample

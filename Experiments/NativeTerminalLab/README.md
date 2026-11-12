@@ -32,7 +32,7 @@ flowdeck run -s SanttyTerminalLab
 - 拖动选择、双击词、三击行、Cmd+A 全选、Cmd+C 复制，以及拖出视口后的自动滚动已接通。选择由 Ghostty tracked gesture 管理，复制直接来自其 formatter，保留 Unicode、宽字符与软换行语义；只显式复制，不自动写剪贴板，默认限制 32 MiB。
 - 历史阅读时，首次面向程序的点击只回到实时画面，不点击尚未看到的程序内容。鼠标释放可穿过同步输出 hold，避免程序按钮卡住；重连／屏幕切换／resize 清理过期选择和手势。
 
-原始 Kitty RGB／RGBA 与直接 `f=100` 静态 PNG 图片已接 CG／Metal 并有实际像素回归；动画调度未接入，完整设备／协议对等仍未完成，细节与零尺寸虚拟切片限制见 [IMAGE-COMPATIBILITY.md](IMAGE-COMPATIBILITY.md)。矩形选择和完整交互对等仍未完成。鼠标／滚动／锚点两轮已获用户当前环境的人工确认；不等于完整输入法、跨设备或协议认证。
+原始 Kitty RGB／RGBA 与直接 `f=100` 静态 PNG 图片已接 CG／Metal 并有实际像素回归；VT-owned Kitty 动画截止时间调度也已接入；GIF／APNG 和完整设备／协议对等仍未完成，细节与零尺寸虚拟切片限制见 [IMAGE-COMPATIBILITY.md](IMAGE-COMPATIBILITY.md)。矩形选择和完整交互对等仍未完成。鼠标／滚动／锚点两轮已获用户当前环境的人工确认；不等于完整输入法、跨设备或协议认证。
 
 ### 普通 URL／OSC 8 链接与受审阅复制
 
@@ -191,7 +191,7 @@ Hollow 复用 SwiftTerm 原有失焦 outline 几何，但不伪造 `hasFocus`，
 
 本轮 FlowDeck 实验全量 **199 通过／0 跳过**；主应用 **362 通过／1 系统能力跳过**（私有 effective corner radius getter）。四项 SwiftTerm 补丁已从还原基线按 prepare 顺序重新应用并逐文件比对，脚本幂等、shader 双形式一致；保存的 My Mac／Santty 默认配置未变。
 
-重启实验版后，应用菜单 **Image fixture** 可显示 RGBA 四色图、源裁剪和直接 PNG 四色图；真实 private shell 活动时该操作不可用，不向 Herdr 注入夹具。**动画仍未接入，新 PNG 路径的 GUI／跨设备效果仍待人工复验**。完整边界和后续门槛见 [IMAGE-COMPATIBILITY.md](IMAGE-COMPATIBILITY.md)。
+重启实验版后，应用菜单 **Image fixture** 可显示 RGBA 四色图、源裁剪和直接 PNG 四色图；真实 private shell 活动时该操作不可用，不向 Herdr 注入夹具。**PNG 已获用户当前环境人工确认（不外推双路径／跨设备）；动画仍需单独复验**。完整边界和后续门槛见 [IMAGE-COMPATIBILITY.md](IMAGE-COMPATIBILITY.md)。
 
 ### 静态 PNG 传输阶段
 
@@ -203,13 +203,25 @@ Hollow 复用 SwiftTerm 原有失焦 outline 几何，但不伪造 `hasFocus`，
 
 实际复现并修正：ImageIO complete 状态甚至 vImage success 都可能伴随 nil pixel provider／黑图，且 ImageIO 容忍缺少 IEND。现在额外校验真实 provider、stride 和最终 IEND；坏图仍拒绝，失败精确归还 VT 分配。VT 初建物理 cell size 为零也会使“OK”没有 placement，driver 现以自己已报告的 8×16 默认 metrics 初始化，布局后再按真实字体／scale 更新。`Tools/probe-png-host.swift` 和 C probe 独立保留证据；没有延长等待或修改原始字节冒充修复。
 
-同 ID 重传时，固定 VT 在传输开始即撤下旧图片，未完成／失败都不保留旧 storage，独立 raw-image C 对照同样复现。因此测试明确记录非原子替换，而非让适配器显示陈旧图片伪造原子性；旧 owned snapshot 的字节仍有效。动画调度、多帧 PNG 播放、零 crop 和完整设备／协议门槛继续开放。
+同 ID 重传时，固定 VT 在传输开始即撤下旧图片，未完成／失败都不保留旧 storage，独立 raw-image C 对照同样复现。因此测试明确记录非原子替换，而非让适配器显示陈旧图片伪造原子性；旧 owned snapshot 的字节仍有效。该 PNG 阶段后已接 Kitty 动画调度，见下节；多帧 PNG 播放、零 crop 和完整设备／协议门槛继续开放。
 
 ```sh
 python3 Experiments/NativeTerminalLab/Tools/generate-png-vectors.py
 xcrun swift Experiments/NativeTerminalLab/Tools/probe-png-host.swift
 sh Experiments/NativeTerminalLab/Tools/probe-vt-image-api.sh
 ```
+
+### VT-owned Kitty 动画阶段
+
+`a=f`／`a=a` 的帧、合成、循环和下次截止时间全部由 VT 管理。`Driver.presentation` 在锁内、capture 前只调用一次 animation tick；snapshot／hover／传输解析不推进。单个终端保持同一 UInt64 单调毫秒时钟，跨 reset 不换 epoch，迟到只推进 VT 的一帧，不循环追帧。
+
+宿主只排一个 weak MainActor deadline task；sleep 后才 unwrap view，cancel＋token 拒绝旧回调。窗口／应用隐藏、遮挡、最小化、detach、close、display sleep 和同步输出 hold 停调度；恢复时按 VT 的新截止时间继续，不重放输入、不抢焦点。无图片真实相交于 NSScrollView clip 就不排任务，overscan 不能单独续命；分数行滚动也可停／续计时而不重建行。第 5 项小补丁 `SwiftTerm+ImageGeometryVisibility.patch` 导出现有矩形换算，旧 vendor 缓存会自动升级；不另写 placement resolver。调用方必须传 cell 底边，1-physical-pixel 用例复现并修正了早期错误的顶边原点。
+
+新增 8 项 driver、10 项 view 和两条 CG／Metal 动画像素回归（保留旧 owned pixels、text row conversion 不变、cache 仍有界）；覆盖有限／无限、迟到、时钟回退、PNG animation frame、zero gap、stop/delete/screens/reset/hold、真实 deadline 无新 output 刷新、hidden pending refresh、lifetime 与解析／credit 独立。独立 C probe 锁定红绿蓝的 101／251／451 ms 截止时间和帧像素。私有 Herdr shell 真正收到动画绿帧，再隐藏并跑超初始信用额度输出，保持 binding 且不留 timer。
+
+XCTest 应用确实处于 hidden；视图用例仅注入应用 visibility、使用自有 synthetic window，不激活实际窗口，也不更改生产隐藏条件。它们不是 GUI／设备验收。VT 的 deadline 是 active storage 全局的，若静态图可见、只有另一幅离屏图在动画，公开 API 未给逐图 deadline 身份；不冒称逐图能耗优化完成。
+
+本轮实验 **234 通过／0 跳过**；主应用 **362 通过／1 系统能力跳过**。重启实验版后在 fixture 模式打开 **Animation fixture**，应看到 500-ms 红→绿→蓝循环；分别切换 CG／Metal 并手动隐藏／恢复可复验。本轮没有新的动画人工确认。GIF／APNG 解码／播放、零 source crop 和完整能耗／设备／协议覆盖仍开放。
 
 ### 系统输入对照
 

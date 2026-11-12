@@ -50,6 +50,11 @@ struct NativeImageSnapshot: Sendable {
         images: [:], placements: [], limited: false)
 }
 
+struct NativeImageAnimationWake: Equatable, Sendable {
+    let deadlineMilliseconds: UInt64
+    let delayMilliseconds: UInt64
+}
+
 struct NativeImageSnapshotLimits: Sendable {
     var bytes = 16 * 1024 * 1024
     var placements = 1024
@@ -102,6 +107,24 @@ final class GhosttyVTImages {
     }
 
     func reset() { cache = [:] }
+
+    /// Call once per actual presentation, before render-state update/capture.
+    /// VT owns frame choice, loops/composition and late-call behavior. No image
+    /// handle or pixel pointer from before this mutation may be reused.
+    func advanceAnimations(terminal: GhosttyTerminal, now: UInt64) throws -> UInt64? {
+        var graphics: GhosttyKittyGraphics?
+        try imageCheck(ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &graphics), "animation_storage")
+        var next: UInt64 = 0
+        let result = ghostty_kitty_graphics_animation_tick(graphics, now, &next)
+        if result == GHOSTTY_NO_VALUE { return nil }
+        try imageCheck(result, "animation_tick")
+        guard next > now else {
+            // Do not turn an unsupported/nonfuture deadline into a busy loop
+            // or hide it with a production delay/frame-rate workaround.
+            throw NativeTerminalError.api("animation_nonfuture_deadline", GHOSTTY_INVALID_VALUE.rawValue)
+        }
+        return next
+    }
 
     func capture(terminal: GhosttyTerminal, state: GhosttyRenderState, topRow: Int) throws -> NativeImageSnapshot {
         var graphics: GhosttyKittyGraphics?

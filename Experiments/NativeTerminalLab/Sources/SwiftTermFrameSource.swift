@@ -107,6 +107,18 @@ final class SwiftTermFrameSource: TerminalExternalFrameSource {
 
     func invalidateSelectionColors() { cached = [:] }
 
+    /// Reuse the same resolved CG/Metal rectangle conversion, not another
+    /// image placement/animation resolver. Overscan alone must not keep a
+    /// deadline alive when no image intersects the actual native clip.
+    func hasImages(intersecting clip: CGRect, cell: CGSize, scale: CGFloat, height: CGFloat) -> Bool {
+        guard !clip.isEmpty else { return false }
+        return frame.kitty?.placements.contains { placement in
+            let rect = placement.destinationRect(cellWidth: cell.width, cellHeight: cell.height,
+                imageScale: scale, screenRow: 0, lineOrigin: CGPoint(x: 0, y: height - cell.height))
+            return rect.intersects(clip)
+        } ?? false
+    }
+
     func withFrame(_ body: (TerminalExternalFrame, TerminalRowStore, (Int) -> BufferLine?) -> Void) {
         // Source, store and driver are main-actor isolated. No parse/network
         // work or cross-thread lock is performed inside this callback.
