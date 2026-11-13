@@ -100,4 +100,5 @@ struct NativeTerminalFrame: Sendable {
     let isAlternateScreen: Bool
     var selection: [Int: ClosedRange<Int>] = [:]
     var imageSnapshot: NativeImageSnapshot = .empty
+    var accessibleText: NativeAXFormattedText = .unavailable
 }

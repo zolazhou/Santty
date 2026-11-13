@@ -31,7 +31,9 @@
 
 **真实 SSH／跨机器网络、本地 PTY、完整交互、图片映射及主应用迁移尚未完成；新链接／clipboard offer GUI 和更广泛输入法／设备验收仍待完成。**
 
-下面的输入兼容专项已建立参考差异表、独立事件归一化与固定字节矩阵；继续按差异清单收敛，而不是依赖用户逐个发现基础按键问题。继续真实网络／设备验收、完整呈现、辅助功能与平台输入缺口；再完成本地 PTY，最后整体切换主应用。当前环境的滚动体验已获用户人工确认；跨输入设备／显示配置、跨屏和睡眠唤醒、多 Pane 与能耗仍待验证。
+- 已接只读 AppKit AX：VT formatter 在 driver 锁内生成有界发布窗口，AX 只读该窗口的 UTF-16 文本／视觉行／选择／光标／屏幕范围，不触发取新帧或输入。19 项 AX 接口／Unicode／几何／安全回归和私有 Herdr 隐藏信用回收／重连通过；实验全量 254 通过／0 跳过；主应用 361 通过／2 环境跳过（旧 Ghostty Metal 图形显示条件、私有圆角 getter）。保留 SwiftTerm macOS AccessibilityService 空壳事实，参考其 iOS 接口但未引入模拟器；AX 使用 Foundation 组合字符索引，几何仍是 VT cells，修复默认非 2027 模式下 ZWJ 的跨单元索引，原始测试字符未改。只读 setter／页内选择／physical lines 与 unwrap copy 的差异、限额和人工门槛见 [AX 差异表](../../Experiments/NativeTerminalLab/ACCESSIBILITY-COMPATIBILITY.md)。尚未获得 VoiceOver／AX Inspector 人工验收，不把本地协议调用计为实际辅助技术认证。
+
+下面的输入兼容专项已建立参考差异表、独立事件归一化与固定字节矩阵；继续按差异清单收敛，而不是依赖用户逐个发现基础按键问题。继续真实网络／设备验收、完整呈现、AX 人工／滚动树／IME 验收与平台输入缺口；再完成本地 PTY，最后整体切换主应用。当前环境的滚动体验已获用户人工确认；跨输入设备／显示配置、跨屏和睡眠唤醒、多 Pane 与能耗仍待验证。
 
 ## 目标与术语
 
@@ -123,7 +125,7 @@ Herdr 使用 libghostty-vt 维护终端状态、读取网格及编码输入，�
 | 选择与复制 | SelectionService、视图拖动／自动滚动代码 | 参考范围、词／行和自动滚动算法；该服务直接依赖 SwiftTerm.Terminal 及其锁，选择来源与真实状态改由 Ghostty／Santty 提供。 |
 | 鼠标／滚轮 | MacTerminalView 平台事件处理 | 参考手势、修饰键和报告路由，协议由 Ghostty 编码；滚动事件只能送程序或滚本地历史，不能双重消费。 |
 | 图片 | 外部帧 images／Kitty snapshot、renderer | 复用绘制，单独适配 Ghostty 图片数据和 placement；检查坐标、缓存及生命周期。 |
-| 辅助功能 | AppKit AX、SwiftTerm 可用实现与测试 | MacAccessibilityService 在当前 revision 只是占位，不能作为现成功能；需要实现并验收。 |
+| 辅助功能 | AppKit AX、SwiftTerm iOS page/line 接口形态 | MacAccessibilityService 在当前 revision 只是占位；现已新建只读有界 AppKit AX，VT formatter／选择仍是权威，未引入模拟器。VoiceOver／完整树／设备认证仍待人工验收。 |
 | Herdr、CLI、安全与工作区 | Santty 现有模块 | 继续复用，SwiftTerm 不替代 transport、credit、身份、授权、持久化或共享布局语义。 |
 
 如果 Router 无法与 Ghostty 编码边界干净拆分，就参考其 AppKit 处理代码，而不是为了复用强接另一套协议状态。最终所有输入路径必须具有可测试的模式来源和唯一发送点，粘贴／编辑命令等非单键路径也不例外。
@@ -276,7 +278,7 @@ KeyboardRouter 的部分 legacy 路径直接输出按当时模式编码的 bytes
 - **选择与复制**：已复用 Ghostty tracked gesture／formatter 管理范围、词／行、Unicode／软换行文本，SwiftTerm 只绘制选择范围，AppKit 负责拖出视口自动滚动。reset／resize／屏幕切换／重连清理过期选择；历史锚点与选择分开管理，并在解析先于呈现发生淘汰时重定位选择命中；矩形选择仍待补齐。
 - **粘贴、链接、剪贴板**：已提取共用 Santty URL parser（旧主应用行为不变），native 参考 SwiftTerm 不可信字符／URL 策略，只允许显式 Cmd-click 的 http／https／mailto，URI 按原始字节验证并有提取总量限制，不查远端路径的本地 FS。剪贴板参考 Herdr 的 bounded last-value／严格 UTF-8 策略，程序读取保持禁用；VT 1.0 的同步原写请求拒绝，用户只能显式审阅并手动复制当前 offer，不能提前 SUCCESS 或保留回调指针。替换／断线／重连／reset／过期拒绝旧确认，不阻塞解析／credit。普通 scheme URL 已按 SwiftTerm 的线性 tokens／单元格范围思路接入，OSC 8 优先；实际 CG／Metal 下划线、原地 Cmd、滚动／字体／宽度重命中、微小跨格点击及未呈现改写拒绝均有回归。不引入另一解析器或历史文本缓存，只匹配捕获帧内有界软换行组，拒绝截断前缀。裸域名／路径、捕获范围外长链接、本地文件／自定义链接、程序读取与完整 Kitty／多 MIME／异步完成能力仍待设计，不把手动 copy offer 当完整协议对等。
 - **图片与样式**：overline／显式 hollow 光标已接入现有 SwiftTerm 绘制路径并有 CG／Metal 像素回归；固定 VT 的图片 API 及有界拥有快照已验证；SwiftTerm 已新增可选精确目标尺寸并接 CG／Metal crop、offset、图层和共享原图 cache，保留旧客户端默认值；实际像素回归覆盖裁剪串色、透明度、虚拟切片、history／reset／screen 和 hold 清旧图。startup-only 静态 PNG callback 已完成，保留 allocator／输出限额、低 alpha 精度、ImageIO 容错校验和独立夹具；VT-owned Kitty 动画和可见性截止时间已接入（解析／credit 独立），零尺寸虚拟 source crop、GIF／APNG、动画人工／能耗和完整设备覆盖仍是显式门槛。其他样式、色彩空间与设备视觉对等仍需审计；不支持项必须明确，不能只画出文字就宣称协议对等。
-- **辅助功能**：基于 AppKit AX 接口补齐可读文本、选择和位置；当前 SwiftTerm 的 MacAccessibilityService 是占位，不能计为已复用完成。
+- **辅助功能**：已接新实现的只读 AppKit AXTextArea，包括有界 VT formatter 文本、UTF-16／visual line／选择／光标、屏幕范围、可见裁剪及变更通知；setter 不发送输入／改选择／抢焦点。SwiftTerm MacAccessibilityService 仍只是空壳，借鉴的是 iOS 的 page/line 接口而非现成 macOS 服务。19 项接口回归与私有 Herdr 消费用例通过；页索引非完整历史、AX physical lines 非 unwrap copy、可写选择未实现，真实 VoiceOver／AX 树／IME／跨屏验收仍开放。
 - **历史锚点**：已使用预编译 VT 的 owned tracked grid reference；解析引用、计算新视口与采样帧在同一把锁下完成。保留原内容单元格（含 reflow 后的非零 column）与行内比例；淘汰后引用失效回到最早可用行，尾部约束恢复 follow，reset／RIS／已呈现屏幕切换／重连清理旧引用。已有并发解析、淘汰／反复 reflow／字号／高度变化及选择复制／自动滚动组合回归，不复制历史或按文本搜索。实体设备、跨屏和性能继续验收。
 
 动画验证继续以以下三项为重点：

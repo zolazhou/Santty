@@ -61,6 +61,45 @@ final class NativeHerdrSessionTests: XCTestCase {
         }
     }
 
+    func testAXPublishesOwnedHerdrOutputButHiddenCreditAndReconnectRemainIndependent() async throws {
+        let driver = try GhosttyVTDriver()
+        let view = NativeTerminalScrollView(driver: driver, frame: CGRect(x: 0, y: 0, width: 640, height: 240), applicationIsHidden: { false })
+        let window = NativeAnimationTestWindow(contentRect: view.frame, styleMask: [], backing: .buffered, defer: false)
+        window.contentView = view; view.layoutSubtreeIfNeeded()
+        defer { view.resetPresentation(); window.contentView = nil }
+        let lab: NativeHerdrLab
+        do { lab = try NativeHerdrLab(driver: driver) { [weak view] reset in view?.parsedOutput(reset: reset) } }
+        catch let error as HerdrCoreError where error.kind == "not_installed" { throw XCTSkip("hc is required") }
+        view.renderer.output = lab.output
+        view.onViewportChange = { [weak lab] viewport in lab?.updateViewport(viewport) }
+        view.onAutomaticReplies = { [weak lab] data in lab?.output.sendAutomaticReplies(data) }
+        do {
+            try await lab.start(viewport: view.viewport)
+            try await waitFor { lab.session.state == .live }
+            let binding = try XCTUnwrap(lab.session.binding)
+            let octal = "AX-PRIVATE-VALUE-界😀".utf8.map { String(format: "\\%03o", UInt32($0)) }.joined()
+            XCTAssertTrue(try lab.output.sendText("printf '\\033[2J\\033[H\(octal)\\n'\r"))
+            try await waitFor("private AX formatter text") { (view.renderer.accessibilityValue() as? String)?.contains("AX-PRIVATE-VALUE-界😀") == true }
+            let responder = window.firstResponder, old = view.renderer.accessibilityValue() as? String
+            view.renderer.setAccessibilityValue("must-not-run-or-replay\r")
+            XCTAssertTrue(window.firstResponder === responder)
+            view.isHidden = true
+            XCTAssertTrue(try lab.output.sendText(#"awk 'BEGIN{for(i=0;i<3000;i++) print "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnop"; print "AX-CREDIT-DONE"}'"# + "\r"))
+            try await waitFor("AX hidden stream credit") { try self.hasText("AX-CREDIT-DONE", in: driver) }
+            XCTAssertEqual(view.renderer.accessibilityValue() as? String, old)
+            try await lab.reconnect()
+            try await waitFor("AX reconnect reset") { lab.session.state == .live }
+            XCTAssertEqual(lab.session.binding, binding)
+            view.isHidden = false
+            try await waitFor("AX restored current page") { (view.renderer.accessibilityValue() as? String)?.contains("AX-CREDIT-DONE") == true }
+            XCTAssertTrue(window.firstResponder === responder)
+            try await lab.stop()
+        } catch {
+            try? await lab.stop()
+            throw error
+        }
+    }
+
     func testAnimationThroughOwnedHerdrShellThenHiddenOutputStillDrains() async throws {
         let driver = try GhosttyVTDriver()
         let view = NativeTerminalScrollView(driver: driver, frame: CGRect(x: 0, y: 0, width: 640, height: 240), applicationIsHidden: { false })

@@ -8,6 +8,40 @@ import SwiftTerm
 @MainActor
 final class NativeTerminalInputView: TerminalRenderView, @MainActor NSTextInputClient {
     var output: NativeTerminalOutput?
+    private(set) var accessibleTerminal = NativeTerminalAccessibility.empty
+    private var accessibleSource: NativeAXFormattedText?
+    private var accessibleSelection: [Int: ClosedRange<Int>] = [:]
+    private var accessibleCursor = (row: -1, column: -1)
+    private(set) var accessibleTopRow = 0
+    private var accessibleBounds = CGRect.zero
+    private var accessibleClip = CGRect.zero
+    private var accessibleCell = CGSize.zero
+    var onAccessibilityNotification: ((NSAccessibility.Notification) -> Void)?
+
+    func publishAccessibility(_ frame: NativeTerminalFrame, topRow: Int) {
+        let old = accessibleTerminal
+        let changed = accessibleSource !== frame.accessibleText || accessibleSelection != frame.selection
+            || accessibleCursor != (frame.cursor.line, frame.cursor.column)
+        if changed { accessibleTerminal = NativeTerminalAccessibility(frame: frame) }
+        accessibleSource = frame.accessibleText; accessibleSelection = frame.selection
+        accessibleCursor = (frame.cursor.line, frame.cursor.column)
+        let geometryChanged = accessibleTopRow != topRow || accessibleBounds != bounds || accessibleClip != visibleRect || accessibleCell != cellSize
+        accessibleTopRow = topRow; accessibleBounds = bounds; accessibleClip = visibleRect; accessibleCell = cellSize
+        if !old.text.utf8.elementsEqual(accessibleTerminal.text.utf8) { postAccessibility(.valueChanged) }
+        if old.selectedRange != accessibleTerminal.selectedRange { postAccessibility(.selectedTextChanged) }
+        if geometryChanged { postAccessibility(.layoutChanged) }
+    }
+
+    func clearAccessiblePresentation() {
+        accessibleSource = nil; accessibleSelection = [:]; accessibleCursor = (-1, -1)
+        accessibleTerminal = .empty; accessibleTopRow = 0
+        postAccessibility(.valueChanged); postAccessibility(.selectedTextChanged)
+    }
+
+    func postAccessibility(_ notification: NSAccessibility.Notification) {
+        onAccessibilityNotification?(notification)
+        if window?.isVisible == true, !isHiddenOrHasHiddenAncestor { NSAccessibility.post(element: self, notification: notification) }
+    }
     var inputEnabled = false {
         didSet {
             if !inputEnabled {
@@ -215,6 +249,7 @@ final class NativeTerminalInputView: TerminalRenderView, @MainActor NSTextInputC
         marked = (string as? NSAttributedString) ?? NSAttributedString(string: string as? String ?? "")
         guard marked.length > 0 else { clearComposition(); return }
         markedSelection = selectedRange
+        preedit.setAccessibilityElement(false)
         preedit.stringValue = marked.string
         preedit.font = font
         preedit.textColor = nativeForegroundColor

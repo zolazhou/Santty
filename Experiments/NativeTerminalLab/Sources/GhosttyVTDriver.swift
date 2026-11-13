@@ -39,6 +39,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
     private let pointer: GhosttyVTPointerCore
     private let history: GhosttyVTHistoryAnchor
     private let images: GhosttyVTImages
+    private let accessibleText: GhosttyVTAccessibleText
     private let animationClock: @Sendable () -> UInt64
     private var lastAnimationTime: UInt64 = 0
     private var animationDeadline: UInt64?
@@ -64,6 +65,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
         var keyEvent: GhosttyKeyEvent?
         var pointer: GhosttyVTPointerCore?
         var images: GhosttyVTImages?
+        var accessibleText: GhosttyVTAccessibleText?
         let callbacks = VTCallbackState(clock: clock)
         callbacks.size = .init(rows: UInt16(rows), columns: UInt16(columns), cell_width: 8, cell_height: 16)
         do {
@@ -103,7 +105,9 @@ final class GhosttyVTDriver: @unchecked Sendable {
             try checkVT(ghostty_render_state_set(state, GHOSTTY_RENDER_STATE_OPT_OVERSCAN, &overscan), "overscan")
             pointer = try GhosttyVTPointerCore(terminal: terminal!)
             images = try GhosttyVTImages(terminal: terminal!, limits: imageLimits)
+            accessibleText = try GhosttyVTAccessibleText(terminal: terminal!)
         } catch {
+            accessibleText?.dispose()
             images?.dispose()
             pointer?.dispose()
             ghostty_key_event_free(keyEvent)
@@ -123,6 +127,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
         self.keyEvent = keyEvent!
         self.pointer = pointer!
         self.images = images!
+        self.accessibleText = accessibleText!
         self.animationClock = animationClock
         self.history = GhosttyVTHistoryAnchor(terminal: terminal!)
         self.storedColumns = columns
@@ -134,6 +139,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
         history.invalidate()
         pointer.dispose()
         images.dispose()
+        accessibleText.dispose()
         ghostty_key_event_free(keyEvent)
         ghostty_key_encoder_free(encoder)
         ghostty_render_state_row_cells_free(cellIterator)
@@ -557,6 +563,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
         }
         previousRows = nextRows  // Bounded to the viewport + overscan, never all history.
         let imageSnapshot = try images.capture(terminal: terminal, state: state, topRow: Int(clamping: scrollbar.offset))
+        let formattedText = try accessibleText.capture(terminal: terminal, rows: captured, columns: columns)
         ghostty_render_state_clean(state)
 
         var cursor = GhosttyRenderStateCursor()
@@ -592,7 +599,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
             cursorColor: NativeRGB(colors.cursor_has_value ? colors.cursor : colors.foreground),
             palette: palette, isAlternateScreen: screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE,
             selection: selection,
-            imageSnapshot: imageSnapshot)
+            imageSnapshot: imageSnapshot, accessibleText: formattedText)
     }
 
     var pointerModes: NativePointerModes { get throws { try lock.withLock { try pointer.modes() } } }

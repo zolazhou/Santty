@@ -209,6 +209,7 @@ final class NativeTerminalScrollView: NSScrollView {
         lastRenderedRow = nil
         renderer.resetInputState()
         source.resetPresentation()
+        renderer.clearAccessiblePresentation()
         linkHighlightDirty = false
         // showEmpty hides the Metal surface/caret without asking an occluded
         // drawable to render. Pending ticks then see the emptied source.
@@ -345,6 +346,7 @@ final class NativeTerminalScrollView: NSScrollView {
                 interaction.presentationChanged()
                 if linkHighlightDirty { presentCachedFrame() }
                 reportViewport(movement)
+                renderer.postAccessibility(.layoutChanged)
                 scheduleImageAnimation()
                 return
             }
@@ -388,6 +390,7 @@ final class NativeTerminalScrollView: NSScrollView {
             presentedFrame = snapshot
             interaction.presentationChanged()
             source.apply(snapshot, topLine: next.firstRow, renderRows: next.renderRows)
+            renderer.publishAccessibility(snapshot, topRow: next.firstRow)
             renderer.presentExternalFrame()
             linkHighlightDirty = false
             lastRenderedRow = next.firstRow

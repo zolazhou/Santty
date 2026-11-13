@@ -77,6 +77,8 @@ private final class LabAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemV
             imageFixture.target = self
             let animationFixture = submenu.addItem(withTitle: "Animation fixture", action: #selector(showAnimationFixture), keyEquivalent: "")
             animationFixture.target = self
+            let accessibilityFixture = submenu.addItem(withTitle: "Accessibility fixture", action: #selector(showAccessibilityFixture), keyEquivalent: "")
+            accessibilityFixture.target = self
             submenu.addItem(NSMenuItem.separator())
             submenu.addItem(withTitle: "Quit Terminal Lab", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
             app.submenu = submenu
@@ -188,7 +190,8 @@ private final class LabAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemV
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(showImageFixture) || menuItem.action == #selector(showAnimationFixture) { return lab == nil && sessionButton.isEnabled }
+        if menuItem.action == #selector(showImageFixture) || menuItem.action == #selector(showAnimationFixture)
+            || menuItem.action == #selector(showAccessibilityFixture) { return lab == nil && sessionButton.isEnabled }
         return true
     }
 
@@ -211,6 +214,16 @@ private final class LabAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemV
             + "\u{1b}_Ga=f,f=32,s=1,v=1,i=7,z=500,X=1;AP8A/w==\u{1b}\\"
             + "\u{1b}_Ga=f,f=32,s=1,v=1,i=7,z=500,X=1;AAD//w==\u{1b}\\"
             + "\u{1b}_Ga=a,i=7,r=1,z=500,s=3,c=1,v=1\u{1b}\\\u{1b}[16;1H")
+        nextLine = 0
+    }
+
+    @objc private func showAccessibilityFixture() {
+        guard lab == nil, sessionButton.isEnabled else { return }
+        terminal?.reset(with: "\u{1b}[?2027hAccessibility fixture (read-only AX; native history scrolling)\r\n"
+            + "ASCII: alpha beta\r\nWide: 界 😀\r\nCombining: e\u{301}\r\nZWJ: 👩‍👩‍👦\r\n"
+            + "Concealed: \u{1b}[8mnot spoken\u{1b}[28m visible\r\n"
+            + "\tIndented text\r\nWrap: " + String(repeating: "word ", count: 40)
+            + "\r\nEnd. AX setters cannot execute commands or replace terminal text.\r\n")
         nextLine = 0
     }
 

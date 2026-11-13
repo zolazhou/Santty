@@ -1,0 +1,25 @@
+Accessibility interface/presentation adaptation references SwiftTerm
+28c6d1d95de156a36a2eaa278177ee7f8a15d322 (MIT, full permission in SwiftTerm.txt),
+Sources/SwiftTerm/iOS/iOSTerminalView.swift accessibilityAttributedLine /
+accessibilityAttributedDisplayText / page / line / frame methods. The pinned
+Mac/MacAccessibilityService.swift is a stub, not a reused working macOS AX
+implementation. SwiftTerm's emulator, buffer, line parser and selection state
+are not instantiated/copied into this implementation. The macOS NSAccessibility
+entry points, bounded formatter cache, UTF-16 mapping and independent AppKit
+regressions are newly implemented at the external VT presentation boundary.
+
+Text comes from the frozen precompiled Ghostty VT 1.0.0 terminal formatter
+(MIT, Ghostty.txt), with a local non-mutating formatter selection under the
+existing driver lock. Cell positions/styles/selection remain VT facts. Host
+screen-only AX policy omits concealed and image-placeholder glyphs. Foundation
+composed-character ranges navigate Unicode across legacy-mode VT cell splits;
+cell geometry/terminal widths are never reimplemented. AX visual physical
+lines are not clipboard-copy unwrapped lines. Only one bounded published
+viewport/overscan text window is retained; this is not a second history store.
+
+AppKit supplies default AX hit testing and native scroll-area behavior. All
+text/focus setters are refused; reads do not send input, focus, scroll, parse
+new output or change VT selection. Local preedit is not exposed as committed
+terminal text. Standard value/selection/layout notifications are change-based,
+not speech announcements. Independent fixed Unicode/range/geometry vectors
+and an owned Herdr consumer test do not constitute VoiceOver/device acceptance.

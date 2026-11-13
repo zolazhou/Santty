@@ -103,9 +103,9 @@ SwiftTerm、Ghostty 及适配参考 herdr-app 的许可证／NOTICE 位于 `Lice
 
 ## 后续实施路线
 
-完整路线见[实现计划](../../docs/plans/terminal-framework-rendering.md)。阶段 2 的本地私有 Herdr 链路与双私有 core 的 native 远端代理回归已通过；阶段 3 已补鼠标／滚轮／选择复制及稳定历史锚点。已接保守的普通 scheme URL／OSC 8 与剪贴板 offer 安全边界；接下来收敛完整呈现、辅助功能及平台输入缺口，再完成本地 PTY，最后整体迁移主应用。
+完整路线见[实现计划](../../docs/plans/terminal-framework-rendering.md)。阶段 2 的本地私有 Herdr 链路与双私有 core 的 native 远端代理回归已通过；阶段 3 已补鼠标／滚轮／选择复制及稳定历史锚点。已接保守的普通 scheme URL／OSC 8 与剪贴板 offer 安全边界；已补只读有界 AppKit AX；接下来收敛完整呈现、AX 人工／IME／完整滚动树与平台输入缺口，再完成本地 PTY，最后整体迁移主应用。
 
-本地 PTY 后续优先复用 SwiftTerm 的独立 LocalProcess。选择参考其算法，不直接使用依赖 SwiftTerm.Terminal 的 SelectionService；MacAccessibilityService 为占位，需单独实现。当前最小键盘／IME 实现不代表 KeyboardRouter 的全部平台细节已覆盖。
+本地 PTY 后续优先复用 SwiftTerm 的独立 LocalProcess。选择参考其算法，不直接使用依赖 SwiftTerm.Terminal 的 SelectionService；MacAccessibilityService 为占位，本轮已单独新建只读 AppKit AX（参考 SwiftTerm iOS page/line 接口），尚未获得 VoiceOver 人工认证。当前最小键盘／IME 实现不代表 KeyboardRouter 的全部平台细节已覆盖。
 
 旧版通过 Git／旧构建回退，不计划运行时双后端切换；Core Graphics / Metal 切换仍是同一个新后端内的呈现选择。
 
@@ -223,6 +223,18 @@ XCTest 应用确实处于 hidden；视图用例仅注入应用 visibility、使�
 
 本轮实验 **234 通过／0 跳过**；主应用 **362 通过／1 系统能力跳过**。重启实验版后在 fixture 模式打开 **Animation fixture**，应看到 500-ms 红→绿→蓝循环；分别切换 CG／Metal 并手动隐藏／恢复可复验。本轮没有新的动画人工确认。GIF／APNG 解码／播放、零 source crop 和完整能耗／设备／协议覆盖仍开放。
 
+### 只读 AppKit AX 阶段
+
+已接独立的只读 AXTextArea，见 [ACCESSIBILITY-COMPATIBILITY.md](ACCESSIBILITY-COMPATIBILITY.md)。VT formatter 在原 driver 锁内生成当前捕获窗口的文本；AX 查询仅访问发布后的有界文本／UTF-16／VT 单元几何，不取新输出、不 tick 动画、不改 terminal selection、不发输入、不抢焦点、不接触粘贴板。CG／Metal 共用同一个元素，AppKit 默认 hit testing 和原生 NSScrollView 保留；未加入 legacy 非隔离 AX 入口的同步 main dispatch。
+
+SwiftTerm 的 MacAccessibilityService 在 pin 中确为占位。参考的是其 iOS page／line／frame 接口形态，本轮新实现 AppKit协议和独立回归，没有实例化 SwiftTerm.Terminal。AX 用 physical visual rows（VT unwrap=false／trim=true），完整历史索引／可写选择不在此阶段；normal copy 继续 unwrap=true。页内选择可能不同于完整 history copy。隐藏 SGR8 和 image placeholder 内容不会被当作可读字；未提交 IME preedit 不重复成为 committed AX 内容。
+
+VT 默认非 2027 模式把 ZWJ 分散到多个 cell。原始测试保留，AX 以 Foundation 组合字符范围导航，矩形仍合并原始 VT 单元；不修改核心字符宽度或打开模式冒充修复。UTF-16 surrogate／overflow／NSNotFound、宽字符、CJK、NFD、空白光标、history cursor、fractional／overscan 裁剪和字体变化有固定断言。1 MiB formatter UTF-8／256K indexed cells 是当前窗口上限，不是总 heap 上限；超额／不匹配只限制 AX，不停渲染或缩小 scrollback。
+
+19 项 AX 回归＋私有 Herdr 的隐藏 credit／binding／reconnect 用例已通过；新实验全量 **254 通过／0 跳过**，主应用 **361 通过／2 环境跳过**：旧 Ghostty Metal 需要已登录图形显示、私有 effective corner radius getter 不存在。保存的 My Mac／Santty 配置未变。
+
+重启实验版，在 fixture 模式选择应用菜单 **Accessibility fixture**，可人工用 VoiceOver／Accessibility Inspector 检查文本、行／字符、范围高亮、选择和原生历史滚动。真实私有 session 活跃时该菜单被禁用，不注入测试字节。当前仅直接 AppKit 协议调用及自有隐藏窗口回归；**未获得实际 VoiceOver／AX Inspector 人工验收，也未认证完整滚动树、IME 或跨屏设备行为**。不自动开启 VoiceOver、不请求新的 TCC 权限，不驱动用户已有窗口。
+
 ### 系统输入对照
 
 详见 [INPUT-COMPATIBILITY.md](INPUT-COMPATIBILITY.md)：固定上游来源、许可证、架构边界、行为差异、自动覆盖与未认证项。新增 herdr-app 26 类按键 × 3 模式的独立固定字节向量，以及全部 31 种 Kitty flags 的重复／释放、模式 push/pop、Num Lock／应用小键盘、Cocoa 修饰键、95 个可打印 ASCII、Unicode、非拉丁／ISO 控制键翻译和 IME 生命周期用例。数据矩阵不通过被测编码器自行生成 expected。测试另发现并修复未括号粘贴 CRLF 变成双 CR 的问题；AppKit Option/AltGr 文本在 report-all 下采用 SwiftTerm 的文本提交策略，避免丢失合成字符和产生孤立 release。
@@ -240,7 +252,7 @@ XCTest 应用确实处于 hidden；视图用例仅注入应用 visibility、使�
 ### 尚未实现或验证
 
 - native endpoint 的真实 SSH／跨机器网络与故障验收；本地 exec／PTY runner；主应用整体迁移。
-- 完整键盘布局、Option／修饰键事件、各类 IME 和实体指针设备的人工验收；矩形选择、裸域名／隐式路径、超出捕获帧的长链接、自定义 URL／本地文件、CLI、Scroll Mode 和辅助功能；新链接／复制 offer 的 GUI 验收。
+- 完整键盘布局、Option／修饰键事件、各类 IME 和实体指针设备的人工验收；矩形选择、裸域名／隐式路径、超出捕获帧的长链接、自定义 URL／本地文件、CLI、Scroll Mode 和 AX 人工／完整滚动树／IME 验收；新链接／复制 offer 的 GUI 验收。
 - 旧的 nvim 命令行粘贴观察已纳入真实回归，目前三模式粘贴通过；nvim 0.12.5 的 paste+CR 同批输入另有已复现的消费者竞争，保留独立 PTY 诊断脚本，不承诺该快速 burst 组合已修复。
 - 图片、其他尚未映射的终端能力、hollow 默认值的主应用设置接入，以及跨后端精确校色／跨设备视觉验收。
 - 程序剪贴板读取授权、完整 Kitty clipboard 协议／多 MIME 和异步完成语义；不能用同步 VT 1.0 回调或本轮手动 copy offer 冒充已支持。

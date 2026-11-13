@@ -1,0 +1,41 @@
+# Native AppKit accessibility boundary
+
+## Status and authority
+
+The experimental `NativeTerminalInputView` now exposes a **read-only AXTextArea**: value/attributed text, UTF-16 length and ranges, current page selection/cursor, visual line numbers, visible character range, screen-coordinate point/range lookup and clipped screen frames. Core Graphics and Metal share this same AppKit element. This is **not a VoiceOver/device certification or a writable text editor**. The main application's backend remains unchanged.
+
+The pinned SwiftTerm `Mac/MacAccessibilityService.swift` is a stub. It is not presented as a working macOS implementation we reused. The interface/line/page shape references its mature iOS accessibility helpers (`iOSTerminalView.swift`, revision `28c6d1d95de156a36a2eaa278177ee7f8a15d322`); the AppKit entry points and owned-VT index are new. No SwiftTerm emulator/buffer/selection state is instantiated. See `Licenses/Accessibility-Adaptation-NOTICE.txt`.
+
+- `GhosttyVTAccessibleText` owns a terminal formatter under the existing driver lock. It sets only the formatter's **local** selection to the captured rows, never the terminal's active selection, viewport, cursor, input or modes. The formatter supplies plain text. Cache identity is the current captured row objects; unchanged text/selection-only/cursor/image frames do not rebuild the formatted string. The cache is bounded to one viewport/overscan window, not another history store.
+- `NativeTerminalAccessibility` matches exact formatter UTF-16 against owned VT cells to locate ranges. VT owns terminal parsing, widths, soft-wrap spacers and tracked selection. A nonblank mismatch makes AX explicitly unavailable; no guessed alternate string is exposed. Screen-only AX policy omits concealed glyphs and Kitty placeholder/ID payloads while leaving renderer backgrounds unchanged. Hyperlink targets are not exposed as extra text or opened.
+- **AX lines are visual physical rows** (`unwrap=false`, `trim=true`), whereas Cmd-C keeps its established VT formatter `unwrap=true` policy. AX selection is the intersection with this bounded text window; it is not a promise to return an entire off-page selection. Blank terminal rows may have zero-length ranges because VT trims final blank lines. The logical cursor still has its actual page row/column even on an empty row, or no insertion range when it is outside the page.
+- Foundation composed-character ranges serve AX navigation. In legacy non-2027 VT mode a ZWJ sequence may occupy multiple VT cells; AX returns its complete Unicode character range and unions the original cell geometry. It does not change widths, enable a terminal mode or implement a second terminal grapheme parser. UTF-16 bounds, overflow/NSNotFound and surrogate-splitting reads are validated before substring access.
+- Screen bounds use AppKit points and `convert` / `convertToScreen`, not protocol pixels or manual Retina scaling. Rectangles are clipped to the actual native renderer visible rect; overscan can be in the bounded value but is excluded from the visible-character range. Pure fractional clipping updates geometry without a fresh VT capture/row conversion.
+
+## Publication, safety and limits
+
+AX reads only the **already published immutable page**. They never ask the driver for a new snapshot, tick animation, bypass synchronized output, reveal pending hidden output, send focus/resize/input, change selection, scroll another pane or touch a pasteboard. Reset clears the AX page before a held restore. Background parsing, replies and Herdr credit still run independently of the main actor/AX.
+
+Text/focus setters are refused, including selector-settable checks. No AX value is interpreted as paste, keys or a command. Native NSScrollView/scrollbar accessibility remains the history navigation mechanism; writable AX selection, an editable terminal document and a stable whole-history index are deliberately **not implemented** in this phase. AppKit's default AX hit testing is retained instead of adding a nonisolated legacy override or synchronous main-thread dispatch. Local IME preedit is not a duplicate committed-text AX element; complete IME/VoiceOver composition interaction remains an acceptance gate.
+
+The formatter output is capped at **1 MiB UTF-8**, the indexed window at **256K cells**. Oversized/unmappable text reports a limited/unavailable AX snapshot without stopping terminal rendering or reducing the **8 MiB** terminal scrollback budget. These are bounds on text/window inputs, not a 1-MiB total process/AX heap promise. Shrinking a page back within limits restores AX capture; unavailable results are not permanently negative-cached.
+
+Standard `.valueChanged`, `.selectedTextChanged` and geometry `.layoutChanged` notifications follow publication and exact-byte changes. There are no speech announcements, first-responder changes, automatic VoiceOver enablement, AX trust prompts or global event injection. Image-only animation does not generate text/selection/layout notifications when those facts stay the same. Native scrolling may post layout notifications without changing text. NFC/NFD changes update UTF-16 indices even when Swift canonical string equality considers the text equal.
+
+## Evidence and remaining gates
+
+`NativeTerminalAccessibilityTests.swift`: **19 cases**, including actual AppKit role/getter/selector availability, independent UTF-16/CJK/emoji/combining/ZWJ expectations in both VT modes, visual soft-wrap/spacers, conceal/placeholder policy, published/held/reset data, overflow/surrogate invalid ranges, immutable selection/pasteboard/input, screen-coordinate wide-cell hit testing, fractional/history/overscan clipping, cursor on blank/off-page rows, no image-animation text notifications, bounded capture/recovery, backend element identity, local preedit, canonical-equivalent changes and font-size/attributed-font changes.
+
+`NativeHerdrSessionTests.testAXPublishesOwnedHerdrOutputButHiddenCreditAndReconnectRemainIndependent` uses only an owned private core/shell/window. Octal output proves actual UTF-8 bytes rather than reading echoed command text; hidden output exceeds initial credit without being exposed through AX. Reconnect preserves the binding and resets/restores the page; read/set attempts do not steal first responder or become queued input. No existing user Yazi/session/core was driven.
+
+Latest FlowDeck: **254 lab passed / 0 skipped**; **361 production passed / 2 environment skips** (old Ghostty Metal needs a logged-in graphical display; private effective-corner-radius getter unavailable). Saved My Mac / Santty defaults are unchanged. Synthetic tests/owned hidden windows and direct protocol calls are **not** proof of VoiceOver actually navigating through the macOS AX server. Still required: manual VoiceOver and Accessibility Inspector use, full native scroll-area traversal, multi-pane focus/navigation, cross-display/Retina behavior, broad IME interaction and performance/energy acceptance.
+
+## Manual acceptance (user-operated)
+
+1. Restart the rebuilt lab. In **fixture mode**, choose application menu **Accessibility fixture**. This action is disabled during a private live shell and cannot inject fixture text into Herdr.
+2. Use Accessibility Inspector or VoiceOver manually on this lab's terminal area. Confirm it is a read-only text area; read ASCII, CJK, emoji, combining and ZWJ text; concealed text and image ID payloads must not be spoken.
+3. Navigate by visual line/character; compare range highlights with glyph cells. AX character indices are UTF-16, not Swift Character counts or terminal columns. Whole ZWJ highlights can span multiple cells in legacy mode.
+4. Select normally with mouse/Cmd-A, then read AX selected text. Off-page selection is deliberately page-clipped and may differ from normal unwrapped copy. AX writes must not type, replace output, execute commands or take focus.
+5. Append rows and use the native scrollbar; inspect history, fractional top/bottom clipping and an off-page live cursor. Switch CG/Metal and resize/font settings. Other panes/first responder must not change just because text/metadata refreshed.
+
+No fresh manual AX/VoiceOver acceptance has been claimed by the agent.

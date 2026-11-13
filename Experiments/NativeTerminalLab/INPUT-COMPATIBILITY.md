@@ -80,7 +80,8 @@ The adapter denies the original protocol write and copies bounded owned plain te
 
 - Every physical keyboard layout, IME, dead-key/press-and-hold menu, dictation, Fn/system shortcut and Command-menu customization. Snapshot fixtures do not replace OS-level device verification.
 - Option policy has a tested adapter setting; main-app preference integration is not done.
-- Full AppKit editing-command behavior, rectangular selection, advanced Command routing, bare-domain/path detection and long links clipped outside the bounded captured frame, local-file/custom-handler approval, accessibility and main-app input-source integration.
+- Read-only AppKit AX is implemented with 19 Unicode/range/geometry/safety tests and a private Herdr consumer; see ACCESSIBILITY-COMPATIBILITY.md. It uses one bounded published text window, physical visual lines and page-clipped selection, not a writable whole-history document. VoiceOver/AX Inspector, full scroll-tree traversal, IME and cross-display acceptance remain open.
+- Full AppKit editing-command behavior, rectangular selection, advanced Command routing, bare-domain/path detection and long links clipped outside the bounded captured frame, local-file/custom-handler approval, full accessibility acceptance and main-app input-source integration.
 - Program clipboard reads, complete Kitty/multi-MIME clipboard support or an async VT request-completion API. Current manual offers and synchronous denial are intentional, not silent permission expansion.
 - Physical mouse/trackpad inertia, elastic scrolling and cross-display scale behavior. Synthetic windowless wheel events in hidden test windows verify dispatch, not native device feel.
 - Exhaustive stress of mode changes midway through every composition/shortcut, real SSH/cross-machine faults, local PTY and all consumers. The private proxy regression is not real-network acceptance.
