@@ -48,6 +48,7 @@ final class GhosttyVTDriver: @unchecked Sendable {
     private var storedRows: Int
     var columns: Int { lock.withLock { storedColumns } }
     var rows: Int { lock.withLock { storedRows } }
+    var cellSizePixels: (width: UInt32, height: UInt32) { lock.withLock { (callbacks.size.cell_width, callbacks.size.cell_height) } }
 
     init(columns: Int = 80, rows: Int = 24, scrollbackLines: UInt? = nil,
          imageLimits: NativeImageSnapshotLimits = .init(),

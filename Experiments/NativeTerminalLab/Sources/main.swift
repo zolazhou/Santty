@@ -8,6 +8,9 @@ private final class LabAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemV
     private let status = NSTextField(labelWithString: "")
     private var nextLine = 0
     private var lab: NativeHerdrLab?
+    private var localPTY: NativeLocalPTYLab?
+    private var changingSession = false
+    private var currentOutput: NativeTerminalOutput? { localPTY?.output ?? lab?.output }
     private var shouldFocusTestTerminal = false
     private let sessionButton = NSButton(title: "Start private Herdr shell", target: nil, action: nil)
     private let appendButton = NSButton(title: "Append 100 rows", target: nil, action: nil)
@@ -26,7 +29,7 @@ private final class LabAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemV
             window.contentMinSize = NSSize(width: 900, height: 260)
             let root = NSView()
             window.contentView = root
-            let notice = NSTextField(labelWithString: "Ghostty VT → SwiftTerm · Fixture by default · Herdr starts a private test core")
+            let notice = NSTextField(labelWithString: "Ghostty VT → SwiftTerm · Fixture by default · Private local PTY via app menu")
             rendererPicker.addItems(withTitles: ["Core Graphics", "Metal"])
             rendererPicker.target = self
             rendererPicker.action = #selector(changeRenderer)
@@ -62,7 +65,8 @@ private final class LabAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemV
             status.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
             terminal.onStatusChange = { [weak self] text in
                 guard let self else { return }
-                self.status.stringValue = self.lab.map { "\($0.session.state) · " } ?? "Fixture · "
+                self.status.stringValue = self.localPTY.map { "Local PTY \($0.state) · " }
+                    ?? self.lab.map { "\($0.session.state) · " } ?? "Fixture · "
                 self.status.stringValue += text
                 self.lab?.session.updateDisplay()
             }
@@ -73,6 +77,9 @@ private final class LabAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemV
             let menu = NSMenu()
             let app = NSMenuItem()
             let submenu = NSMenu()
+            let localPTY = submenu.addItem(withTitle: "Start private local PTY", action: #selector(toggleLocalPTY), keyEquivalent: "")
+            localPTY.target = self
+            submenu.addItem(NSMenuItem.separator())
             let imageFixture = submenu.addItem(withTitle: "Image fixture", action: #selector(showImageFixture), keyEquivalent: "")
             imageFixture.target = self
             let animationFixture = submenu.addItem(withTitle: "Animation fixture", action: #selector(showAnimationFixture), keyEquivalent: "")
@@ -97,10 +104,11 @@ private final class LabAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemV
     }
 
     @objc private func toggleSession() {
-        guard let terminal else { return }
+        guard let terminal, localPTY == nil, !changingSession else { return }
+        changingSession = true
         sessionButton.isEnabled = false
         Task { @MainActor in
-            defer { self.sessionButton.isEnabled = true }
+            defer { self.changingSession = false; self.sessionButton.isEnabled = self.localPTY == nil }
             do {
                 if let lab = self.lab {
                     try await lab.stop()
@@ -153,10 +161,52 @@ private final class LabAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemV
         }
     }
 
+    @objc private func toggleLocalPTY() {
+        guard let terminal, lab == nil, !changingSession else { return }
+        changingSession = true; sessionButton.isEnabled = false
+        Task { @MainActor in
+            defer { self.changingSession = false; self.sessionButton.isEnabled = self.localPTY == nil }
+            do {
+                if let local = self.localPTY {
+                    try await local.stop()
+                    self.localPTY = nil
+                    terminal.renderer.inputEnabled = false; terminal.renderer.output = nil
+                    terminal.renderer.onFocusChange = nil
+                    terminal.onViewportChange = nil; terminal.onAutomaticReplies = nil
+                    self.appendButton.isEnabled = true; self.resetButton.isEnabled = true
+                    self.clipboardButton.isEnabled = false; self.reconnectButton.isEnabled = false
+                    self.window?.title = "Santty Terminal Lab — fixture only"
+                    self.resetFixture()
+                } else {
+                    let local = try NativeLocalPTYLab(driver: terminal.driver) { [weak terminal] reset in terminal?.parsedOutput(reset: reset) }
+                    self.localPTY = local
+                    self.shouldFocusTestTerminal = true
+                    terminal.renderer.output = local.output; terminal.renderer.onFocusChange = nil
+                    terminal.onViewportChange = { [weak local] viewport in _ = local?.updateViewport(viewport) }
+                    terminal.onAutomaticReplies = { [weak local] data in local?.output.sendAutomaticReplies(data) }
+                    local.output.onClipboardOfferChange = { [weak self] in self?.clipboardButton.isEnabled = self?.currentOutput?.clipboardOffer != nil }
+                    local.onStateChange = { [weak self, weak terminal, weak local] state in
+                        terminal?.renderer.inputEnabled = state.acceptsInput
+                        self?.status.stringValue = "Local PTY: \(state)" + (local?.lastWriteError.map { " · \($0)" } ?? "")
+                        if state == .running, self?.shouldFocusTestTerminal == true {
+                            self?.shouldFocusTestTerminal = false
+                            self?.window?.makeFirstResponder(terminal?.renderer)
+                            terminal?.renderer.refreshFocus()
+                        }
+                    }
+                    self.appendButton.isEnabled = false; self.resetButton.isEnabled = false
+                    self.reconnectButton.isEnabled = false
+                    self.window?.title = "Santty Terminal Lab — private local PTY"
+                    try local.start(viewport: terminal.viewport)
+                }
+            } catch { self.status.stringValue = "Local PTY error: \(error)" }
+        }
+    }
+
     @objc private func reviewClipboard() {
-        guard let lab, let window else { return }
-        clipboardButton.isEnabled = lab.output.clipboardOffer != nil
-        NativeClipboardReview.present(output: lab.output, window: window)
+        guard let output = currentOutput, let window else { return }
+        clipboardButton.isEnabled = output.clipboardOffer != nil
+        NativeClipboardReview.present(output: output, window: window)
     }
 
     @objc private func reconnectViewer() {
@@ -170,9 +220,13 @@ private final class LabAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemV
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let lab else { return .terminateNow }
+        guard lab != nil || localPTY != nil else { return .terminateNow }
         Task { @MainActor in
-            do { try await lab.stop(); NSApp.reply(toApplicationShouldTerminate: true) }
+            do {
+                try await self.localPTY?.stop()
+                try await self.lab?.stop()
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
             catch {
                 self.status.stringValue = "Cleanup failed: \(error)"
                 NSApp.reply(toApplicationShouldTerminate: false)
@@ -190,8 +244,12 @@ private final class LabAppDelegate: NSObject, NSApplicationDelegate, NSMenuItemV
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleLocalPTY) {
+            menuItem.title = localPTY == nil ? "Start private local PTY" : "End local PTY session"
+            return lab == nil && !changingSession
+        }
         if menuItem.action == #selector(showImageFixture) || menuItem.action == #selector(showAnimationFixture)
-            || menuItem.action == #selector(showAccessibilityFixture) { return lab == nil && sessionButton.isEnabled }
+            || menuItem.action == #selector(showAccessibilityFixture) { return lab == nil && localPTY == nil && !changingSession }
         return true
     }
 

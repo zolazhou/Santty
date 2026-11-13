@@ -1,0 +1,58 @@
+--- a/Sources/SwiftTerm/LocalProcess.swift
++++ b/Sources/SwiftTerm/LocalProcess.swift
+@@ -141,0 +142,8 @@
++/// Owned snapshots of the current PTY identity; a foreground group is not
++/// necessarily a live group-leader PID. No raw descriptor escapes the query.
++public struct LocalProcessTerminalInfo: Sendable {
++    public let shellPid: Int32
++    public let foregroundProcessGroupID: Int32?
++    public let ttyName: String
++}
++
+@@ -705,0 +714,39 @@
++    /// Snapshots metadata while EOF/teardown cannot close/reuse the descriptor.
++    /// This implementation is macOS-only; no Linux/iOS validation is implied.
++    public func terminalInfo() -> LocalProcessTerminalInfo? {
++        session.withLock { state in
++            guard state.phase == .running || state.phase == .terminating,
++                  state.childfd >= 0, state.shellPid > 0 else { return nil }
++#if os(macOS)
++            var name = [CChar](repeating: 0, count: 128)
++            guard ioctl(state.childfd, TIOCPTYGNAME, &name) == 0,
++                  let end = name.firstIndex(of: 0), end > 0 else { return nil }
++            let group = tcgetpgrp(state.childfd)
++            let tty = String(decoding: name.prefix(end).map { UInt8(bitPattern: $0) }, as: UTF8.self)
++            return LocalProcessTerminalInfo(shellPid: state.shellPid,
++                foregroundProcessGroupID: group > 0 ? group : nil, ttyName: tty)
++#else
++            return nil
++#endif
++        }
++    }
++
++    /// Close policy for a terminal owner, distinct from terminate()'s existing
++    /// child-only semantics. The kernel targets the current foreground group
++    /// through our locked PTY, not a userspace lookup/killpg race. The reaper
++    /// separately protects the exact root child from PID reuse. No process
++    /// table is enumerated; detached/background daemons are not promised killed.
++    public func terminateTerminal(force: Bool = false) {
++        let reaper = session.withLock { state -> LocalProcessChildReaper? in
++            guard state.phase == .running || state.phase == .terminating else { return nil }
++            state.phase = .terminating
++#if os(macOS)
++            if state.childfd >= 0 {
++                _ = ioctl(state.childfd, TIOCSIG, force ? SIGKILL : SIGHUP)
++            }
++#endif
++            return state.reaper
++        }
++        reaper?.signal(force ? SIGKILL : SIGTERM)
++    }
++
+--- a/Sources/SwiftTerm/Pty.swift
++++ b/Sources/SwiftTerm/Pty.swift
+@@ -133,2 +133,2 @@
+-            if let cCurrentDirectory {
+-                _ = chdir(cCurrentDirectory)
++            if let cCurrentDirectory, chdir(cCurrentDirectory) != 0 {
++                _exit(127)

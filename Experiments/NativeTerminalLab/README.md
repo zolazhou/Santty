@@ -103,9 +103,9 @@ SwiftTerm、Ghostty 及适配参考 herdr-app 的许可证／NOTICE 位于 `Lice
 
 ## 后续实施路线
 
-完整路线见[实现计划](../../docs/plans/terminal-framework-rendering.md)。阶段 2 的本地私有 Herdr 链路与双私有 core 的 native 远端代理回归已通过；阶段 3 已补鼠标／滚轮／选择复制及稳定历史锚点。已接保守的普通 scheme URL／OSC 8 与剪贴板 offer 安全边界；已补只读有界 AppKit AX；接下来收敛完整呈现、AX 人工／IME／完整滚动树与平台输入缺口，再完成本地 PTY，最后整体迁移主应用。
+完整路线见[实现计划](../../docs/plans/terminal-framework-rendering.md)。阶段 2 的本地私有 Herdr 链路与双私有 core 的 native 远端代理回归已通过；阶段 3 已补鼠标／滚轮／选择复制及稳定历史锚点。已接保守的普通 scheme URL／OSC 8 与剪贴板 offer 安全边界；已补只读有界 AppKit AX；接下来收敛完整呈现、AX 人工／IME／完整滚动树与平台输入缺口，已接独立本地 PTY 实验；完成其人工／shell／生命周期门槛后，最后整体迁移主应用。
 
-本地 PTY 后续优先复用 SwiftTerm 的独立 LocalProcess。选择参考其算法，不直接使用依赖 SwiftTerm.Terminal 的 SelectionService；MacAccessibilityService 为占位，本轮已单独新建只读 AppKit AX（参考 SwiftTerm iOS page/line 接口），尚未获得 VoiceOver 人工认证。当前最小键盘／IME 实现不代表 KeyboardRouter 的全部平台细节已覆盖。
+本地 PTY 实验已复用 SwiftTerm 的独立 LocalProcess，未使用带第二模拟器的 LocalProcessTerminalView。选择参考其算法，不直接使用依赖 SwiftTerm.Terminal 的 SelectionService；MacAccessibilityService 为占位，本轮已单独新建只读 AppKit AX（参考 SwiftTerm iOS page/line 接口），尚未获得 VoiceOver 人工认证。当前最小键盘／IME 实现不代表 KeyboardRouter 的全部平台细节已覆盖。
 
 旧版通过 Git／旧构建回退，不计划运行时双后端切换；Core Graphics / Metal 切换仍是同一个新后端内的呈现选择。
 
@@ -235,6 +235,18 @@ VT 默认非 2027 模式把 ZWJ 分散到多个 cell。原始测试保留，AX �
 
 重启实验版，在 fixture 模式选择应用菜单 **Accessibility fixture**，可人工用 VoiceOver／Accessibility Inspector 检查文本、行／字符、范围高亮、选择和原生历史滚动。真实私有 session 活跃时该菜单被禁用，不注入测试字节。当前仅直接 AppKit 协议调用及自有隐藏窗口回归；**未获得实际 VoiceOver／AX Inspector 人工验收，也未认证完整滚动树、IME 或跨屏设备行为**。不自动开启 VoiceOver、不请求新的 TCC 权限，不驱动用户已有窗口。
 
+### 独立本地 PTY 阶段
+
+菜单 **Start private local PTY** 启动自有 HOME／XDG／tmp 下的 `/bin/sh -i`，**End local PTY session** 关闭并验证清理；与私有 Herdr 互斥，fixture 注入／Herdr reconnect 不可混入。输出用独立 serial delegate queue 同步解析 VT 后才返回，不经 UI 队列；仍使用当前 renderer、输入、clipboard offer、图片／动画、AX 与虚拟 NSScrollView，无第二模拟器。
+
+`NativeLocalPTYLab` 是 one-launch session；checked FIFO 至多 1 MiB（含 in-flight）／1024 pending chunks，DispatchIO 单写按序完成。过量拒绝，partial error 不重试，退出清未发送字节，不把旧输入路由到新程序。accepted 只是当前 launch 的排队，不代表执行；关闭期间只放行自动协议回复。UI 状态用 revision 和当前 phase 校验，退出后的旧回调不重新启用输入。
+
+第 6 项 `SwiftTerm+LocalPTYHost.patch` 保留原 `terminate()` 语义，另加锁内 TTY slave name／foreground group 查询和通过 owned master 的 TIOCSIG（当前前台组）＋已有 reuse-safe root reaper 关闭。真实无效 cwd 用例先复现上游忽略 chdir、错误地在父目录执行，现 async-signal-safe `_exit(127)`；没有延长 drain 或启动延迟。物理 cwd `/private/var` 与逻辑 `/var` 的测试比较已按文件路径别名处理，生产 metadata 不改写、不 fallback 到 launch cwd。
+
+16 项专项覆盖真实 Ctrl-C/SIGINT、raw UTF-8／Enter／ETX 和窗口回复字节、6000 行宽输出／末尾 marker、tty/pid/group/cwd、cwd 继承、错误启动、输入背压、early／coalesced／force／owner cleanup 与 local PNG／AX 端点。独立 tiny C probe 只创建自有 PTY 验证 Darwin ioctl（不链接或构建终端 core）。foreground force 用 owned lease 是否释放验证，并有专用 FIFO 救援，不向缓存 PID／不明进程发信号。
+
+**默认 0.5s tail-drain 上限未变，阻塞超过上限仍可能丢尾输出；不承诺逃逸／disowned daemon 全树清理、完整 terminfo/login-shell 或 GUI／能耗认证。** 概要／完整边界见 [LOCAL-PTY-COMPATIBILITY.md](LOCAL-PTY-COMPATIBILITY.md)。本轮实验全量 **270 通过／0 跳过**、主应用 **362 通过／1 系统能力跳过**；AX、动画和新本地 PTY 均不因这些自动测试获得新的人工验收，主应用后端保持旧路径。
+
 ### 系统输入对照
 
 详见 [INPUT-COMPATIBILITY.md](INPUT-COMPATIBILITY.md)：固定上游来源、许可证、架构边界、行为差异、自动覆盖与未认证项。新增 herdr-app 26 类按键 × 3 模式的独立固定字节向量，以及全部 31 种 Kitty flags 的重复／释放、模式 push/pop、Num Lock／应用小键盘、Cocoa 修饰键、95 个可打印 ASCII、Unicode、非拉丁／ISO 控制键翻译和 IME 生命周期用例。数据矩阵不通过被测编码器自行生成 expected。测试另发现并修复未括号粘贴 CRLF 变成双 CR 的问题；AppKit Option/AltGr 文本在 report-all 下采用 SwiftTerm 的文本提交策略，避免丢失合成字符和产生孤立 release。
@@ -251,7 +263,7 @@ VT 默认非 2027 模式把 ZWJ 分散到多个 cell。原始测试保留，AX �
 
 ### 尚未实现或验证
 
-- native endpoint 的真实 SSH／跨机器网络与故障验收；本地 exec／PTY runner；主应用整体迁移。
+- native endpoint 的真实 SSH／跨机器网络与故障验收；本地 exec／PTY 的 shell／terminfo／GUI／完整 drain／子树策略验收；主应用整体迁移。
 - 完整键盘布局、Option／修饰键事件、各类 IME 和实体指针设备的人工验收；矩形选择、裸域名／隐式路径、超出捕获帧的长链接、自定义 URL／本地文件、CLI、Scroll Mode 和 AX 人工／完整滚动树／IME 验收；新链接／复制 offer 的 GUI 验收。
 - 旧的 nvim 命令行粘贴观察已纳入真实回归，目前三模式粘贴通过；nvim 0.12.5 的 paste+CR 同批输入另有已复现的消费者竞争，保留独立 PTY 诊断脚本，不承诺该快速 burst 组合已修复。
 - 图片、其他尚未映射的终端能力、hollow 默认值的主应用设置接入，以及跨后端精确校色／跨设备视觉验收。

@@ -44,6 +44,14 @@ if ! grep -Fq 'public func destinationRect(' "$root/SwiftTerm/Sources/SwiftTerm/
     patch -s -d "$root/SwiftTerm" -p1 < "$repo_dir/Patches/SwiftTerm+ImageGeometryVisibility.patch"
 fi
 
+if ! grep -Fq 'public struct LocalProcessTerminalInfo' "$root/SwiftTerm/Sources/SwiftTerm/LocalProcess.swift"; then
+    patch -s -d "$root/SwiftTerm" -p1 < "$repo_dir/Patches/SwiftTerm+LocalPTYHost.patch"
+fi
+if ! grep -Fq 'if let cCurrentDirectory, chdir(cCurrentDirectory) != 0' "$root/SwiftTerm/Sources/SwiftTerm/Pty.swift"; then
+    echo "Incomplete SwiftTerm PTY patch. Move $root/SwiftTerm aside and rerun $0." >&2
+    exit 1
+fi
+
 for shader in Shaders.metal MetalShaderSource.swift; do
     if ! grep -Fq 'fragment float4 terminal_image_crop_fragment' "$root/SwiftTerm/Sources/SwiftTerm/Apple/Metal/$shader"; then
         echo "Incomplete SwiftTerm image patch. Move $root/SwiftTerm aside and rerun $0." >&2

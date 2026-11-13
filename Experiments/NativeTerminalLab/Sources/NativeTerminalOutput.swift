@@ -7,7 +7,8 @@ import GhosttyVt
 final class NativeTerminalOutput: TerminalStreamEndpoint, @unchecked Sendable {
     let driver: GhosttyVTDriver
     private let lock = NSLock()
-    private var writer: (@Sendable (Data) -> Void)?
+    private var writer: (@Sendable (Data) -> Bool)?
+    private var replyWriter: (@Sendable (Data) -> Bool)?
     private var enabled = false
     private var pending = false
     private var resetPending = false
@@ -20,7 +21,13 @@ final class NativeTerminalOutput: TerminalStreamEndpoint, @unchecked Sendable {
     }
 
     func bind(writer: @escaping @Sendable (Data) -> Void) {
-        lock.withLock { self.writer = writer }
+        bindChecked { data in writer(data); return true }
+    }
+
+    /// true is queue acceptance, never proof the child consumed/executed it.
+    func bindChecked(writer: @escaping @Sendable (Data) -> Bool,
+                     automaticReplies: (@Sendable (Data) -> Bool)? = nil) {
+        lock.withLock { self.writer = writer; self.replyWriter = automaticReplies ?? writer }
         driver.discardClipboardOffers()
         notifyClipboardChange()
     }
@@ -51,7 +58,7 @@ final class NativeTerminalOutput: TerminalStreamEndpoint, @unchecked Sendable {
             let lower = data.index(data.startIndex, offsetBy: start)
             let upper = data.index(data.startIndex, offsetBy: min(start + 16 * 1024, data.count))
             let replies = driver.feed(Data(data[lower..<upper]))
-            if !replies.isEmpty { lock.withLock { writer }?(replies) }
+            if !replies.isEmpty { _ = lock.withLock { replyWriter }?(replies) }
         }
         requestPresentation()
     }
@@ -69,8 +76,7 @@ final class NativeTerminalOutput: TerminalStreamEndpoint, @unchecked Sendable {
     func send(_ input: NativeTerminalInput) throws -> Bool {
         guard let write = lock.withLock({ enabled ? writer : nil }) else { return false }
         let bytes = try driver.encode(input)
-        if !bytes.isEmpty { write(bytes) }
-        return true
+        return bytes.isEmpty || write(bytes)
     }
 
     func send(_ key: NativeTerminalKeyEvent) throws -> Bool { try send(.key(key)) }
@@ -89,7 +95,7 @@ final class NativeTerminalOutput: TerminalStreamEndpoint, @unchecked Sendable {
     func setFocused(_ focused: Bool) throws { _ = try send(.focus(focused)) }
 
     func sendAutomaticReplies(_ replies: Data) {
-        if !replies.isEmpty { lock.withLock { writer }?(replies) }
+        if !replies.isEmpty { _ = lock.withLock { replyWriter }?(replies) }
     }
 
     private func requestPresentation() {

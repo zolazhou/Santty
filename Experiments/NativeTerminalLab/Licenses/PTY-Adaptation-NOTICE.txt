@@ -1,0 +1,30 @@
+Standalone PTY integration reuses SwiftTerm LocalProcess, LocalProcessDelegate,
+TerminalIOPipeline and PseudoTerminalHelpers from pinned revision
+28c6d1d95de156a36a2eaa278177ee7f8a15d322 (MIT, full permission in SwiftTerm.txt).
+Lifecycle test patterns reference LocalProcessLifecycleTests.swift at that pin;
+independent literal bytes, actual program/PTY state and owned resources provide
+expectations. LocalProcessTerminalView/HeadlessTerminal and their emulators are
+not instantiated. Explicit environment avoids LocalProcess's Terminal-based
+default environment helper.
+
+The reproducible LocalPTYHost patch adds locked macOS PTY name/foreground-group
+snapshots and terminal-owner close using TIOCSIG for the kernel's current
+foreground group plus the existing reuse-safe child reaper. Original child-only
+terminate() behavior is unchanged. A proven ignored-chdir failure now exits 127
+using only async-signal-safe calls in the child; it no longer executes in the
+parent directory. No precompiled Ghostty core code is rebuilt or modified.
+
+NativeLocalPTYLab provides a private HOME/XDG/cwd, one-launch lifecycle, private
+FIFO delegate delivery, synchronous VT parsing, bounded checked input FIFO,
+no retries/replay on partial writes or exit, separate automatic-reply admission
+during close, revision-checked UI state and bounded verified cleanup. Local
+foreground group-leader/cwd inspection is best effort with controlling-tty,
+session, start-time and repeated-group checks; it is never used for signals,
+remote metadata or process-table enumeration.
+
+The runner's existing 0.5-second tail-drain limit is unchanged. Tests demonstrate
+specified bursts/tails, not unlimited lossless drain after blocked parsing.
+Foreground/root terminal close is not a promise to kill escaped/disowned daemon
+trees. The private foreground-force test uses an owned file lease and a rescue
+FIFO, not cached-PID kill operations. Test counts are not local-shell GUI,
+whole-app migration, cross-device or performance certification.
