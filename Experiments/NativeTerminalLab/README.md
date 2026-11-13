@@ -237,15 +237,17 @@ VT 默认非 2027 模式把 ZWJ 分散到多个 cell。原始测试保留，AX �
 
 ### 独立本地 PTY 阶段
 
-菜单 **Start private local PTY** 启动自有 HOME／XDG／tmp 下的 `/bin/sh -i`，**End local PTY session** 关闭并验证清理；与私有 Herdr 互斥，fixture 注入／Herdr reconnect 不可混入。输出用独立 serial delegate queue 同步解析 VT 后才返回，不经 UI 队列；仍使用当前 renderer、输入、clipboard offer、图片／动画、AX 与虚拟 NSScrollView，无第二模拟器。
+菜单 **Start private local PTY** 启动自有 HOME／XDG／tmp 下的 `/bin/sh -i`，**End local PTY session** 关闭并验证清理；与私有 Herdr 互斥，fixture 注入／Herdr reconnect 不可混入。输出在 runner 独立 serial parse worker 直接同步解析 VT 后才释放 ring slot，生命周期另用 private queue，不经 UI 队列；仍使用当前 renderer、输入、clipboard offer、图片／动画、AX 与虚拟 NSScrollView，无第二模拟器。
 
 `NativeLocalPTYLab` 是 one-launch session；checked FIFO 至多 1 MiB（含 in-flight）／1024 pending chunks，DispatchIO 单写按序完成。过量拒绝，partial error 不重试，退出清未发送字节，不把旧输入路由到新程序。accepted 只是当前 launch 的排队，不代表执行；关闭期间只放行自动协议回复。UI 状态用 revision 和当前 phase 校验，退出后的旧回调不重新启用输入。
 
 第 6 项 `SwiftTerm+LocalPTYHost.patch` 保留原 `terminate()` 语义，另加锁内 TTY slave name／foreground group 查询和通过 owned master 的 TIOCSIG（当前前台组）＋已有 reuse-safe root reaper 关闭。真实无效 cwd 用例先复现上游忽略 chdir、错误地在父目录执行，现 async-signal-safe `_exit(127)`；没有延长 drain 或启动延迟。物理 cwd `/private/var` 与逻辑 `/var` 的测试比较已按文件路径别名处理，生产 metadata 不改写、不 fallback 到 launch cwd。
 
-16 项专项覆盖真实 Ctrl-C/SIGINT、raw UTF-8／Enter／ETX 和窗口回复字节、6000 行宽输出／末尾 marker、tty/pid/group/cwd、cwd 继承、错误启动、输入背压、early／coalesced／force／owner cleanup 与 local PNG／AX 端点。独立 tiny C probe 只创建自有 PTY 验证 Darwin ioctl（不链接或构建终端 core）。foreground force 用 owned lease 是否释放验证，并有专用 FIFO 救援，不向缓存 PID／不明进程发信号。
+最初 16 项专项覆盖真实 Ctrl-C/SIGINT、raw UTF-8／Enter／ETX 和窗口回复字节、6000 行宽输出／末尾 marker、tty/pid/group/cwd、cwd 继承、错误启动、输入背压、early／coalesced／force／owner cleanup 与 local PNG／AX 端点。独立 tiny C probe 只创建自有 PTY 验证 Darwin ioctl（不链接或构建终端 core）。foreground force 用 owned lease 是否释放验证，并有专用 FIFO 救援，不向缓存 PID／不明进程发信号。
 
-**默认 0.5s tail-drain 上限未变，阻塞超过上限仍可能丢尾输出；不承诺逃逸／disowned daemon 全树清理、完整 terminfo/login-shell 或 GUI／能耗认证。** 概要／完整边界见 [LOCAL-PTY-COMPATIBILITY.md](LOCAL-PTY-COMPATIBILITY.md)。本轮实验全量 **270 通过／0 跳过**、主应用 **362 通过／1 系统能力跳过**；AX、动画和新本地 PTY 均不因这些自动测试获得新的人工验收，主应用后端保持旧路径。
+第 7 项 `SwiftTerm+PTYOutputDrain.patch` 为本实验启用自然退出的**有限输出 fence**：一次性读尽当前已收集／可读的边界，等待解析完成再结束；不等 descendant EOF，不靠延长 0.5s。已复现并修复 held-parser 的 **6／16,409 bytes** 丢失；独立 C 及 owned PTY 回归还纠正 Darwin master 必须用 **TIOCOUTQ**、不能把 slave-input 的 FIONREAD 当可读输出量（3,073／4,097 的错误前提原样保留为回归）。用户显式关闭可无 join 取消，`outputDrainComplete=false` 明示不完整，legacy／explicit close 的 0.5s 仍保留。
+
+新增 7 项 drain 专项＋主 actor 阻塞时仍解析／回复并完成退出的 native consumer，当前本地专项 **24 项**。**Darwin 短子进程 hangup 可在 capture 前丢字节，独立 raw 十字节向量仍打印 KNOWN LIMITATION，未声称修好。** 没有增持 slave、生产延迟或替换原坏向量；不承诺 escaped／disowned daemon 全树清理、完整 terminfo/login-shell 或 GUI／能耗认证。完整边界见 [LOCAL-PTY-COMPATIBILITY.md](LOCAL-PTY-COMPATIBILITY.md)。本轮实验全量 **278 通过／0 跳过**、主应用 **362 通过／1 系统能力跳过**；AX、动画和新本地 PTY 均不因这些自动测试获得新的人工验收，主应用后端保持旧路径。
 
 ### 系统输入对照
 

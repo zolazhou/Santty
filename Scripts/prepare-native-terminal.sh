@@ -52,6 +52,15 @@ if ! grep -Fq 'if let cCurrentDirectory, chdir(cCurrentDirectory) != 0' "$root/S
     exit 1
 fi
 
+if ! grep -Fq 'public var completeAvailableOutputOnExit: Bool' "$root/SwiftTerm/Sources/SwiftTerm/LocalProcess.swift"; then
+    patch -s -d "$root/SwiftTerm" -p1 < "$repo_dir/Patches/SwiftTerm+PTYOutputDrain.patch"
+fi
+if ! grep -Fq 'func completeAvailableOutputAndShutdown() -> Bool' "$root/SwiftTerm/Sources/SwiftTerm/TerminalIOPipeline.swift" \
+    || ! grep -Fq 'tty ? 0x40047473 : 0x4004667f' "$root/SwiftTerm/Sources/SwiftTerm/TerminalIOPipeline.swift"; then
+    echo "Incomplete SwiftTerm PTY drain patch. Move $root/SwiftTerm aside and rerun $0." >&2
+    exit 1
+fi
+
 for shader in Shaders.metal MetalShaderSource.swift; do
     if ! grep -Fq 'fragment float4 terminal_image_crop_fragment' "$root/SwiftTerm/Sources/SwiftTerm/Apple/Metal/$shader"; then
         echo "Incomplete SwiftTerm image patch. Move $root/SwiftTerm aside and rerun $0." >&2

@@ -278,6 +278,40 @@ final class NativeLocalPTYSessionTests: XCTestCase {
         } catch { try? await lab.stop(); throw error }
     }
 
+    func testNativePTYParsesRepliesAndCompletesNaturalDrainWhileMainActorIsBlocked() async throws {
+        var publications = 0
+        let lab = try NativeLocalPTYLab(driver: GhosttyVTDriver()) { _ in publications += 1 }
+        let program = """
+        import os, tty
+        tty.setraw(0)
+        def reply():
+            data = b''
+            while not data.endswith(b'R'): data += os.read(0, 32)
+            return data
+        os.write(1, b'\\x1b[6n')
+        if reply() != b'\\x1b[1;1R': os._exit(91)
+        text = b'PTY-MAIN-BLOCKED'
+        os.write(1, text + b'\\x1b[6n')
+        if reply() != b'\\x1b[1;' + str(len(text) + 1).encode() + b'R': os._exit(92)
+        os._exit(27)
+        """
+        do {
+            try lab.start(viewport: viewport, executable: "/usr/bin/python3", args: ["-c", program])
+            // Intentionally no actor yield: parsing/replies/reap are not UI
+            // work. The second DSR also proves the literal tail was parsed
+            // before child exit, without a production delay or byte rewrite.
+            for _ in 0..<500 {
+                if lab.state == .exited(27) { break }
+                usleep(10_000)
+            }
+            XCTAssertEqual(publications, 0)
+            XCTAssertEqual(lab.state, .exited(27))
+            XCTAssertEqual(lab.outputDrainComplete, true)
+            XCTAssertTrue(try text(lab).contains("PTY-MAIN-BLOCKED"))
+            try await lab.stop()
+        } catch { try? await lab.stop(); throw error }
+    }
+
     func testCoalescedCloseEscalatesOnlyTheOwnedIgnoringChildAndReapsIt() async throws {
         let lab = try NativeLocalPTYLab(driver: GhosttyVTDriver()) { _ in }
         do {

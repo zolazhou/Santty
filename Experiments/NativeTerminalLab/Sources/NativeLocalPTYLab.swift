@@ -4,7 +4,7 @@ import SwiftTerm
 
 // Standalone LocalProcess / serial lifecycle adaptation; see the PTY notice.
 enum NativeLocalPTYState: Equatable, Sendable {
-    case idle, starting, running, closing, exited(Int32?), failed(LocalProcessError)
+    case idle, starting, running, closing, exited(Int32?), outputIncomplete(Int32?), failed(LocalProcessError)
     var acceptsInput: Bool { self == .running }
 }
 enum NativeLocalPTYError: Error, Equatable, Sendable {
@@ -36,6 +36,7 @@ final class NativeLocalPTYLab {
     var lastWriteError: NativeLocalPTYError? { bridge.lastWriteError }
     var processInfo: NativeLocalPTYInfo? { bridge.processInfo() }
     var pendingInputBytes: Int { bridge.pendingInputBytes }
+    var outputDrainComplete: Bool? { bridge.outputDrainComplete }
 
     init(driver: GhosttyVTDriver, inheritedEnvironment: [String: String] = ProcessInfo.processInfo.environment,
          onPresentation: @escaping @MainActor @Sendable (Bool) -> Void) throws {
@@ -139,8 +140,9 @@ final class NativeLocalPTYLab {
 }
 
 /// Audited non-Sendable runner boundary: the recursive lock serializes runner
-/// calls/state. Delegate delivery is private FIFO, not main/direct delivery.
-/// Data is parsed before callback return; no second output history is kept.
+/// calls/state. Output uses the runner's serial parse worker directly, never
+/// main or a sync hop to the lifecycle queue. Natural exit waits for that
+/// callback to finish; no second output history is kept.
 private final class NativeLocalPTYBridge: LocalProcessDelegate, @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let output: NativeTerminalOutput
@@ -159,11 +161,13 @@ private final class NativeLocalPTYBridge: LocalProcessDelegate, @unchecked Senda
 
     init(output: NativeTerminalOutput) {
         self.output = output
-        process = LocalProcess(delegate: self, dispatchQueue: DispatchQueue(label: "santty.native-pty.delivery"), directDelivery: false)
+        process = LocalProcess(delegate: self, dispatchQueue: DispatchQueue(label: "santty.native-pty.lifecycle"), directDelivery: true)
+        process.completeAvailableOutputOnExit = true
     }
     var state: NativeLocalPTYState { lock.withLock { phase } }
     var lastWriteError: NativeLocalPTYError? { lock.withLock { writeError } }
     var pendingInputBytes: Int { lock.withLock { queuedBytes } }
+    var outputDrainComplete: Bool? { lock.withLock { process.outputDrainComplete } }
     func observe(_ body: @escaping @MainActor @Sendable (UInt64, NativeLocalPTYState) -> Void) { lock.withLock { observer = body } }
     private func publish() {
         revision &+= 1
@@ -224,7 +228,10 @@ private final class NativeLocalPTYBridge: LocalProcessDelegate, @unchecked Senda
     func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
         let completions = lock.withLock { () -> [CheckedContinuation<Void, Error>] in
             guard source === process else { return [] }
-            phase = .exited(exitCode); pending = []; queuedBytes = 0; inFlight = 0
+            // Explicit close can discard output, but a natural incomplete
+            // drain must not masquerade as a normal successful exit.
+            phase = phase == .closing || source.outputDrainComplete == true ? .exited(exitCode) : .outputIncomplete(exitCode)
+            pending = []; queuedBytes = 0; inFlight = 0
             output.setInputEnabled(false); publish()
             let completions = Array(waiters.values); waiters = [:]
             return completions
@@ -241,7 +248,7 @@ private final class NativeLocalPTYBridge: LocalProcessDelegate, @unchecked Senda
                 pending = []; queuedBytes = inFlight
                 process.terminateTerminal(force: force); publish()
                 return []
-            case .exited, .failed:
+            case .exited, .outputIncomplete, .failed:
                 let completions = Array(waiters.values); waiters = [:]; return completions
             default: return []
             }
@@ -253,7 +260,7 @@ private final class NativeLocalPTYBridge: LocalProcessDelegate, @unchecked Senda
             let id = UUID()
             let done = lock.withLock { () -> Bool in
                 switch phase {
-                case .exited, .failed: return true
+                case .exited, .outputIncomplete, .failed: return true
                 default: waiters[id] = continuation; return false
                 }
             }

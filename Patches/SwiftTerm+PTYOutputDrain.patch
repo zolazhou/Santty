@@ -1,0 +1,189 @@
+--- a/Sources/SwiftTerm/LocalProcess.swift
++++ b/Sources/SwiftTerm/LocalProcess.swift
+@@ -120,0 +121,2 @@
++    var completeAvailableOutputOnExit = false
++    var outputDrainComplete: Bool?
+@@ -233 +235,2 @@
+-    /// Bounds the output drain between child exit and the termination callback.
++    /// Bounds the legacy/explicit-termination drain. Opt-in natural completion
++    /// below uses a byte fence instead, not a larger timeout.
+@@ -240,0 +244,14 @@
++
++    /// Opt-in finite-byte natural-exit drain (macOS validated). Captures a
++    /// readable-byte fence, waits for all captured output to be delivered, not
++    /// for an EOF held open by descendants. No parser wall-clock cutoff.
++    /// Explicit termination still uses drainTimeout. Set before launch.
++    public var completeAvailableOutputOnExit: Bool {
++        get { session.withLock { $0.completeAvailableOutputOnExit } }
++        set { session.withLock { $0.completeAvailableOutputOnExit = newValue } }
++    }
++
++    /// nil before drain; false means cutoff, cancellation or fence failure.
++    /// Published before processTerminated; true does not certify bytes the OS
++    /// may already have discarded before the gather checkpoint.
++    public var outputDrainComplete: Bool? { session.withLock { $0.outputDrainComplete } }
+@@ -482 +499,2 @@
+-            timeout: TimeInterval
++            timeout: TimeInterval,
++            completeAvailable: Bool
+@@ -487,0 +506 @@
++            let completeAvailable = state.phase == .running && state.completeAvailableOutputOnExit
+@@ -493 +512 @@
+-            return (state.pipeline, state.drainTimeout)
++            return (state.pipeline, state.drainTimeout, completeAvailable)
+@@ -497 +516,6 @@
+-        _ = drain.pipeline?.drainAvailableAndShutdown(timeout: drain.timeout)
++        let drained: Bool
++        if drain.completeAvailable {
++            drained = drain.pipeline?.completeAvailableOutputAndShutdown() ?? true
++        } else {
++            drained = drain.pipeline?.drainAvailableAndShutdown(timeout: drain.timeout) ?? true
++        }
+@@ -506,0 +531 @@
++            state.outputDrainComplete = drained
+@@ -591,0 +617 @@
++            state.outputDrainComplete = nil
+@@ -740,2 +766,5 @@
+-        let reaper = session.withLock { state -> LocalProcessChildReaper? in
+-            guard state.phase == .running || state.phase == .terminating else { return nil }
++        // A reaped root can still have a slow parser. Explicit close cancels
++        // that finite drain without joining or ever signaling cached PID zero.
++        let target = session.withLock { state -> (LocalProcessChildReaper?, TerminalIOPipeline?) in
++            if state.phase == .exited { return (nil, state.pipeline) }
++            guard state.phase == .running || state.phase == .terminating else { return (nil, nil) }
+@@ -748,3 +777,4 @@
+-            return state.reaper
+-        }
+-        reaper?.signal(force ? SIGKILL : SIGTERM)
++            return (state.reaper, nil)
++        }
++        target.1?.cancelDrain()
++        target.0?.signal(force ? SIGKILL : SIGTERM)
+--- a/Sources/SwiftTerm/TerminalIOPipeline.swift
++++ b/Sources/SwiftTerm/TerminalIOPipeline.swift
+@@ -130,0 +131,19 @@
++    }
++
++    /// Fence capture at the gather worker's next checkpoint. Deliver the ring
++    /// and exactly the bytes readable at that fence, regardless of parser time.
++    /// Never waits for a descendant to close the slave or for future output.
++    func completeAvailableOutputAndShutdown() -> Bool {
++        let canWait = worker.requestCompleteDrain()
++        assert(canWait, "A pipeline worker cannot wait for its own completion")
++        guard canWait else { return false }
++        worker.waitUntilStopped()
++        sink.clear()
++        return worker.didCompleteAvailableDrain
++    }
++
++    /// Explicit owner cancellation: no join on the caller (possibly main).
++    /// Already executing callbacks may finish; queued output is not promised.
++    func cancelDrain() {
++        _ = worker.requestShutdown()
++        sink.clear()
+@@ -272,0 +292 @@
++        case completingAvailable
+@@ -308,0 +329 @@
++    private var completeDrainFailed = false
+@@ -423,0 +445,18 @@
++    }
++
++    func requestCompleteDrain() -> Bool {
++        condition.lock()
++        if runPhase == .streaming { runPhase = .completingAvailable }
++        if controlWriteFd >= 0 { Self.writeWakeByte(controlWriteFd) }
++        condition.broadcast()
++        let shouldClose = !started
++        if shouldClose { done = true }
++        condition.unlock()
++        if shouldClose { closeDescriptorsIfNeeded() }
++        return !isCurrentWorker
++    }
++
++    var didCompleteAvailableDrain: Bool {
++        condition.lock()
++        defer { condition.unlock() }
++        return runPhase == .completingAvailable && !completeDrainFailed
+@@ -575,0 +615,2 @@
++        // Gather-thread owned: capture once, never refill from future writers.
++        var fencedBytesRemaining: Int?
+@@ -582 +623 @@
+-                case .streaming:
++                case .streaming, .completingAvailable:
+@@ -610,0 +652,41 @@
++            case .completingAvailable:
++                if fencedBytesRemaining == nil {
++                    var available: Int32 = 0
++                    // The gather worker keeps fd alive; never hold the ring
++                    // condition over a kernel query, so cancellation stays
++                    // nonblocking even if that syscall is unexpectedly slow.
++                    condition.unlock()
++#if canImport(Darwin)
++                    var info = stat()
++                    let result: Int32
++                    if fstat(fd, &info) != 0 {
++                        result = -1
++                    } else {
++                        // Darwin PTY master FIONREAD measures the slave INPUT
++                        // queue, not readable output. TIOCOUTQ is the correct
++                        // fence. Pipes use FIONREAD. Both _IOR ABI values are
++                        // independently checked against the real SDK in C.
++                        let tty = info.st_mode & mode_t(S_IFMT) == mode_t(S_IFCHR)
++                        let request: UInt = tty ? 0x40047473 : 0x4004667f
++                        result = ioctl(fd, request, &available)
++                    }
++#else
++                    let result = ioctl(fd, UInt(FIONREAD), &available)
++#endif
++                    condition.lock()
++                    guard runPhase == .completingAvailable else {
++                        condition.unlock()
++                        return
++                    }
++                    guard result == 0, available >= 0 else {
++                        completeDrainFailed = true
++                        condition.unlock()
++                        return
++                    }
++                    fencedBytesRemaining = Int(available)
++                }
++                guard fencedBytesRemaining != 0 else {
++                    condition.unlock()
++                    return
++                }
++                drainDeadline = nil
+@@ -622,0 +705 @@
++            var completeAtNextCheckpoint = false
+@@ -627 +710,2 @@
+-                let n = Self.readFd(fd, into: buffer.advanced(by: total), count: TerminalIOPipeline.bufferCapacity - total)
++                let capacity = TerminalIOPipeline.bufferCapacity - total
++                let n = Self.readFd(fd, into: buffer.advanced(by: total), count: min(capacity, fencedBytesRemaining ?? capacity))
+@@ -630,0 +715,4 @@
++                    if let remaining = fencedBytesRemaining {
++                        fencedBytesRemaining = remaining - n
++                        if fencedBytesRemaining == 0 { fatal = true; break }
++                    }
+@@ -651 +739 @@
+-                    if drainDeadline != nil {
++                    if drainDeadline != nil || fencedBytesRemaining != nil {
+@@ -714 +802,6 @@
+-                        if currentRunPhase() != .streaming {
++                        let phase = currentRunPhase()
++                        if phase == .completingAvailable {
++                            completeAtNextCheckpoint = true
++                            break
++                        }
++                        if phase != .streaming {
+@@ -752,0 +846,7 @@
++                if let remaining = fencedBytesRemaining, remaining > 0 {
++                    // An observed byte disappeared (e.g. concurrent kernel
++                    // flush). Never report a complete drain for that prefix.
++                    condition.lock()
++                    completeDrainFailed = true
++                    condition.unlock()
++                }
+@@ -754,0 +855 @@
++            if completeAtNextCheckpoint { continue }
+@@ -775 +876 @@
+-                    case .draining:
++                    case .draining, .completingAvailable:

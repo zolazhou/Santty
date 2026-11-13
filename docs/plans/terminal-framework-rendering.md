@@ -33,7 +33,7 @@
 
 - 已接只读 AppKit AX：VT formatter 在 driver 锁内生成有界发布窗口，AX 只读该窗口的 UTF-16 文本／视觉行／选择／光标／屏幕范围，不触发取新帧或输入。19 项 AX 接口／Unicode／几何／安全回归和私有 Herdr 隐藏信用回收／重连通过；实验全量 254 通过／0 跳过；主应用 361 通过／2 环境跳过（旧 Ghostty Metal 图形显示条件、私有圆角 getter）。保留 SwiftTerm macOS AccessibilityService 空壳事实，参考其 iOS 接口但未引入模拟器；AX 使用 Foundation 组合字符索引，几何仍是 VT cells，修复默认非 2027 模式下 ZWJ 的跨单元索引，原始测试字符未改。只读 setter／页内选择／physical lines 与 unwrap copy 的差异、限额和人工门槛见 [AX 差异表](../../Experiments/NativeTerminalLab/ACCESSIBILITY-COMPATIBILITY.md)。尚未获得 VoiceOver／AX Inspector 人工验收，不把本地协议调用计为实际辅助技术认证。
 
-- 已接独立本地 PTY 实验：SwiftTerm.LocalProcess → 共用 NativeTerminalOutput／VT／SwiftTerm renderer，无第二模拟器。16 项 owned-child 用例覆盖 chdir 失败的 127 修正、exec／环境／TTY、真实 raw 字节与 resize 回复、6000 行尾输出、foreground PGID／PID／cwd、实际 SIGINT、cwd 继承、受限 checked FIFO、force/reap／owner cleanup 和同一 PNG／AX 边界；实验全量 270 通过／0 跳过；主应用 362 通过／1 系统能力跳过。最小补丁为 runner 增加锁内 TTY 查询和 TIOCSIG＋reuse-safe reaper 关闭；未修改预编译 core。保留默认 0.5s drain 限制和 escaped daemon／GUI／术语库／性能门槛，不能将这些测试计为无限无损 drain 或全部本地生命周期认证。动态 cwd 失败为 `/var`／`/private/var` 测试比较别名，不改生产路径／字节或等待。应用菜单新增 private local PTY，与私有 Herdr 互斥，同一 frontend；主应用后端仍未切换。见 [本地 PTY 差异表](../../Experiments/NativeTerminalLab/LOCAL-PTY-COMPATIBILITY.md)。
+- 已接独立本地 PTY 实验：SwiftTerm.LocalProcess → 共用 NativeTerminalOutput／VT／SwiftTerm renderer，无第二模拟器。当前 24 项本地专项覆盖 chdir 失败的 127 修正、exec／环境／TTY、真实 raw 字节与 resize 回复、6000 行尾输出、foreground PGID／PID／cwd、实际 SIGINT、cwd 继承、受限 checked FIFO、force/reap／owner cleanup 和同一 PNG／AX 边界；实验全量 278 通过／0 跳过；主应用 362 通过／1 系统能力跳过。最小补丁为 runner 增加锁内 TTY 查询和 TIOCSIG＋reuse-safe reaper 关闭；未修改预编译 core。自然退出新增有限 readable-byte fence，修复 held parser 的 6／16,409 字节丢失，Darwin master 用 TIOCOUTQ 而非 slave-input FIONREAD；显式 close 可无 join 取消并记录不完整，legacy／显式关闭仍保留 0.5s。独立 raw C 十字节短子进程 hangup 在 capture 前丢字节仍是 KNOWN LIMITATION，未用 ACK 控制冒充原坏向量已修复。保留 escaped daemon／GUI／术语库／性能门槛，不能将这些测试计为无限无损 drain 或全部本地生命周期认证。动态 cwd 失败为 `/var`／`/private/var` 测试比较别名，不改生产路径／字节或等待。应用菜单新增 private local PTY，与私有 Herdr 互斥，同一 frontend；主应用后端仍未切换。见 [本地 PTY 差异表](../../Experiments/NativeTerminalLab/LOCAL-PTY-COMPATIBILITY.md)。
 
 下面的输入兼容专项已建立参考差异表、独立事件归一化与固定字节矩阵；继续按差异清单收敛，而不是依赖用户逐个发现基础按键问题。继续真实网络／设备验收、完整呈现、AX 人工／滚动树／IME 验收与平台输入缺口；再完成本地 PTY／AX／设备人工门槛，最后整体切换主应用。当前环境的滚动体验已获用户人工确认；跨输入设备／显示配置、跨屏和睡眠唤醒、多 Pane 与能耗仍待验证。
 
@@ -295,7 +295,7 @@ KeyboardRouter 的部分 legacy 路径直接输出按当时模式编码的 bytes
 
 ### 阶段 4：本地 PTY 与进程生命周期
 
-已将独立 `SwiftTerm.LocalProcess` 接到共用 I/O 边界，不使用 `LocalProcessTerminalView` 或额外的 SwiftTerm 模拟器。当前为私有实验模式，16 项专项及实验全量 270 通过；限制和人工门槛见 [LOCAL-PTY-COMPATIBILITY.md](../../Experiments/NativeTerminalLab/LOCAL-PTY-COMPATIBILITY.md)，不是阶段 5 已自动获准切换后端。
+已将独立 `SwiftTerm.LocalProcess` 接到共用 I/O 边界，不使用 `LocalProcessTerminalView` 或额外的 SwiftTerm 模拟器。当前为私有实验模式，24 项专项及实验全量 278 通过；限制和人工门槛见 [LOCAL-PTY-COMPATIBILITY.md](../../Experiments/NativeTerminalLab/LOCAL-PTY-COMPATIBILITY.md)，不是阶段 5 已自动获准切换后端。
 
 - 接通启动、cwd、环境、字节输入／输出、窗口尺寸、启动失败和退出回调。
 - 明确回调队列、串行顺序、解析调度和退出前尾部输出排空；不让 PTY I/O 直接调用主线程视图。
