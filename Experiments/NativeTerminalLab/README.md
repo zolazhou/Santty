@@ -245,9 +245,9 @@ VT 默认非 2027 模式把 ZWJ 分散到多个 cell。原始测试保留，AX �
 
 最初 16 项专项覆盖真实 Ctrl-C/SIGINT、raw UTF-8／Enter／ETX 和窗口回复字节、6000 行宽输出／末尾 marker、tty/pid/group/cwd、cwd 继承、错误启动、输入背压、early／coalesced／force／owner cleanup 与 local PNG／AX 端点。独立 tiny C probe 只创建自有 PTY 验证 Darwin ioctl（不链接或构建终端 core）。foreground force 用 owned lease 是否释放验证，并有专用 FIFO 救援，不向缓存 PID／不明进程发信号。
 
-第 7 项 `SwiftTerm+PTYOutputDrain.patch` 为本实验启用自然退出的**有限输出 fence**：一次性读尽当前已收集／可读的边界，等待解析完成再结束；不等 descendant EOF，不靠延长 0.5s。已复现并修复 held-parser 的 **6／16,409 bytes** 丢失；独立 C 及 owned PTY 回归还纠正 Darwin master 必须用 **TIOCOUTQ**、不能把 slave-input 的 FIONREAD 当可读输出量（3,073／4,097 的错误前提原样保留为回归）。用户显式关闭可无 join 取消，`outputDrainComplete=false` 明示不完整，legacy／explicit close 的 0.5s 仍保留。
+第 7 项 `SwiftTerm+PTYOutputDrain.patch` 为本实验启用自然退出的**有限输出 fence**：一次性读尽当前已收集／可读的边界，等待解析完成再结束；不等 descendant EOF，不靠延长 0.5s。已复现并修复 held-parser 的 **6／16,409 bytes** 丢失；独立 C 及 owned PTY 回归还纠正 Darwin master 必须用 **TIOCOUTQ**、不能把 slave-input 的 FIONREAD 当可读输出量（3,073／4,097 的错误前提原样保留为回归）。用户显式关闭可无 join 取消，`outputDrainComplete=false` 明示不完整；legacy 的 0.5s 保留，guarded 强制关闭也必须等正在执行的解析回调归还（主线程不 join，清理 deadline 仍为 5s）。
 
-新增 7 项 drain 专项＋主 actor 阻塞时仍解析／回复并完成退出的 native consumer，当前本地专项 **24 项**。**Darwin 短子进程 hangup 可在 capture 前丢字节，独立 raw 十字节向量仍打印 KNOWN LIMITATION，未声称修好。** 没有增持 slave、生产延迟或替换原坏向量；不承诺 escaped／disowned daemon 全树清理、完整 terminfo/login-shell 或 GUI／能耗认证。完整边界见 [LOCAL-PTY-COMPATIBILITY.md](LOCAL-PTY-COMPATIBILITY.md)。本轮实验全量 **278 通过／0 跳过**、主应用 **362 通过／1 系统能力跳过**；AX、动画和新本地 PTY 均不因这些自动测试获得新的人工验收，主应用后端保持旧路径。
+新增 7 项 drain 专项＋主 actor 阻塞时仍解析／回复并完成退出的 native consumer，最初本地专项 **24 项**。第 8 项 `SwiftTerm+PTYLaunchCapture.patch` 再加入 **CLOEXEC 预 exec gate＋parent slave keeper**：准备 I/O／退出监测、持有 slave 后才放行程序；准备失败／取消不 exec，gate EOF 为 127，fd-local SIGPIPE 防护，不改全局信号；per-launch 冻结策略，回调／drain 后 off-main 释放 keeper，旧 public fork 默认不变。真实 delayed-reader `/usr/bin/printf FINAL-TAIL` 原 **0／10** 现 **10／10**；再补已实际写出后延迟 capture、24 次 direct/queued 快速退出、失败／取消／force／gate flags／dead-child EPIPE 和无 DSR 的 native printf，当前本地专项 **34 项**。独立 C **原未保留 slave 的坏向量仍打印 RAW CONTROL**，guarded 对照用相同十字节并故意延迟读取验证，不以原始路径的偶然调度成功冒充修复。没有生产延迟／改字节／重建 core；不承诺 explicit discard／tcflush、escaped／disowned daemon 全树清理、完整 terminfo/login-shell 或 GUI／能耗认证。完整边界见 [LOCAL-PTY-COMPATIBILITY.md](LOCAL-PTY-COMPATIBILITY.md)。本轮实验全量 **288 通过／0 跳过**、主应用 **361 通过／2 环境／系统能力跳过**；AX、动画和新本地 PTY 均不因这些自动测试获得新的人工验收，主应用后端保持旧路径。
 
 ### 系统输入对照
 

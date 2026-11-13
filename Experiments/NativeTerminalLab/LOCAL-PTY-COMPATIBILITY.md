@@ -121,27 +121,65 @@ original bad boundary (3,073 / 4,097 bytes) and its unchanged correct expectatio
 are retained in the regression. Kernel queries run outside the ring condition;
 this is macOS validation, not a Linux/device guarantee.
 
-Explicit terminal close retains bounded/discarding semantics. If the root is
-already reaped, `terminateTerminal` can cancel the drain **without joining the
-caller**, signaling zero, or using an obsolete PID. An executing callback still
-owns its slot and may finish; termination cannot overtake it in finite mode.
+Explicit terminal close retains discarding semantics. If the root is already
+reaped, `terminateTerminal` can cancel the drain **without joining the caller**,
+signaling zero, or using an obsolete PID. Guarded mode now also keeps the
+callback-ownership barrier after force/termination, not the legacy 0.5-s parser
+cutoff. An executing callback still owns its slot and must return before
+termination; the native **5-s** cleanup deadline reports failure/keeps private
+files rather than pretending a stuck callback has stopped.
 `outputDrainComplete` is nil before drain and false for cutoff/cancellation or
 an observed fence failure; true means **the captured boundary**, not all bytes
 ever written by a program. Unexpected natural failure becomes `outputIncomplete`
 in the native wrapper, not a normal successful exit. Deliberate close may discard
 output; cleanup deadlines do not pretend a blocked parser has completed.
 
-### Separate Darwin hangup limitation (not fixed)
+### Guarded launch and slave lifetime (eighth patch)
 
-A tiny owned C child that successfully writes ten literal bytes and immediately
-exits, with the parent first reading **after reap**, can yield zero bytes. This
-reproduces without SwiftTerm, VT or Santty. Bytes already discarded by the kernel
-before capture cannot be recovered by this fence. The original raw vector remains
-in `probe-local-pty-api.c`, printing **KNOWN LIMITATION**, not an adapter success.
-No extra slave handle, launch delay or altered program bytes was introduced as
-an unproven workaround. The native main-blocked consumer uses a second DSR reply
-to prove its tail was parsed before exit; it does **not replace or pass off the
-bad raw vector as fixed**. Arbitrary short-child losslessness remains open.
+The original tiny C child writes ten literal bytes and immediately exits; reading
+an unretained `forkpty` only after reap yields **0 / 10 bytes** on this Darwin.
+The seventh parser fence alone could not recover bytes already lost in the kernel.
+The eighth patch, `SwiftTerm+PTYLaunchCapture.patch`, prevents that lifetime gap
+for the native wrapper's existing `completeAvailableOutputOnExit` opt-in:
+
+1. Before fork, construct a private CLOEXEC launch pipe, with FDs moved above
+   0/1/2 so `login_tty` cannot overwrite it. Its writer has **fd-local
+   F_SETNOSIGPIPE**, never a process-wide SIGPIPE disposition change.
+2. The child uses only async-signal-safe calls after fork: restore signals/mask,
+   wait for exactly one permission byte, close the gate, chdir, execve; gate EOF
+   aborts with 127. The parent opens an **O_NOCTTY / CLOEXEC / nonblocking slave
+   keeper** before granting exec. User code cannot outrun that ownership setup.
+3. Publish the input channel, bounded reader pipeline and exit monitor before
+   permission. Missing input channel / preparation failure / cancellation never
+   grants exec. Reader startup EOF also refuses permission. A missing process
+   source falls back to the existing dedicated child waiter.
+4. Keep the slave until captured output/callbacks finish; close it on the reaper,
+   not a view/main release cascade. Deinit discards guarded I/O and closes the
+   master write duplicate without waiting for a child blocked on unread output.
+   Gate/keeper resources transfer once, and failure paths abort/reap the exact
+   child using the existing reuse-safe reaper.
+
+This is **lifetime/backpressure**, not a new timer, sleep, altered program,
+protocol ACK or another emulator. Two gate FDs are transient; one extra slave FD
+is retained per live guarded launch. The decision is snapshotted per launch;
+changing the preference cannot downgrade an active guard. The public legacy
+`PseudoTerminalHelpers.fork` signature and default unguarded clients are unchanged.
+No new backend switch is exposed in Santty.
+
+The actual LocalProcess regression stalls the parent **1.2 s before reader
+startup**: unchanged `/usr/bin/printf FINAL-TAIL` went from 0 bytes to exactly 10.
+A second owned helper test first confirms the program has written the ten bytes,
+then deliberately withholds capture 1.2 s and still reads all 10. Independent C
+retains the **original losing unretained vector** as `RAW CONTROL` and a guarded
+case with the **same literal bytes**, delayed reader and exact 10-byte assertion;
+it does not silently swap a DSR-gated program for the bad vector. The earlier
+main-blocked DSR consumer remains a separate protocol test, and a new native VT
+consumer repeatedly runs plain printf with **no program acknowledgement**.
+
+This does not recover a program's deliberate tcflush, promise bytes after a
+chosen descendant fence/explicit discard, certify other kernels, or prove all
+shell/daemon/device behavior. The raw unretained control can still lose output;
+only the guarded path is claimed fixed by these cases.
 
 Full descendant policy, sustained backpressure, login/shell/terminfo variants,
 GUI/IME/device/sleep behavior and performance/energy remain acceptance gates.
@@ -160,7 +198,7 @@ before any rescue token; an owned FIFO permits cleanup on failure without
 cached-PID signaling. Expectations observe program state/data, not just writes.
 
 The added main-actor-blocked native consumer plus **7 drain tests** bring the
-local suite to **24 cases**: unchanged captured-tail bytes after a held parser,
+local suite initially to **24 cases**: unchanged captured-tail bytes after a held parser,
 explicit nonjoining cancel / incomplete status, the legacy cutoff as an
 observation rather than a fix, queued compatibility, an owned slave-holding
 descendant that cannot postpone termination to EOF, a continuously writing
@@ -172,8 +210,18 @@ a live producer. The separate live-pipe control actually remains writing until
 the fence closes its reader. Legacy callback completion is explicitly joined in
 the test before checking its bytes; legacy termination can overtake that callback.
 
+The next **9 launch tests** plus the plain native printf consumer bring the
+local suite to **34 cases**. They include 24 direct/queued rapid unacknowledged
+children inside one stress case, actual pre-reader and post-write stalls,
+checked channel refusal without execution, cancellation before permission,
+CLOEXEC gate/keeper flags, gate-EOF 127, dead-child EPIPE with fd-local SIGPIPE
+protection, force-close callback lifetime and immutable active launch policy.
+The forced-close test originally reproduced termination overtaking its held
+callback; the guard now waits for ownership release even after a forced close,
+while the caller itself remains nonjoining.
+
 `Tools/probe-local-pty-api.{c,sh}` independently verifies the Darwin ioctl
-arguments/ABI, readable output counts, the unfixed short-child vector, slave
+arguments/ABI, readable output counts, unretained/guarded short-child controls, slave
 name, current foreground identity, HUP and KILL using tiny
 owned `forkpty` children. It does not link/build a terminal core or access user
 terminals.
@@ -182,8 +230,9 @@ terminals.
 sh Experiments/NativeTerminalLab/Tools/probe-local-pty-api.sh
 ```
 
-Latest experimental FlowDeck: **278 passed / 0 skipped**; main app **362 passed /
-1 system-capability skip** (private effective-corner-radius getter unavailable).
+Latest experimental FlowDeck: **288 passed / 0 skipped**; main app **361 passed /
+2 environment/system-capability skips** (Ghostty's renderer requires a logged-in
+graphical display; private effective-corner-radius getter unavailable).
 Saved My Mac / Santty defaults are unchanged. Tests are not fresh GUI acceptance.
 
 Restart the rebuilt lab, return to fixture mode, and choose application menu

@@ -278,6 +278,22 @@ final class NativeLocalPTYSessionTests: XCTestCase {
         } catch { try? await lab.stop(); throw error }
     }
 
+    func testUnacknowledgedShortCommandPublishesLiteralTailThroughNativeVT() async throws {
+        for _ in 0..<8 {
+            let lab = try NativeLocalPTYLab(driver: GhosttyVTDriver()) { _ in }
+            do {
+                // No DSR, input gate, newline rewrite, shell startup hook, or
+                // child-side acknowledgement makes this tiny program wait.
+                try lab.start(viewport: viewport, executable: "/usr/bin/printf", args: ["FINAL-TAIL"])
+                try await waitFor("unacknowledged short native command exit") { lab.state == .exited(0) }
+                XCTAssertTrue(try text(lab).contains("FINAL-TAIL"))
+                XCTAssertEqual(lab.outputDrainComplete, true)
+                try await lab.stop()
+                XCTAssertFalse(FileManager.default.fileExists(atPath: lab.root.path))
+            } catch { try? await lab.stop(); throw error }
+        }
+    }
+
     func testNativePTYParsesRepliesAndCompletesNaturalDrainWhileMainActorIsBlocked() async throws {
         var publications = 0
         let lab = try NativeLocalPTYLab(driver: GhosttyVTDriver()) { _ in publications += 1 }

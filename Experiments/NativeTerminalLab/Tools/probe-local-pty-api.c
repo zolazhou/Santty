@@ -9,6 +9,8 @@
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <poll.h>
 
 // Swift cannot import the function-like _IOR macro. Keep its explicit ABI
 // value checked against the real SDK, not against the Swift implementation.
@@ -94,13 +96,66 @@ static int short_child_hangup(void) {
     int exact = got == 10 && memcmp(bytes, "FINAL-TAIL", 10) == 0;
     close(fd);
     printf("owned_short_child_after_reap: write_verified=10 output=%d read=%zd exact=%d\n", available, got, exact);
-    if (!exact) puts("KNOWN LIMITATION: Darwin may discard PTY bytes before capture on short-child hangup; the parser-fence fix does not recover them.");
+    if (!exact) puts("RAW CONTROL: unretained Darwin forkpty discards bytes before capture; the guarded lifetime case below must preserve the SAME ten bytes.");
     // Successful observation, NOT certification that the bad vector works.
     return queried == 0 ? 0 : 1;
 }
 
+struct lifetime_waiter { pid_t pid; int notify, status; pid_t result; };
+static void *lifetime_reap(void *value) {
+    struct lifetime_waiter *w = value;
+    do { w->result = waitpid(w->pid, &w->status, 0); } while (w->result < 0 && errno == EINTR);
+    (void)write(w->notify, "D", 1);
+    return NULL;
+}
+
+static int guarded_lifetime(void) {
+    int gate[2], done[2], fd = -1, keeper = -1;
+    if (pipe(gate)) return 1;
+    if (pipe(done)) { close(gate[0]); close(gate[1]); return 1; }
+    pid_t pid = forkpty(&fd, NULL, NULL, NULL);
+    if (pid < 0) { close(gate[0]); close(gate[1]); close(done[0]); close(done[1]); return 1; }
+    if (pid == 0) {
+        alarm(4);
+        close(gate[1]); close(done[0]); close(done[1]);
+        char token = 0;
+        if (read(gate[0], &token, 1) != 1 || token != 1) _exit(126);
+        close(gate[0]);
+        _exit(write(1, "FINAL-TAIL", 10) == 10 ? 0 : 125);
+    }
+    close(gate[0]);
+    char name[128] = {0}, bytes[64];
+    int ok = ioctl(fd, TIOCPTYGNAME, name) == 0;
+    if (ok) keeper = open(name, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+    struct lifetime_waiter w = {.pid = pid, .notify = done[1]};
+    pthread_t thread;
+    if (keeper < 0 || pthread_create(&thread, NULL, lifetime_reap, &w)) {
+        close(gate[1]); close(fd); if (keeper >= 0) close(keeper);
+        // No competing reaper was started: this exact child is still ours.
+        kill(pid, SIGKILL); waitpid(pid, NULL, 0);
+        close(done[0]); close(done[1]); return 1;
+    }
+    unsigned char ready = 1;
+    ok = ok && write(gate[1], &ready, 1) == 1;
+    close(gate[1]);
+    // Fault injection only: give the same short child ample time to exit
+    // while deliberately doing NO master reads. No production timer/ACK.
+    struct pollfd event = {.fd = done[0], .events = POLLIN};
+    int reaped_before_capture = poll(&event, 1, 1200) > 0;
+    (void)fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+    ssize_t got = read(fd, bytes, sizeof(bytes));
+    int exact = got == 10 && memcmp(bytes, "FINAL-TAIL", 10) == 0;
+    close(fd); close(keeper);
+    pthread_join(thread, NULL);
+    close(done[0]); close(done[1]);
+    ok = ok && exact && w.result == pid && WIFEXITED(w.status) && WEXITSTATUS(w.status) == 0;
+    printf("guarded_slave_lifetime: delayed_reader_ms=1200 reaped_before_capture=%d read=%zd exact=%d\n", reaped_before_capture, got, ok);
+    return ok ? 0 : 1;
+}
+
 int main(void) {
+    alarm(8); // tiny-client safety only, never the library's policy
     int signals = probe(SIGHUP) | probe(SIGKILL);
-    int fence = readable_fence(), hangup = short_child_hangup();
-    return signals || fence || hangup;
+    int fence = readable_fence(), hangup = short_child_hangup(), guarded = guarded_lifetime();
+    return signals || fence || hangup || guarded;
 }

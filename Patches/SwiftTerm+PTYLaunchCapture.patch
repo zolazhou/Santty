@@ -1,0 +1,201 @@
+--- a/Sources/SwiftTerm/Pty.swift
++++ b/Sources/SwiftTerm/Pty.swift
+@@ -10,0 +11,2 @@
++
++typealias PreparedPtyLaunch = (pid: pid_t, masterFd: Int32, slaveFd: Int32, gateFd: Int32, setupError: Int32?)
+@@ -62,0 +65,22 @@
++        guard let launch = prepareFork(andExec: andExec, args: args, env: env,
++            currentDirectory: currentDirectory, desiredWindowSize: &desiredWindowSize, preserveOutput: false) else { return nil }
++        return (launch.pid, launch.masterFd)
++    }
++
++    /// The caller owns every returned descriptor and the unreaped child,
++    /// including setup-error returns. A protected child cannot exec until the
++    /// caller writes one byte to gateFd; closing it instead aborts with 127.
++    static func prepareFork(andExec: String, args: [String], env: [String], currentDirectory: String? = nil,
++                            desiredWindowSize: inout winsize, preserveOutput: Bool) -> PreparedPtyLaunch? {
++        var gateRead: Int32 = -1, gateWrite: Int32 = -1
++#if os(macOS)
++        if preserveOutput {
++            guard let gate = makeLaunchGate() else { return nil }
++            gateRead = gate.0; gateWrite = gate.1
++        }
++#endif
++        var transferred = false
++        defer {
++            if gateRead >= 0 { close(gateRead) }
++            if !transferred && gateWrite >= 0 { close(gateWrite) }
++        }
+@@ -116,0 +141 @@
++            if gateWrite >= 0 { close(gateWrite) }
+@@ -132,0 +158,7 @@
++            if gateRead >= 0 {
++                var token: UInt8 = 0
++                var n: Int
++                repeat { n = read(gateRead, &token, 1) } while n < 0 && errno == EINTR
++                if n != 1 || token != 1 { _exit(127) }
++                close(gateRead)
++            }
+@@ -140,2 +172,44 @@
+-        return (pid, master)
+-    }
++        if gateRead >= 0 { close(gateRead); gateRead = -1 }
++        var slave: Int32 = -1, setupError: Int32?
++#if os(macOS)
++        if preserveOutput {
++            var name = [CChar](repeating: 0, count: 128)
++            if ioctl(master, TIOCPTYGNAME, &name) != 0 {
++                setupError = errno
++            } else if name.firstIndex(of: 0) == nil || name[0] == 0 {
++                setupError = EINVAL
++            } else {
++                slave = name.withUnsafeBufferPointer { open($0.baseAddress!, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC) }
++                if slave < 0 { setupError = errno }
++            }
++        }
++#endif
++        transferred = true
++        return (pid, master, slave, gateWrite, setupError)
++    }
++
++#if os(macOS)
++    private static func makeLaunchGate() -> (Int32, Int32)? {
++        var fds: [Int32] = [-1, -1]
++        guard pipe(&fds) == 0 else { return nil }
++        func failed() -> (Int32, Int32)? {
++            let failure = errno
++            fds.filter { $0 >= 0 }.forEach { close($0) }
++            errno = failure
++            return nil
++        }
++        for i in 0..<2 {
++            // login_tty replaces 0/1/2 in the child. Gate FDs must survive it.
++            if fds[i] < 3 {
++                let replacement = fcntl(fds[i], F_DUPFD_CLOEXEC, 3)
++                guard replacement >= 0 else { return failed() }
++                close(fds[i]); fds[i] = replacement
++            }
++            guard fcntl(fds[i], F_SETFD, FD_CLOEXEC) == 0 else { return failed() }
++        }
++        // A child can die before release. Suppress SIGPIPE on this owned fd
++        // only; never mutate the application's process-wide signal policy.
++        guard fcntl(fds[1], F_SETNOSIGPIPE, 1) == 0 else { return failed() }
++        return (fds[0], fds[1])
++    }
++#endif
+--- a/Sources/SwiftTerm/LocalProcess.swift
++++ b/Sources/SwiftTerm/LocalProcess.swift
+@@ -116,0 +117 @@
++    var slaveKeeperFd: Int32 = -1
+@@ -121,0 +123 @@
++    var guardedOutputForLaunch = false
+@@ -235,2 +237,2 @@
+-    /// Bounds the legacy/explicit-termination drain. Opt-in natural completion
+-    /// below uses a byte fence instead, not a larger timeout.
++    /// Bounds the legacy drain. Guarded launches below use a byte fence and
++    /// callback ownership barrier even during explicit close, not a larger timeout.
+@@ -245 +247,4 @@
+-    /// Opt-in finite-byte natural-exit drain (macOS validated). Captures a
++    /// Opt-in guarded launch + finite-byte natural-exit drain (macOS validated).
++    /// A pre-exec gate retains the slave before user code can run; ownership
++    /// lasts until output drain, avoiding last-slave hangup before capture.
++    /// Captures a
+@@ -248 +253,3 @@
+-    /// Explicit termination still uses drainTimeout. Set before launch.
++    /// Guarded termination also waits for executing callbacks (never on the
++    /// caller). Explicit terminal close can cancel the fence; legacy clients
++    /// alone retain the parser timeout. Changes apply to the next launch.
+@@ -417,0 +425 @@
++            slaveKeeperFd: Int32,
+@@ -424,0 +433 @@
++                state.slaveKeeperFd,
+@@ -434,0 +444 @@
++            slaveKeeperFd: Int32,
+@@ -440,0 +451 @@
++                state.slaveKeeperFd,
+@@ -471,0 +483,4 @@
++            // Guarded owner release discards I/O. Do not leave an unread
++            // master duplicate keeping a retained slave's final close stuck.
++            if resources.slaveKeeperFd >= 0 { writeChannel?.close(flags: .stop) }
++            let keeper = resources.slaveKeeperFd
+@@ -476,0 +492 @@
++                if keeper >= 0 { close(keeper) }
+@@ -479,0 +496,2 @@
++            let keeper = resources.slaveKeeperFd
++            if keeper >= 0 { Self.startChildWaiter { close(keeper) } }
+@@ -488,0 +507,11 @@
++    }
++
++    /// Before exec permission, failure owns a blocked, unreaped child. Close
++    /// the master before the keeper, abort the gate, and reap off the caller.
++    private static func abandonPreparedLaunch(_ launch: PreparedPtyLaunch) {
++        if launch.gateFd >= 0 { close(launch.gateFd) }
++        close(launch.masterFd)
++        if launch.slaveFd >= 0 { close(launch.slaveFd) }
++        let reaper = LocalProcessChildReaper(pid: launch.pid)
++        reaper.signal(SIGKILL)
++        startChildWaiter { _ = reaper.wait() }
+@@ -506 +535 @@
+-            let completeAvailable = state.phase == .running && state.completeAvailableOutputOnExit
++            let completeAvailable = state.guardedOutputForLaunch
+@@ -526 +555,2 @@
+-            writeChannel: DispatchIO?
++            writeChannel: DispatchIO?,
++            slaveKeeperFd: Int32
+@@ -529 +559 @@
+-                return (false, nil)
++                return (false, nil, -1)
+@@ -535,0 +566,2 @@
++            let keeper = state.slaveKeeperFd
++            state.slaveKeeperFd = -1
+@@ -537 +569 @@
+-            return (true, writeChannel)
++            return (true, writeChannel, keeper)
+@@ -540,0 +573,3 @@
++        // This is the dedicated reaper thread, never a view/main release
++        // cascade. Read workers have stopped before releasing the keeper.
++        if teardown.slaveKeeperFd >= 0 { close(teardown.slaveKeeperFd) }
+@@ -616,0 +652 @@
++            state.guardedOutputForLaunch = state.completeAvailableOutputOnExit
+@@ -639 +675,2 @@
+-        guard let (shellPid, childfd) = PseudoTerminalHelpers.fork(
++        let preserveOutput = session.withLock { $0.guardedOutputForLaunch }
++        guard let prepared = PseudoTerminalHelpers.prepareFork(
+@@ -644 +681,2 @@
+-            desiredWindowSize: &size
++            desiredWindowSize: &size,
++            preserveOutput: preserveOutput
+@@ -650,0 +689,6 @@
++        if let failure = prepared.setupError {
++            Self.abandonPreparedLaunch(prepared)
++            finishLaunchFailure(.forkFailed(failure), notify: notifyLaunchFailure)
++            return .failure(.forkFailed(failure))
++        }
++        let shellPid = prepared.pid, childfd = prepared.masterFd
+@@ -654,4 +698 @@
+-            close(childfd)
+-            let reaper = LocalProcessChildReaper(pid: shellPid)
+-            reaper.signal(SIGKILL)
+-            Self.startChildWaiter { _ = reaper.wait() }
++            Self.abandonPreparedLaunch(prepared)
+@@ -679,0 +721 @@
++            state.slaveKeeperFd = prepared.slaveFd
+@@ -721,0 +764,6 @@
++        } else {
++            let reference = lifecycleReference, reaper = launch.reaper, generation = launch.generation
++            Self.startChildWaiter {
++                let status = reaper.wait()
++                reference.withLock { $0.value }?.childDidExit(generation: generation, status: status)
++            }
+@@ -733,0 +782,11 @@
++        if prepared.gateFd >= 0 {
++            // Single-byte pipe release cannot block on capacity. Serialize it
++            // with terminate() so a cancellation admitted first never execs.
++            session.withLock { state in
++                if state.generation == launch.generation && state.phase == .running && state.childfd == childfd {
++                    var token: UInt8 = 1, n: Int
++                    repeat { n = write(prepared.gateFd, &token, 1) } while n < 0 && errno == EINTR
++                }
++            }
++            close(prepared.gateFd)
++        }

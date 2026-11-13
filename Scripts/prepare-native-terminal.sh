@@ -61,6 +61,15 @@ if ! grep -Fq 'func completeAvailableOutputAndShutdown() -> Bool' "$root/SwiftTe
     exit 1
 fi
 
+if ! grep -Fq 'static func prepareFork(' "$root/SwiftTerm/Sources/SwiftTerm/Pty.swift"; then
+    patch -s -d "$root/SwiftTerm" -p1 < "$repo_dir/Patches/SwiftTerm+PTYLaunchCapture.patch"
+fi
+if ! grep -Fq 'state.slaveKeeperFd = prepared.slaveFd' "$root/SwiftTerm/Sources/SwiftTerm/LocalProcess.swift" \
+    || ! grep -Fq 'state.guardedOutputForLaunch = state.completeAvailableOutputOnExit' "$root/SwiftTerm/Sources/SwiftTerm/LocalProcess.swift"; then
+    echo "Incomplete SwiftTerm guarded PTY launch patch. Move $root/SwiftTerm aside and rerun $0." >&2
+    exit 1
+fi
+
 for shader in Shaders.metal MetalShaderSource.swift; do
     if ! grep -Fq 'fragment float4 terminal_image_crop_fragment' "$root/SwiftTerm/Sources/SwiftTerm/Apple/Metal/$shader"; then
         echo "Incomplete SwiftTerm image patch. Move $root/SwiftTerm aside and rerun $0." >&2
