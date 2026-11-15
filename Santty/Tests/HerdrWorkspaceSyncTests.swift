@@ -1,5 +1,4 @@
 import Foundation
-import GhosttyTerminal
 import XCTest
 @testable import Santty
 
@@ -174,9 +173,9 @@ final class HerdrWorkspaceSharingIntegrationTests: XCTestCase {
             XCTFail("Timed out at \(stage)")
             throw CLIError("Timed out at \(stage)")
         }
-        let terminal = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? TerminalView }.first)
+        let terminal = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? NativeTerminalScrollView }.first)
         workspace!.view.layoutSubtreeIfNeeded(); terminal.fitToSize()
-        let pane = try XCTUnwrap(terminal.delegate as? TerminalPaneController)
+        let pane = try XCTUnwrap(terminal.owningPaneController)
         let session = try XCTUnwrap(pane.herdrSession)
         try await waitFor("initial attach") { session.state == .live }
         let binding = try XCTUnwrap(session.binding)

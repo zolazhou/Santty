@@ -7,6 +7,8 @@ let isRunningSwiftUIPreviews =
 private final class MinimalAppDelegate: NSObject, NSApplicationDelegate {}
 
 MainActor.assumeIsolated {
+    // Driver construction also checks the cached system result and presents errors.
+    _ = try? GhosttyVTSystem.prepare()
     let app = NSApplication.shared
     app.appearance = NSAppearance(named: .darkAqua)
     let shouldUseMinimalAppDelegate = isRunningTests || isRunningSwiftUIPreviews

@@ -1,12 +1,16 @@
 # Santty
 
 Santty is a macOS terminal emulator written in Swift. It is a native AppKit
-wrapper around the Ghostty terminal core, consumed through the
-[`libghostty-spm`](https://github.com/Lakr233/libghostty-spm) Swift package.
+frontend using the original precompiled Ghostty VT library, SwiftTerm external-frame
+rendering/platform components and a virtualized AppKit NSScrollView. Ghostty alone
+owns terminal semantics; there is no second emulator or old-backend fallback.
+See the [cutover evidence and remaining acceptance gates](docs/plans/terminal-native-cutover.md)
+and the [post-cutover feature and optimization roadmap](docs/plans/terminal-native-roadmap.md).
 
 ## Features
 
 - **Native macOS terminal** — A Swift and AppKit interface powered by the Ghostty terminal core, for macOS 14.0 and later.
+- **[Rendering engine](docs/terminal-rendering.md)** — Choose Core Graphics (default) or Metal in Settings without restarting terminal sessions.
 - **[Workspaces](docs/workspaces.md)** — Organize terminals into independent workspaces with tabs, split panes and saved layouts.
 - **[Herdr workspaces](docs/herdr.md)** — Keep local and remote terminal sessions running between app launches with herdr-core.
 - **[Window sidebar](docs/window-sidebar.md)** — Keep terminals, browsers, workspaces and agents beside your main workspace.
@@ -44,20 +48,17 @@ mise run tuist:regen
 
 Generated Xcode files are intentionally not committed.
 
-The mise tasks also prepare `Vendor/libghostty-spm` from the pinned upstream
-2.2.2026102101 revision, verify its SHA-256, and apply the Swift bridges in `Patches/`.
-These expose Ghostty's text snapshots, grid metrics and native selection gestures,
-and keep detached sessions processing callbacks. The precompiled core is pinned
-to `1e9e14af5df1`, which includes the Ghostty 1.4 scrollback compression and hidden
-surface GPU reclamation changes, but predates the final 1.4.0 release.
-Santty reports pane attachment separately from window occlusion so hidden tabs
-release GPU resources while their processes and scrollback stay alive.
-The history budget stays at 10 MB per terminal; compression reduces its physical
-memory use without adopting upstream's higher 50 MB default.
-Run `mise run ghostty:prepare` before invoking `tuist generate`
-directly, and after editing the patches. The generated vendor directory is
-ignored by Git. When upgrading the pin, move the old vendor directory aside
-before preparing the new version.
+Mise prepares pinned SwiftTerm `28c6d1d` and original precompiled Ghostty VT
+1.0.0 under ignored `Vendor/native-terminal`, verifies downloads and applies the
+eight renderer/PTY patches in `Patches/`. The C core is never rebuilt. Production
+history remains **8 MiB** per terminal. Hidden panes keep parsing and draining
+transport credit without painting; Local stop/drain is awaited before removal.
+Run `mise run terminal:prepare` before direct `tuist generate` or after patch edits.
+Regular generation includes the native production backend and formal
+`SanttyTerminalTests`, which import the application module with isolated private
+transports. See [terminal development and validation](docs/terminal/README.md). Move an old
+vendor directory aside before changing its pin. Full shell/terminfo, GUI, IME,
+AX/VoiceOver, sleep/cross-screen and energy acceptance remain explicit gates.
 
 ### Build
 

@@ -8,7 +8,38 @@ enum TerminalSettings {
     private static let fontFamilyKey = "terminal.fontFamily"
     private static let fontSizeKey = "terminal.fontSize"
     private static let paddingKey = "terminal.padding"
+    private static let renderingEngineKey = "terminal.renderingEngine"
     private static let userDefaults = UserDefaults.standard
+
+    enum RenderingEngine: String, CaseIterable, Identifiable {
+        case coreGraphics
+        case metal
+
+        var id: Self { self }
+        var title: String { self == .coreGraphics ? "Core Graphics" : "Metal" }
+    }
+
+    static let defaultRenderingEngine: RenderingEngine = .coreGraphics
+    static var renderingEngine: RenderingEngine {
+        get { readRenderingEngine(from: userDefaults) }
+        set { setRenderingEngine(newValue, defaults: userDefaults) }
+    }
+
+    // Explicit defaults injection keeps preference tests out of user settings.
+    static func readRenderingEngine(from defaults: UserDefaults) -> RenderingEngine {
+        defaults.string(forKey: renderingEngineKey).flatMap(RenderingEngine.init(rawValue:))
+            ?? defaultRenderingEngine
+    }
+
+    static func setRenderingEngine(_ engine: RenderingEngine, defaults: UserDefaults) {
+        defaults.set(engine.rawValue, forKey: renderingEngineKey)
+        NotificationCenter.default.post(name: didChangeNotification, object: nil)
+    }
+
+    static func resetRenderingEngine(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: renderingEngineKey)
+        NotificationCenter.default.post(name: didChangeNotification, object: nil)
+    }
 
     static let defaultThemeName = "Catppuccin Mocha"
     static let defaultFontFamily = "Menlo"

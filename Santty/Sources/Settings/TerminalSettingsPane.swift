@@ -3,6 +3,7 @@ import SwiftUI
 
 @MainActor
 struct TerminalSettingsPane: View {
+    @Binding var terminalRenderingEngine: TerminalSettings.RenderingEngine
     @Binding var terminalThemeName: String
     @Binding var terminalFontFamily: String
     @Binding var terminalFontSize: Double
@@ -11,6 +12,31 @@ struct TerminalSettingsPane: View {
 
     var body: some View {
         Form {
+            Section {
+                LabeledContent("Rendering Engine") {
+                    HStack {
+                        Picker("Rendering Engine", selection: Binding(
+                            get: { terminalRenderingEngine },
+                            set: { engine in
+                                terminalRenderingEngine = engine
+                                TerminalSettings.renderingEngine = engine
+                            }
+                        )) {
+                            ForEach(TerminalSettings.RenderingEngine.allCases) { engine in
+                                Text(engine.title).tag(engine)
+                            }
+                        }
+                        .labelsHidden()
+
+                        Button("Reset") {
+                            TerminalSettings.resetRenderingEngine()
+                            terminalRenderingEngine = TerminalSettings.renderingEngine
+                        }
+                    }
+                }
+            } footer: {
+                Text("Applies immediately to all terminals without restarting sessions. If switching fails, the affected pane keeps its current engine and shows a warning.")
+            }
             InputSourceSettingsSections()
             Section {
                 LabeledContent("Theme") {
@@ -108,6 +134,7 @@ struct TerminalSettingsPane: View {
 
 @MainActor
 private struct TerminalSettingsPanePreview: View {
+    @State private var terminalRenderingEngine = TerminalSettings.renderingEngine
     @State private var terminalThemeName = TerminalSettings.themeName
     @State private var terminalFontFamily = TerminalSettings.fontFamily
     @State private var terminalFontSize = Double(TerminalSettings.fontSize)
@@ -115,6 +142,7 @@ private struct TerminalSettingsPanePreview: View {
 
     var body: some View {
         TerminalSettingsPane(
+            terminalRenderingEngine: $terminalRenderingEngine,
             terminalThemeName: $terminalThemeName,
             terminalFontFamily: $terminalFontFamily,
             terminalFontSize: $terminalFontSize,

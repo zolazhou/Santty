@@ -1,5 +1,4 @@
 import AppKit
-import GhosttyTerminal
 import XCTest
 @testable import Santty
 
@@ -253,7 +252,7 @@ final class CLIPaneTests: XCTestCase {
     }
 
     func testLocalTerminalInputDoesNotChangeResponderOrClipboard() async throws {
-        let pane = TerminalPaneController()
+        let fixture = try PrivatePaneFixture(), pane = fixture.pane
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 400), styleMask: [], backing: .buffered, defer: false)
         window.contentView = pane.hostView
         defer { window.contentView = nil }
@@ -265,11 +264,12 @@ final class CLIPaneTests: XCTestCase {
         let text = "printf 'CLI-%s-OK\\n' INPUT"
         try pane.sendForCLI(.init(command: "pane.send-text", text: text))
         try await Task.sleep(for: .milliseconds(100))
-        XCTAssertFalse(try pane.readForCLI(.init(command: "read", paneID: pane.id)).text?.contains("CLI-INPUT-OK") == true, "Sending text must not submit it")
+        let beforeEnter = try await pane.readForCLI(.init(command:"read",paneID:pane.id))
+        XCTAssertFalse(beforeEnter.text?.contains("CLI-INPUT-OK") == true,"Sending text must not submit it")
         try pane.sendForCLI(.init(command: "pane.send-key", key: "Enter"))
         var found = false
         for _ in 0..<200 {
-            if try pane.readForCLI(.init(command: "read", paneID: pane.id)).text?.contains("CLI-INPUT-OK") == true { found = true; break }
+            if try await pane.readForCLI(.init(command: "read", paneID: pane.id)).text?.contains("CLI-INPUT-OK") == true { found = true; break }
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertTrue(found)
@@ -277,7 +277,9 @@ final class CLIPaneTests: XCTestCase {
         XCTAssertEqual(NSPasteboard.general.changeCount, changeCount)
         pane.enterScrollMode()
         XCTAssertThrowsError(try pane.sendForCLI(.init(command: "pane.send-key", key: "Enter")))
-        let offline = TerminalPaneController(herdrSession: HerdrTerminalSession(paneID: UUID(), cwd: nil, binding: nil))
+        let offlineOwner = try makeUnstartedHerdrOwner()
+        let offline = TerminalPaneController(id:offlineOwner.paneID,session:offlineOwner)
         XCTAssertThrowsError(try offline.sendForCLI(.init(command: "pane.send-text", text: "never replay")))
+        try await fixture.stop()
     }
 }

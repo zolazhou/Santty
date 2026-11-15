@@ -41,67 +41,8 @@ let signingSettings: SettingsDictionary =
         "PROVISIONING_PROFILE_SPECIFIER": "",
     ]
 
-// Keep the two Ghostty C libraries in separate executables: their static
-// archives export overlapping symbols. Normal generation does not even add
-// these dependencies. See docs/plans/terminal-framework-rendering.md.
-let nativeTerminalLabEnabled = environment["TUIST_SANTTY_NATIVE_TERMINAL_LAB"] == "1"
-let labPackages: [Package] = nativeTerminalLabEnabled
-    ? [.local(path: "Vendor/native-terminal/SwiftTerm")] : []
-let labTargets: [Target] = nativeTerminalLabEnabled ? [
-    .target(
-        name: "SanttyTerminalLab",
-        destinations: .macOS,
-        product: .app,
-        bundleId: "\(bundleIdentifier).terminal-lab",
-        deploymentTargets: .macOS("14.0"),
-        infoPlist: .extendingDefault(with: ["NSPrincipalClass": "NSApplication"]),
-        sources: [
-            "Experiments/NativeTerminalLab/Sources/**",
-            "Santty/Sources/Terminal/TerminalStreamEndpoint.swift",
-            "Santty/Sources/Terminal/TerminalLinkValidation.swift",
-            "Santty/Sources/Herdr/HerdrCoreTransport.swift",
-            "Santty/Sources/Herdr/HerdrCoreClient.swift",
-            "Santty/Sources/Herdr/HerdrTerminalSession.swift",
-            "Santty/Sources/Herdr/HerdrSettings.swift",
-            "Santty/Sources/Agents/AgentSessionStore.swift",
-            "Santty/Sources/Agents/AgentKind.swift",
-            "Santty/Sources/App/BrandIcon.swift",
-        ],
-        resources: ["Experiments/NativeTerminalLab/Licenses/**"],
-        dependencies: [
-            .package(product: "SwiftTerm"),
-            .xcframework(path: "Vendor/native-terminal/ghostty-vt.xcframework"),
-            .sdk(name: "AppKit", type: .framework),
-            .sdk(name: "Metal", type: .framework),
-            .sdk(name: "MetalKit", type: .framework),
-            .sdk(name: "CoreText", type: .framework),
-            .sdk(name: "QuartzCore", type: .framework),
-        ],
-        settings: .settings(base: signingSettings.merging([
-            "OTHER_LDFLAGS": ["$(inherited)", "-lc++"],
-        ]) { _, new in new })
-    ),
-    .target(
-        name: "SanttyTerminalLabTests",
-        destinations: .macOS,
-        product: .unitTests,
-        bundleId: "\(bundleIdentifier).terminal-lab.tests",
-        deploymentTargets: .macOS("14.0"),
-        infoPlist: .default,
-        sources: ["Experiments/NativeTerminalLab/Tests/**"],
-        dependencies: [
-            .target(name: "SanttyTerminalLab"),
-            .package(product: "SwiftTerm"),
-        ]
-    ),
-] : []
-let labSchemes: [Scheme] = nativeTerminalLabEnabled ? [.scheme(
-    name: "SanttyTerminalLab",
-    shared: true,
-    buildAction: .buildAction(targets: ["SanttyTerminalLab"]),
-    testAction: .targets(["SanttyTerminalLabTests"], configuration: "Debug"),
-    runAction: .runAction(configuration: "Debug", executable: "SanttyTerminalLab")
-)] : []
+// The application owns the sole precompiled VT + renderer/platform backend.
+// Terminal regression tests import that application module, never a lab app.
 
 let project = Project(
     name: "Santty",
@@ -112,9 +53,7 @@ let project = Project(
         )
     ),
     packages: [
-        // Prepared by `mise run ghostty:prepare`: pinned upstream Swift source
-        // plus text/selection bridges. The C core is still a binary dependency.
-        .local(path: "Vendor/libghostty-spm"),
+        .local(path: "Vendor/native-terminal/SwiftTerm"),
         .remote(
             url: "https://github.com/sindresorhus/KeyboardShortcuts",
             requirement: .upToNextMajor(from: "3.1.0")
@@ -123,7 +62,7 @@ let project = Project(
             url: "https://github.com/sparkle-project/Sparkle",
             requirement: .upToNextMajor(from: "2.8.0")
         ),
-    ] + labPackages,
+    ],
     settings: .settings(
         base: [
             "SWIFT_VERSION": "6.0",
@@ -157,8 +96,8 @@ let project = Project(
             ],
             dependencies: [
                 .target(name: "SanttyCLI"),
-                .package(product: "GhosttyTheme"),
-                .package(product: "GhosttyTerminal"),
+                .package(product: "SwiftTerm"),
+                .xcframework(path: "Vendor/native-terminal/ghostty-vt.xcframework"),
                 .package(product: "KeyboardShortcuts"),
                 .package(product: "Sparkle"),
                 .sdk(name: "AppKit", type: .framework),
@@ -173,7 +112,8 @@ let project = Project(
             ],
             settings: .settings(
                 base: [
-                    "ASSETCATALOG_COMPILER_APPICON_NAME": "$(SANTTY_APP_ICON_NAME)"
+                    "ASSETCATALOG_COMPILER_APPICON_NAME": "$(SANTTY_APP_ICON_NAME)",
+                    "OTHER_LDFLAGS": ["$(inherited)", "-lc++"]
                 ],
                 configurations: [
                     .debug(
@@ -219,11 +159,22 @@ let project = Project(
             sources: ["Santty/Tests/**"],
             dependencies: [
                 .target(name: "Santty"),
-                .package(product: "GhosttyTheme"),
-                .package(product: "GhosttyTerminal"),
+                .package(product: "SwiftTerm"),
                 .package(product: "KeyboardShortcuts"),
             ]
         ),
-    ] + labTargets,
-    schemes: labSchemes
+        .target(
+            name: "SanttyTerminalTests",
+            destinations: .macOS,
+            product: .unitTests,
+            bundleId: "\(bundleIdentifier).terminal-tests",
+            deploymentTargets: .macOS("14.0"),
+            infoPlist: .default,
+            sources: ["Santty/TerminalTests/**"],
+            dependencies: [
+                .target(name: "Santty"),
+                .package(product: "SwiftTerm"),
+            ]
+        ),
+    ]
 )

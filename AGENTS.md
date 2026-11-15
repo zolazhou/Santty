@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-Santty is a macOS terminal emulator written in Swift. It is a thin native AppKit wrapper around the Ghostty terminal core, which is provided as a precompiled C library (`GhosttyKit.xcframework`).
+Santty is a macOS terminal emulator written in Swift: original precompiled Ghostty VT owns terminal semantics; SwiftTerm supplies external-frame rendering and LocalProcess; AppKit NSScrollView owns a virtualized history viewport. There is no old surface backend or runtime fallback.
 
 - **Language**: Swift 6.0 with strict concurrency (`SWIFT_STRICT_CONCURRENCY: complete`)
 - **Platform**: macOS 14.0+
@@ -16,6 +16,9 @@ Santty is a macOS terminal emulator written in Swift. It is a thin native AppKit
 ### Tuist / Xcode Workflow
 
 ```bash
+# Prepare pinned renderer and original VT archive before direct Tuist use
+mise run terminal:prepare
+
 # Install Tuist dependencies
 tuist install
 
@@ -39,51 +42,30 @@ flowdeck build
 flowdeck test
 ```
 
+### Terminal Regression Tests
+
+`mise run tuist:generate` always includes `SanttyTerminalTests`; no experimental app, scheme or generation flag remains. Run `flowdeck test -s Santty --test-targets SanttyTests,SanttyTerminalTests --json` (override private DerivedData as needed, never change saved FlowDeck defaults). The terminal suite imports the production `Santty` module; private PTY/Herdr test sessions live only in `Santty/TerminalTests/Support/`. Probes/generators are in `Scripts/Terminal/`, bundled themes/licenses in `Santty/Resources/`, and contracts/history in `docs/terminal/`.
+
 ### Formatting
 
 The project does not currently include a `.swift-format` configuration file, although `mise.toml` references one.
 
 ## High-Level Architecture
 
-The codebase is organized into three layers that bridge AppKit to the Ghostty C library:
-
-### 1. App Layer (`Santty/Sources/App/`)
-
-- **`main.swift`**: Manual `NSApplication` bootstrap with `AppDelegate`.
-- **`AppDelegate`**: `@MainActor` delegate that creates `MainWindowController`, kicks off async `GhosttyRuntime` initialization, and installs a minimal main menu.
-- **`MainWindowController`**: `NSWindowController` that owns a `TerminalViewController`. Bridges window lifecycle events (focus, occlusion, screen changes) to the terminal surface.
-- **`TerminalViewController`**: `NSViewController` that swaps between a loading/error SwiftUI view and the live `GhosttyTerminalView`. It receives the `GhosttyRuntime` asynchronously after initialization completes.
-
-### 2. Terminal Layer (`Santty/Sources/Terminal/`)
-
-- **`GhosttyTerminalView`**: `NSView` subclass conforming to `NSTextInputClient`. This is the primary rendering surface. It handles:
-  - Keyboard input (including IME/preedit, key equivalents, and modifier translation)
-  - Mouse input (position, buttons, scroll)
-  - Clipboard (copy/paste)
-  - Cursor shape/visibility updates from Ghostty
-  - Calls into `GhosttySurfaceHost` to forward events to the C library
-- **`GhosttyInput`**: Pure helper that translates `NSEvent` modifier flags and key events into Ghostty C structs (`ghostty_input_key_s`, `ghostty_input_mods_e`, etc.).
-
-### 3. Ghostty C Interop Layer (`Santty/Sources/Ghostty/`)
-
-- **`GhosttyRuntime`**: `@MainActor` singleton that wraps the Ghostty app lifecycle (`ghostty_app_t`).
-  - Bootstraps the C runtime on a detached task (`Task.detached`) and caches the result.
-  - Stores raw C pointers (`ghostty_app_t`, `ghostty_config_t`) as `nonisolated(unsafe)`.
-  - Exposes `requestTick()`, `setAppFocused()`, `applyColorScheme()`, and app-level action handling.
-- **`GhosttySurfaceHost`**: Per-surface bridge (`ghostty_surface_t`) created for each `GhosttyTerminalView`.
-  - Owns the C surface pointer and translates view geometry, focus, and color scheme to the C API.
-  - Handles clipboard read/write confirmation dialogs and close confirmation dialogs.
-  - Most methods assert `Thread.isMainThread`.
-- **`GhosttyCallbacks`**: Free-function C callbacks registered with Ghostty. They trampoline back to Swift via raw pointer unwrapping (`unwrapRuntime`, `unwrapSurfaceHost`) and always dispatch to the main thread with `runOnMainThread`.
+- **App/workspaces**: `AppDelegate` bootstraps AppKit and the VT system. `WorkspaceViewController` owns tiled, floating, sidebar and background workspace/tab controllers, persistence, CLI targeting and close scope checks.
+- **Production adapter**: `TerminalPaneController` permanently binds a pane UUID to `NativeTerminalPaneSession` and a checked `NativeTerminalFrontend`. `TerminalPaneHostView` supplies padding, vibrancy and loading/error UI; the actual responder is the native renderer.
+- **Native terminal** (`Santty/Sources/Terminal/Native/`): `GhosttyVTDriver` serializes all C calls. Parsing, replies and Herdr credit are independent of MainActor painting. `SwiftTermFrameSource` presents bounded owned cells/images, never SwiftTerm's emulator. `NativeTerminalScrollView` virtualizes history; tracked VT refs retain reading and Scroll Mode positions.
+- **Ownership**: `NativeLocalPTYSession` owns a lazy SwiftTerm.LocalProcess, checked FIFO and finite stop/drain. `HerdrTerminalSession` retains permanent core identity and parse-completion credit. Temporary view detach only unbinds a frontend, never stops a session.
+- **Text contracts**: CLI uses full retained logical history (32 MiB capture, separate response cap); AX reads only its immutable published physical page; Scroll Mode uses physical VT cells and tracked refs. None may substitute for another.
 
 ## Important Patterns
 
 - **Appearance**: `main.swift` sets the application's dark appearance before creating UI. Windows, panes and popovers inherit it; do not add local appearance overrides. Resolve semantic `CGColor` values inside the view's `effectiveAppearance` drawing context and refresh them when that appearance changes.
-- **Concurrency**: Almost all terminal-facing code is `@MainActor`. The runtime bootstrap runs on `Task.detached` but results are delivered to the main actor. `runOnMainThread` uses `MainActor.assumeIsolated` when already on the main thread.
-- **C Pointer Safety**: Ghostty objects are stored as `nonisolated(unsafe)` raw pointers. `deinit` schedules C cleanup on the main actor via `Task { @MainActor ... }`.
-- **Vendor Dependency**: `Scripts/prepare-ghostty.sh` downloads and verifies upstream [`libghostty-spm`](https://github.com/Lakr233/libghostty-spm) 2.2.2026110702 at a pinned revision into ignored `Vendor/libghostty-spm` (requires Swift 6.2 / Xcode 26+). `Project.swift` uses this local package. The precompiled core is Ghostty `042b16b6146a`. Keep using the original precompiled `GhosttyKit.xcframework`: do not build the C core from source. `Patches/` adds read-only snapshots and scroll selection, keeps detached live panes draining callbacks, drains the app mailbox before a surface is freed, holds the display link across output bursts, and keeps every surface call and the app tick off for 2.5 s after system wake. Do not shrink `scrollback-limit-bytes` below 6 MB: `HerdrWorkspaceTests` locks in that a 6000-row wide-output burst survives a scroll-mode copy. `TerminalPaneHostView` reports attachment through `setSurfaceVisible`; the package separately handles window occlusion. Run `mise run ghostty:prepare` before direct Tuist generation or after editing patches; mise generation tasks do this automatically. Move the old vendor directory aside when changing the pin. Preserve `TerminalView.foregroundPid` / `ttyName` for local process inspection and cwd inheritance.
-- **Surface Teardown**: `ghostty_surface_free` joins the surface's IO thread and cannot be interrupted, so it must never run from `TerminalPaneController.deinit` or another release cascade: one missed wakeup parks the main thread in "not responding" until force quit. `TerminalViewRetirement` tears views down on the next runloop turn, and the vendor patch ticks the app right before the join so a full mailbox cannot block the IO thread in its final push. Keep both; a stack ending in `ghostty_surface_free` → `_pthread_join` on the main thread is this bug.
-- **System Wake**: after sleep the core's renderer can park inside `CVDisplayLink::stop()` while holding the surface lock; any main-thread call into that surface then waits forever. That is why a frozen pane shows as `ghostty_surface_set_focus` → `__ulock_wait2`. `TerminalWakeGrace` gates ticks, focus, metrics and occlusion for 2.5 s after `NSWorkspace.screensDidWakeNotification` and replays the deferred state afterwards. Per-surface `CVDisplayLink` threads seen at ~2 per pane belong to the core, not to the `DisplayLink` package.
+- **Concurrency**: AppKit/session lifecycle is MainActor-bound. VT parsing/encoding/formatting and C pointer ownership are serialized under the driver lock; replies/parse credit must never wait on painting, AX or metadata delivery.
+- **C Pointer Safety**: Borrowed C cells, strings and images never escape a locked capture. Only bounded owned data crosses into rendering/AX/read services; dispose tracked refs before their terminal.
+- **Vendor Dependency**: `Scripts/prepare-native-terminal.sh` pins SwiftTerm `28c6d1d95de156a36a2eaa278177ee7f8a15d322` and original precompiled Ghostty VT 1.0.0 under ignored `Vendor/native-terminal`. Never rebuild the C core, link GhosttyKit/the old wrapper, instantiate SwiftTerm.Terminal or add a backend toggle. Preserve all eight reproducible SwiftTerm presentation/PTY patches. Run `mise run terminal:prepare` before direct generation or after patch edits; mise generation tasks do so automatically. Production history is **8 MiB**, never reduce below 6 MB or weaken the 6000-row wide-output copy regression. Preserve owned Local PID/TTY/cwd inspection; remote identities never enter local process/filesystem inspection.
+- **Teardown**: `PaneCloseTransaction` preflights/fences all concrete owners, independently awaits all cleanup, then rechecks exact controller/container identity before synchronous removal. Native Local normalizes to terminate, external Herdr viewers to detach. Keep failures/cancellation visible and retain layout/owners; cleanup is not rollback. No main-thread process join or deinit-based layout removal.
+- **Presentation/Wake**: Hidden/occluded/detached/sleeping views suppress painting and animation wakes, not parsing/replies/credit. Metrics synchronize before exec/attach independently of pixels. Old surface-free/display-link/mailbox/wake patches were retired with the old C backend; that is not a certification of new sleep/cross-screen/device energy behavior.
 - **Window Corner Radius**: In hidden-window mode the corner radius is customized through private AppKit setters (`_setCornerRadius:` / `_setEffectiveCornerRadius:`) in `AppAppearanceDefaults.applyWindowPresentation`. A titled window's corners are always clipped by the WindowServer mask (~16pt on macOS 26), which no `CALayer` change can override. `_setCornerRadius:` treats 0 as "reset to system default", so a true zero also calls `_setEffectiveCornerRadius:`. All calls are guarded by `responds(to:)`; acceptable because the app ships via Developer ID, not the App Store.
 - **Project Generation**: `.gitignore` excludes `*.xcodeproj`, `*.xcworkspace`, and `Derived/`. These are generated by Tuist and should never be committed.
 - **Signing & Bundle Identity**: No private values in the repo. `Project.swift` reads `TUIST_SANTTY_DEVELOPMENT_TEAM` and `TUIST_SANTTY_BUNDLE_IDENTIFIER` from the environment (Tuist only forwards `TUIST_*` variables to manifests). The maintainer sets them in `mise.local.toml` (gitignored, auto-loaded by mise). Without them, builds fall back to adhoc signing and the placeholder bundle ID `dev.santty.local`. Release packaging (`mise run release:package`) exports with Developer ID via a generated `build/ExportOptions.plist`, notarizes with `asc notarization submit --wait`, and staples the ticket before zipping.

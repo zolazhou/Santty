@@ -30,7 +30,10 @@ final class CLICommandRouter {
         do {
             try request.validate()
             if request.command == "capabilities" { return CLIResponse(capabilities: capabilities) }
-            if !request.isMutation { return try workspace.handleCLIRequest(request) }
+            if !request.isMutation {
+                if request.command == "list" { return try workspace.handleCLIRequest(request) }
+                return try await workspace.handleCLIReadRequest(request)
+            }
             let allowed = request.isInput ? Self.inputEnabled : Self.controlEnabled
             guard allowed else {
                 throw CLIError(request.isInput ? "Enable CLI terminal input in Settings → General." : "Enable CLI pane control in Settings → General.", code: "permission_denied")

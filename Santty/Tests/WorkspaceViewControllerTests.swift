@@ -411,12 +411,9 @@ final class WorkspaceViewControllerTests: XCTestCase {
             controller.debugSplitFocusedPane(along: .horizontal)
 
             let childPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
-            let renderedConfiguration = try XCTUnwrap(
-                controller.debugRenderedTerminalConfig(for: childPaneID)
-            )
-
-            XCTAssertNotEqual(childPaneID, parentPaneID)
-            XCTAssertTrue(renderedConfiguration.contains("working-directory = /tmp/project"))
+            let launch = try XCTUnwrap(controller.debugLaunchForTesting(for:childPaneID))
+            XCTAssertNotEqual(childPaneID,parentPaneID)
+            XCTAssertEqual(launch.workingDirectory,"/tmp/project")
         }
     }
 
@@ -455,11 +452,8 @@ final class WorkspaceViewControllerTests: XCTestCase {
             controller.debugSplitFocusedPane(along: .horizontal)
 
             let childPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
-            let renderedConfiguration = try XCTUnwrap(
-                controller.debugRenderedTerminalConfig(for: childPaneID)
-            )
-
-            XCTAssertFalse(renderedConfiguration.contains("working-directory ="))
+            let launch = try XCTUnwrap(controller.debugLaunchForTesting(for:childPaneID))
+            XCTAssertEqual(launch.workingDirectory,launch.environment["HOME"])
         }
     }
 
@@ -2326,8 +2320,8 @@ final class WorkspaceViewControllerTests: XCTestCase {
                 modifiers: NSEvent.ModifierFlags = [],
                 keyCode: UInt16 = 0,
                 awaitingSecondG: Bool = false
-            ) throws -> TerminalScrollModeKeyAction {
-                TerminalScrollModeKeyAction(
+            ) throws -> NativeScrollModeKeyAction {
+                NativeScrollModeKeyAction(
                     event: try XCTUnwrap(
                         Self.makeKeyEvent(key, modifiers: modifiers, keyCode: keyCode)
                     ),
@@ -2370,7 +2364,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
             )
             XCTAssertEqual(try action("h"), .move(.left))
             XCTAssertEqual(try action("l"), .move(.right))
-            let wordActions: [(String, TerminalScrollMovement, TerminalScrollMovement)] = [
+            let wordActions: [(String, NativeScrollMovement, NativeScrollMovement)] = [
                 ("w", .wordForward(big: false), .wordForward(big: true)),
                 ("b", .wordBackward(big: false), .wordBackward(big: true)),
                 ("e", .wordEnd(big: false), .wordEnd(big: true)),

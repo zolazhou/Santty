@@ -1,48 +1,45 @@
 import Foundation
-import GhosttyTerminal
 
-enum TerminalLoggingConfiguration {
-    static func apply(environment: [String: String] = ProcessInfo.processInfo.environment) {
-        guard let rawValue = environment["SANTTY_TERMINAL_DEBUG_LOG"] else {
-            TerminalDebugLog.disable()
-            return
-        }
-
-        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        switch value {
-        case "", "0", "false", "off", "none":
-            TerminalDebugLog.disable()
-        case "1", "true", "on", "standard":
-            TerminalDebugLog.enable(.standard)
-        case "all":
-            TerminalDebugLog.enable(.all)
-        default:
-            TerminalDebugLog.enable(categories(from: value))
-        }
+struct NativeTerminalLogCategory: OptionSet, Sendable {
+    let rawValue: UInt8
+    static let lifecycle = Self(rawValue:1)
+    static let metrics = Self(rawValue:2)
+    static let input = Self(rawValue:4)
+    static let output = Self(rawValue:8)
+    static let ime = Self(rawValue:16)
+    static let actions = Self(rawValue:32)
+    static let render = Self(rawValue:64)
+    static let standard: Self = [.lifecycle,.metrics,.actions]
+    static let all = Self(rawValue:127)
+}
+/// Opt-in host diagnostics only. Never log terminal bytes, commands, environment
+/// values, clipboard contents, links or raw connection errors.
+@MainActor
+enum NativeTerminalDebugLog {
+    static var isEnabled = false
+    static var categories: NativeTerminalLogCategory = []
+    static var sink: ((String) -> Void)?
+    static func enable(_ value: NativeTerminalLogCategory) { categories = value; isEnabled = !value.isEmpty }
+    static func disable() { isEnabled = false; categories = [] }
+    static func record(_ category: NativeTerminalLogCategory, _ message: String) {
+        guard isEnabled, !categories.intersection(category).isEmpty else { return }
+        sink?(message)
     }
-
-    private static func categories(from value: String) -> TerminalDebugCategory {
-        var categories: TerminalDebugCategory = []
-        for token in value.split(separator: ",") {
-            switch token.trimmingCharacters(in: .whitespacesAndNewlines) {
-            case "lifecycle":
-                categories.insert(.lifecycle)
-            case "metrics":
-                categories.insert(.metrics)
-            case "input":
-                categories.insert(.input)
-            case "output":
-                categories.insert(.output)
-            case "ime":
-                categories.insert(.ime)
-            case "actions":
-                categories.insert(.actions)
-            case "render":
-                categories.insert(.render)
-            default:
-                break
-            }
+}
+@MainActor
+enum TerminalLoggingConfiguration {
+    static func apply(environment: [String:String] = ProcessInfo.processInfo.environment) {
+        let value = environment["SANTTY_TERMINAL_DEBUG_LOG"]?.trimmingCharacters(in:.whitespacesAndNewlines).lowercased() ?? ""
+        switch value {
+        case "", "0","false","off","none": NativeTerminalDebugLog.disable()
+        case "1","true","on","standard": NativeTerminalDebugLog.enable(.standard)
+        case "all": NativeTerminalDebugLog.enable(.all)
+        default:
+            let known: [String:NativeTerminalLogCategory] = ["lifecycle":.lifecycle,"metrics":.metrics,"input":.input,
+                "output":.output,"ime":.ime,"actions":.actions,"render":.render]
+            NativeTerminalDebugLog.enable(value.split(separator:",").reduce([]) {
+                $0.union(known[$1.trimmingCharacters(in:.whitespacesAndNewlines)] ?? [])
+            })
         }
-        return categories
     }
 }

@@ -1,5 +1,4 @@
 import AppKit
-@testable import GhosttyTerminal
 import XCTest
 @testable import Santty
 
@@ -65,10 +64,10 @@ final class HerdrWorkspaceTests: XCTestCase {
         invalid = saved
         invalid.herdrRemote = .init(id: "../local", name: "box")
         XCTAssertThrowsError(try invalid.validate())
-        let session = HerdrTerminalSession(paneID: UUID(), cwd: nil, binding: nil, remote: remote)
+        let owner = try makeUnstartedHerdrOwner(remote:remote)
         var opened = false
-        let pane = TerminalPaneController(herdrSession: session, openURL: { _ in opened = true; return true })
-        pane.terminalDidRequestOpenURL("/srv/app/file.txt", kind: .unknown)
+        let pane = TerminalPaneController(id:owner.paneID,session:owner,openURL: { _ in opened = true; return true })
+        pane.terminalDidRequestOpenURL("/srv/app/file.txt")
         XCTAssertFalse(opened, "Remote paths must not open files on this Mac")
     }
 
@@ -153,13 +152,13 @@ final class HerdrWorkspaceTests: XCTestCase {
                 if condition() { return }
                 try await Task.sleep(for: .milliseconds(20))
             }
-            XCTFail("Remote workspace timed out at \(stage): \(descendants(workspace!.view).compactMap { ($0 as? TerminalView)?.delegate as? TerminalPaneController }.map { $0.displayTitle })")
+            XCTFail("Remote workspace timed out at \(stage): \(descendants(workspace!.view).compactMap { ($0 as? NativeTerminalScrollView)?.owningPaneController }.map { $0.displayTitle })")
             throw CLIError("Remote workspace condition timed out at \(stage)")
         }
         do {
-            var terminal = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? TerminalView }.first)
+            var terminal = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? NativeTerminalScrollView }.first)
             workspace!.view.layoutSubtreeIfNeeded(); terminal.fitToSize()
-            var pane = try XCTUnwrap(terminal.delegate as? TerminalPaneController)
+            var pane = try XCTUnwrap(terminal.owningPaneController)
             var session = try XCTUnwrap(pane.herdrSession)
             try await waitFor { session.state == .live }
             let binding = try XCTUnwrap(session.binding)
@@ -214,11 +213,11 @@ final class HerdrWorkspaceTests: XCTestCase {
             try await waitFor { terminal.readScreenText()?.contains("REMOTE-SCROLL-DONE") == true }
             workspace!.enterScrollMode(nil)
             XCTAssertTrue(workspace!.debugFocusedPaneIsInScrollMode)
-            let scroll = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? TerminalScrollModeView }.first)
+            let scroll = terminal.scrollModeController!
             scroll.move(.top); scroll.toggleSelection(linewise: true); scroll.move(.bottom)
             let pasteboard = NSPasteboard.withUniqueName()
             defer { pasteboard.releaseGlobally() }
-            scroll.copySelection(to: pasteboard)
+            scroll.copy(to: pasteboard)
             XCTAssertTrue(pasteboard.string(forType: .string)?.contains("remote-row-1000 中文🙂") == true)
             try Data().write(to: gate)
             _ = try await command(remote, ["server", "restart"])
@@ -262,9 +261,9 @@ final class HerdrWorkspaceTests: XCTestCase {
             workspace = WorkspaceViewController(); workspace!.herdrCoreClient = client; workspace!.debugLoadForTesting()
             try workspace!.restoreWorkspace(saved)
             window.contentView = workspace!.view; workspace!.viewDidAppear(); workspace!.view.layoutSubtreeIfNeeded()
-            terminal = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? TerminalView }.first)
+            terminal = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? NativeTerminalScrollView }.first)
             terminal.fitToSize()
-            pane = try XCTUnwrap(terminal.delegate as? TerminalPaneController); session = try XCTUnwrap(pane.herdrSession)
+            pane = try XCTUnwrap(terminal.owningPaneController); session = try XCTUnwrap(pane.herdrSession)
             stage = "restore"
             try await waitFor { session.state == .live }
             XCTAssertEqual(session.binding, binding)
@@ -283,8 +282,8 @@ final class HerdrWorkspaceTests: XCTestCase {
             uncertain.tabs[0].panes[0].herdrRunPending = true
             try workspace!.restoreWorkspace(uncertain)
             window.contentView = workspace!.view; workspace!.viewDidAppear(); workspace!.view.layoutSubtreeIfNeeded()
-            terminal = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? TerminalView }.first); terminal.fitToSize()
-            session = try XCTUnwrap((terminal.delegate as? TerminalPaneController)?.herdrSession)
+            terminal = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? NativeTerminalScrollView }.first); terminal.fitToSize()
+            session = try XCTUnwrap((terminal.owningPaneController)?.herdrSession)
             stage = "unknown run protection"
             try await waitFor { if case .failed = session.state { return true }; return false }
             XCTAssertNil(session.binding)
@@ -334,7 +333,7 @@ final class HerdrWorkspaceTests: XCTestCase {
         workspace!.viewDidAppear()
         defer { window.contentView = nil; workspace = nil }
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
-        let terminal = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? TerminalView }.first)
+        let terminal = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? NativeTerminalScrollView }.first)
         workspace!.view.layoutSubtreeIfNeeded(); terminal.fitToSize()
         func waitFor(_ condition: () -> Bool) async throws {
             for _ in 0..<500 {
@@ -348,8 +347,8 @@ final class HerdrWorkspaceTests: XCTestCase {
         let binding = try XCTUnwrap(workspace!.savedWorkspace().tabs.first?.panes.first?.herdr)
         // The first attach must finish before accepting interactive input.
         try await waitFor { !workspace!.debugDisplayTitle(forTabID: workspace!.debugSelectedTabID!)!.contains("Connecting") }
-        XCTAssertTrue(window.firstResponder === terminal)
-        let cliTerminal = try XCTUnwrap(terminal.delegate as? TerminalPaneController)
+        XCTAssertTrue(window.firstResponder === terminal.renderer)
+        let cliTerminal = try XCTUnwrap(terminal.owningPaneController)
         try cliTerminal.sendForCLI(.init(command: "pane.send-text", text: "printf 'PRODUCTION-%s-OK\\n' CORE"))
         try cliTerminal.sendForCLI(.init(command: "pane.send-key", key: "Enter"))
         try await waitFor { terminal.readScreenText()?.contains("PRODUCTION-CORE-OK") == true }
@@ -373,7 +372,7 @@ final class HerdrWorkspaceTests: XCTestCase {
         XCTAssertEqual(thirdFinished.state, "finished")
         let beforeRestart = try await client.terminal(binding)
         let oldConnection = try await client.connection()
-        let session = try XCTUnwrap((terminal.delegate as? TerminalPaneController)?.herdrSession)
+        let session = try XCTUnwrap((terminal.owningPaneController)?.herdrSession)
         let restartEnvironment = env
         let restartStatus = try await Task.detached {
             let process = Process()
@@ -407,13 +406,13 @@ final class HerdrWorkspaceTests: XCTestCase {
         XCTAssertTrue(workspace!.debugFocusedPaneIsInScrollMode)
         try await waitFor { terminal.readScreenText()?.contains("REAL-BURST-DONE") == true }
         XCTAssertTrue(workspace!.debugFocusedPaneIsInScrollMode)
-        let scroll = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? TerminalScrollModeView }.first)
+        let scroll = terminal.scrollModeController!
         scroll.move(.top)
         scroll.toggleSelection(linewise: true)
         scroll.move(.bottom)
         let pasteboard = NSPasteboard.withUniqueName()
         defer { pasteboard.releaseGlobally() }
-        scroll.copySelection(to: pasteboard)
+        scroll.copy(to: pasteboard)
         XCTAssertTrue(pasteboard.string(forType: .string)?.contains("real-row-0001 中文🙂") == true)
         XCTAssertTrue(pasteboard.string(forType: .string)?.contains("real-row-6000 中文🙂") == true)
 
@@ -426,9 +425,9 @@ final class HerdrWorkspaceTests: XCTestCase {
             return text.contains("REAL-BURST-DONE") && !text.contains("real-row-5000")
         }
         workspace!.enterScrollMode(nil)
-        let restoredScroll = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? TerminalScrollModeView }.first)
+        let restoredScroll = terminal.scrollModeController!
         restoredScroll.move(.top); restoredScroll.toggleSelection(linewise: true); restoredScroll.move(.bottom)
-        restoredScroll.copySelection(to: pasteboard)
+        restoredScroll.copy(to: pasteboard)
         XCTAssertFalse(pasteboard.string(forType: .string)?.contains("real-row-5000") == true, "Zero history should not replay old scrollback")
         XCTAssertTrue(pasteboard.string(forType: .string)?.contains("REAL-BURST-DONE") == true)
         client.settings.historyLines = HerdrSettings.defaultHistoryLines
@@ -437,7 +436,7 @@ final class HerdrWorkspaceTests: XCTestCase {
         let sidebarID = try XCTUnwrap(workspace!.debugSidebarPaneIDs.first)
         let sidebarPane = try XCTUnwrap(workspace!.debugSidebarPane(sidebarID) as? TerminalPaneController)
         let sidebarSession = try XCTUnwrap(sidebarPane.herdrSession)
-        let sidebarTerminal = try XCTUnwrap(descendants(sidebarPane.hostView).compactMap { $0 as? TerminalView }.first)
+        let sidebarTerminal = try XCTUnwrap(descendants(sidebarPane.hostView).compactMap { $0 as? NativeTerminalScrollView }.first)
         workspace!.view.layoutSubtreeIfNeeded(); sidebarTerminal.fitToSize()
         try await waitFor { sidebarSession.state == .live }
         let sidebarBinding = try XCTUnwrap(sidebarSession.binding)
@@ -474,6 +473,15 @@ final class HerdrWorkspaceTests: XCTestCase {
         let saved = workspace!.savedWorkspace()
         try saved.validate()
         XCTAssertEqual(saved.sidebar?.tab.panes.first?.herdr, sidebarBinding)
+        // Production window-close preparation must include the inactive Herdr
+        // workspace and hidden sidebar, preserve both bindings and kill neither.
+        let prepared = await workspace!.prepareForWindowClose()
+        XCTAssertTrue(prepared)
+        let windowDetachedMain = try await client.terminal(binding)
+        let windowDetachedSidebar = try await client.terminal(sidebarBinding)
+        XCTAssertEqual(windowDetachedMain.state,"live"); XCTAssertEqual(windowDetachedMain.pid,stillRunning.pid)
+        XCTAssertEqual(windowDetachedSidebar.state,"live"); XCTAssertEqual(windowDetachedSidebar.pid,sidebarBefore.pid)
+        XCTAssertEqual(workspace!.savedWorkspace(),saved)
         window.contentView = nil; workspace = nil
 
         workspace = WorkspaceViewController()
@@ -485,8 +493,8 @@ final class HerdrWorkspaceTests: XCTestCase {
         window.contentView = workspace!.view
         workspace!.viewDidAppear()
         workspace!.view.layoutSubtreeIfNeeded()
-        let restoredTerminal = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? TerminalView }
-            .first { ($0.delegate as? TerminalPaneController)?.id == paneID })
+        let restoredTerminal = try XCTUnwrap(descendants(workspace!.view).compactMap { $0 as? NativeTerminalScrollView }
+            .first { $0.owningPaneController?.id == paneID })
         restoredTerminal.fitToSize()
         try await waitFor { restoredTerminal.readScreenText()?.contains("REAL-BURST-DONE") == true }
         XCTAssertEqual(workspace!.savedWorkspace().tabs.first?.panes.first?.herdr, binding)
@@ -499,7 +507,7 @@ final class HerdrWorkspaceTests: XCTestCase {
         XCTAssertEqual(workspace!.debugTabIDs, mainTabs, "A sidebar agent must reuse its pane instead of opening a viewer tab")
         let restoredSidebarPane = try XCTUnwrap(workspace!.debugSidebarPane(sidebarID) as? TerminalPaneController)
         let restoredSidebarSession = try XCTUnwrap(restoredSidebarPane.herdrSession)
-        let restoredSidebarTerminal = try XCTUnwrap(descendants(restoredSidebarPane.hostView).compactMap { $0 as? TerminalView }.first)
+        let restoredSidebarTerminal = try XCTUnwrap(descendants(restoredSidebarPane.hostView).compactMap { $0 as? NativeTerminalScrollView }.first)
         workspace!.view.layoutSubtreeIfNeeded(); restoredSidebarTerminal.fitToSize()
         try await waitFor { restoredSidebarSession.state == .live && restoredSidebarTerminal.readScreenText()?.contains("SIDEBAR-CORE-OK") == true }
         let sidebarAfter = try await client.terminal(sidebarBinding)

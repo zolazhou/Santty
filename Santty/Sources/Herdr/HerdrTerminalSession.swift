@@ -283,10 +283,30 @@ final class HerdrTerminalSession {
         if let channel { connection?.detach(channel: channel) }
         channel = nil; connection = nil; sentSize = nil; sentFacts = nil
     }
-    func closeTerminal() async throws {
+    /// Synchronous close admission fence; no new viewer attach/input while a
+    /// multi-pane close waits for its peers. Does not kill a program.
+    func beginViewerClose() {
         stopped = true
         disconnectViewer()
         client.removeObserver(observerID)
+        // Keep the machine observer until cleanup succeeds. A failed remote
+        // close must still observe recovery and reconnect the original binding.
+    }
+
+    /// Final viewer detach for window/app closure, not transient view hiding.
+    /// Await a pending run so its binding/ambiguity can still be saved, but
+    /// never kill the program or reconnect this viewer afterwards.
+    func detachViewer() async {
+        surfaceReady = false
+        beginViewerClose()
+        client.removeMachineObserver(observerID)
+        if let task { await task.value }
+        if state != .finished { state = .disconnected }
+        onChange?()
+    }
+
+    func closeTerminal() async throws {
+        beginViewerClose()
         if let task { await task.value }
         if viewerOnly {
             client.removeMachineObserver(observerID)

@@ -1,10 +1,10 @@
 import AppKit
 import Darwin
-import GhosttyTerminal
 import KeyboardShortcuts
 import XCTest
 @testable import Santty
 
+@MainActor
 final class SanttyTests: XCTestCase {
 
     @MainActor
@@ -197,37 +197,37 @@ final class SanttyTests: XCTestCase {
         XCTAssertEqual(TerminalDefaults.defaultThemeName, "Catppuccin Mocha")
     }
 
-    func testTerminalDebugLoggingIsDisabledWithoutEnvironmentOverride() {
+    func testNativeTerminalDebugLoggingIsDisabledWithoutEnvironmentOverride() {
         withRestoredTerminalDebugLogState {
-            TerminalDebugLog.enable(.all)
+            NativeTerminalDebugLog.enable(.all)
 
             TerminalLoggingConfiguration.apply(environment: [:])
 
-            XCTAssertFalse(TerminalDebugLog.isEnabled)
+            XCTAssertFalse(NativeTerminalDebugLog.isEnabled)
         }
     }
 
-    func testTerminalDebugLoggingCanBeEnabledWithStandardEnvironmentOverride() {
+    func testNativeTerminalDebugLoggingCanBeEnabledWithStandardEnvironmentOverride() {
         withRestoredTerminalDebugLogState {
-            TerminalDebugLog.disable()
+            NativeTerminalDebugLog.disable()
 
             TerminalLoggingConfiguration.apply(environment: ["SANTTY_TERMINAL_DEBUG_LOG": "standard"])
 
-            XCTAssertTrue(TerminalDebugLog.isEnabled)
-            XCTAssertEqual(TerminalDebugLog.categories, .standard)
+            XCTAssertTrue(NativeTerminalDebugLog.isEnabled)
+            XCTAssertEqual(NativeTerminalDebugLog.categories, .standard)
         }
     }
 
-    func testTerminalDebugLoggingCanEnableSelectedCategories() {
+    func testNativeTerminalDebugLoggingCanEnableSelectedCategories() {
         withRestoredTerminalDebugLogState {
-            TerminalDebugLog.disable()
+            NativeTerminalDebugLog.disable()
 
             TerminalLoggingConfiguration.apply(
                 environment: ["SANTTY_TERMINAL_DEBUG_LOG": "input,render"]
             )
 
-            XCTAssertTrue(TerminalDebugLog.isEnabled)
-            XCTAssertEqual(TerminalDebugLog.categories, [.input, .render])
+            XCTAssertTrue(NativeTerminalDebugLog.isEnabled)
+            XCTAssertEqual(NativeTerminalDebugLog.categories, [.input, .render])
         }
     }
 
@@ -238,81 +238,55 @@ final class SanttyTests: XCTestCase {
     @MainActor
     func testDefaultTerminalThemeRendersCatppuccinMochaColors() {
         TerminalSettings.resetThemeName()
-        let renderedTheme = TerminalDefaults.theme.light.rendered
-
-        XCTAssertTrue(renderedTheme.contains("background = 1e1e2e"))
-        XCTAssertTrue(renderedTheme.contains("foreground = cdd6f4"))
-        TerminalSettings.resetThemeName()
+        let theme = try! TerminalDefaults.settings().theme
+        XCTAssertEqual(theme.background,.init(red:0x1e,green:0x1e,blue:0x2e))
+        XCTAssertEqual(theme.foreground,.init(red:0xcd,green:0xd6,blue:0xf4))
     }
 
     @MainActor
     func testTerminalThemeUsesThemeNameSetting() {
-        TerminalSettings.resetThemeName()
-
-        TerminalSettings.themeName = "3024 Day"
-        let renderedTheme = TerminalDefaults.theme.light.rendered
-
-        XCTAssertTrue(renderedTheme.contains("background = f7f7f7"))
-        XCTAssertTrue(renderedTheme.contains("foreground = 4a4543"))
-        TerminalSettings.resetThemeName()
+        TerminalSettings.themeName = "3024 Day"; defer { TerminalSettings.resetThemeName() }
+        let theme = try! TerminalDefaults.settings().theme
+        XCTAssertEqual(theme.background,.init(red:0xf7,green:0xf7,blue:0xf7))
+        XCTAssertEqual(theme.foreground,.init(red:0x4a,green:0x45,blue:0x43))
     }
 
     @MainActor
     func testTerminalThemeFallsBackToDefaultWhenThemeNameIsUnknown() {
-        TerminalSettings.resetThemeName()
-
-        TerminalSettings.themeName = "Missing Theme"
-        let renderedTheme = TerminalDefaults.theme.light.rendered
-
-        XCTAssertTrue(renderedTheme.contains("background = 1e1e2e"))
-        XCTAssertTrue(renderedTheme.contains("foreground = cdd6f4"))
-        TerminalSettings.resetThemeName()
+        TerminalSettings.themeName = "Missing Theme"; defer { TerminalSettings.resetThemeName() }
+        let theme = try! TerminalDefaults.settings().theme
+        XCTAssertEqual(theme.background,.init(red:0x1e,green:0x1e,blue:0x2e))
+        XCTAssertEqual(theme.foreground,.init(red:0xcd,green:0xd6,blue:0xf4))
     }
 
     @MainActor
     func testDefaultTerminalConfigurationMakesBackgroundTransparent() {
-        XCTAssertTrue(TerminalDefaults.configuration.rendered.contains("background-opacity = 0"))
+        XCTAssertEqual(try! TerminalDefaults.settings().backgroundOpacity,0)
     }
 
     @MainActor
     func testDefaultTerminalConfigurationUsesTerminalFontSettings() {
-        TerminalSettings.resetFontFamily()
-        TerminalSettings.resetFontSize()
-
-        TerminalSettings.fontFamily = "Monaco"
-        TerminalSettings.fontSize = 16
-        let renderedConfiguration = TerminalDefaults.configuration.rendered
-
-        XCTAssertTrue(renderedConfiguration.contains("font-family = Monaco"))
-        XCTAssertTrue(renderedConfiguration.contains("font-size = 16"))
-        TerminalSettings.resetFontFamily()
-        TerminalSettings.resetFontSize()
+        TerminalSettings.fontFamily = "Monaco"; TerminalSettings.fontSize = 16
+        defer { TerminalSettings.resetFontFamily(); TerminalSettings.resetFontSize() }
+        let settings = try! TerminalDefaults.settings()
+        XCTAssertEqual(settings.fontFamily,"Monaco"); XCTAssertEqual(settings.fontSize,16)
     }
 
     @MainActor
     func testTerminalPaneConfigurationKeepsCLIEnvironmentWithoutAgentHooks() {
-        let paneID = UUID()
-        let paneController = TerminalPaneController(id: paneID)
-        let renderedConfiguration = paneController.debugRenderedTerminalConfig
-
-        XCTAssertTrue(renderedConfiguration.contains("env = SANTTY_PANE_ID=\(paneID.uuidString)"))
-        XCTAssertTrue(renderedConfiguration.contains("env = SANTTY_CONTROL_SOCKET="))
-        XCTAssertFalse(renderedConfiguration.contains("SANTTY_RUNTIME_OWNER="))
-        XCTAssertFalse(renderedConfiguration.contains("SANTTY_AGENT_SOCKET="))
+        let paneID = UUID(), pane = TerminalPaneController(id:paneID)
+        let env = pane.session?.localLaunch?.environment
+        XCTAssertEqual(env?["SANTTY_PANE_ID"],paneID.uuidString)
+        XCTAssertEqual(env?["SANTTY_CONTROL_SOCKET"],CLITransport.socketPath)
+        XCTAssertNil(env?["SANTTY_RUNTIME_OWNER"]); XCTAssertNil(env?["SANTTY_AGENT_SOCKET"])
     }
 
     @MainActor
     func testTerminalPaneConfigurationUsesProvidedWorkingDirectory() {
-        let paneController = TerminalPaneController(
-            workingDirectory: "/tmp/project"
-        )
-        let renderedConfiguration = paneController.debugRenderedTerminalConfig
-
-        XCTAssertTrue(renderedConfiguration.contains("working-directory = /tmp/project"))
-        XCTAssertTrue(renderedConfiguration.contains("env = SANTTY_PANE_ID="))
-        XCTAssertTrue(renderedConfiguration.contains("env = SANTTY_CONTROL_SOCKET="))
-        XCTAssertFalse(renderedConfiguration.contains("SANTTY_RUNTIME_OWNER="))
-        XCTAssertFalse(renderedConfiguration.contains("SANTTY_AGENT_SOCKET="))
+        let pane = TerminalPaneController(workingDirectory:"/tmp/project")
+        XCTAssertEqual(pane.session?.localLaunch?.workingDirectory,"/tmp/project")
+        XCTAssertEqual(pane.session?.localLaunch?.environment["SANTTY_PANE_ID"],pane.id.uuidString)
+        XCTAssertEqual(pane.session?.localLaunch?.environment["SANTTY_CONTROL_SOCKET"],CLITransport.socketPath)
     }
 
     func testAppearanceDefaultsUseTransparentTerminalBackground() {
@@ -1152,14 +1126,15 @@ private func assertColorEqual(
     XCTAssertEqual(left?.alphaComponent ?? 0, right?.alphaComponent ?? 0, accuracy: accuracy, file: file, line: line)
 }
 
+@MainActor
 private func withRestoredTerminalDebugLogState(_ body: () -> Void) {
-    let originalEnabled = TerminalDebugLog.isEnabled
-    let originalCategories = TerminalDebugLog.categories
-    let originalSink = TerminalDebugLog.sink
+    let originalEnabled = NativeTerminalDebugLog.isEnabled
+    let originalCategories = NativeTerminalDebugLog.categories
+    let originalSink = NativeTerminalDebugLog.sink
     defer {
-        TerminalDebugLog.isEnabled = originalEnabled
-        TerminalDebugLog.categories = originalCategories
-        TerminalDebugLog.sink = originalSink
+        NativeTerminalDebugLog.isEnabled = originalEnabled
+        NativeTerminalDebugLog.categories = originalCategories
+        NativeTerminalDebugLog.sink = originalSink
     }
 
     body()

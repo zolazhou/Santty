@@ -1,5 +1,4 @@
 import AppKit
-import GhosttyTerminal
 import XCTest
 @testable import Santty
 
