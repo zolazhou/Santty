@@ -175,18 +175,29 @@ final class NativePaddingFillTests: XCTestCase {
         assertColor(try pixel(fill, point), blue)
     }
 
-    func testProductionHostHasOnlyConfiguredPadding() throws {
+    func testProductionHostInsetsOnlyClipViewAndKeepsScrollerAtPaneEdge() throws {
         let terminal = NativeTerminalScrollView(driver: try GhosttyVTDriver())
         let host = TerminalPaneHostView(paneID: UUID(), terminalView: terminal)
         let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 640, height: 320),
                               styleMask: [], backing: .buffered, defer: false)
         window.contentView = host
         defer { window.contentView = nil }
-        host.layoutSubtreeIfNeeded()
-        let rect = host.convert(terminal.bounds, from: terminal)
-        XCTAssertEqual(rect.minX, host.debugTerminalPadding, accuracy: 0.01)
-        XCTAssertEqual(rect.minY, host.debugTerminalPadding, accuracy: 0.01)
-        XCTAssertEqual(rect.width, host.bounds.width - 2 * host.debugTerminalPadding, accuracy: 0.01)
+        let theme = try NativeThemeCatalog.bundled().defaultTheme
+        terminal.autohidesScrollers = false
+        for padding: CGFloat in [0, 8, 24, 0] {
+            try terminal.applySettings(.init(theme: theme, padding: padding))
+            host.layoutSubtreeIfNeeded()
+            terminal.tile()
+            terminal.refresh(resizeTerminal: true)
+            XCTAssertEqual(host.convert(terminal.bounds, from: terminal), host.bounds)
+            let clip = host.convert(terminal.contentView.bounds, from: terminal.contentView)
+            XCTAssertEqual(clip, host.bounds.insetBy(dx: padding, dy: padding))
+            let scroller = try XCTUnwrap(terminal.verticalScroller)
+            let rect = host.convert(scroller.bounds, from: scroller)
+            XCTAssertEqual(rect.maxX, host.bounds.maxX, accuracy: 0.01)
+            XCTAssertEqual(rect.minY, host.bounds.minY, accuracy: 0.01)
+            XCTAssertEqual(rect.height, host.bounds.height, accuracy: 0.01)
+        }
         XCTAssertTrue(terminal.outerPaddingFill === host.paddingFillView)
         XCTAssertTrue(terminal.remainderFillView.superview === terminal.renderer.superview)
         XCTAssertTrue(terminal.renderer.superview?.subviews.last === terminal.remainderFillView,

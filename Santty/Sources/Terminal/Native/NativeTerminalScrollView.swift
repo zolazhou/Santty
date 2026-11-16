@@ -62,6 +62,7 @@ final class NativeTerminalScrollView: NSScrollView {
         hostActions = NativeTerminalHostActions(view:self)
         renderer.hostActions = hostActions
         drawsBackground = false
+        automaticallyAdjustsContentInsets = false
         borderType = .noBorder
         hasVerticalScroller = true
         hasHorizontalScroller = false
@@ -202,6 +203,20 @@ final class NativeTerminalScrollView: NSScrollView {
     }
     func autoscrollSelectionStep() { interaction.autoscrollStep() }
 
+    override func tile() {
+        // Let AppKit place the scrollers at the pane edges, then inset only
+        // the clip view. Document coordinates still start at zero, preserving
+        // fractional scrolling, hit testing and bounded renderer geometry.
+        let wasUpdating = isUpdating
+        isUpdating = true
+        defer { isUpdating = wasUpdating }
+        super.tile()
+        let padding = settings?.padding ?? 0
+        let frame = contentView.frame
+        contentView.frame = frame.insetBy(dx: min(padding, frame.width / 2),
+                                         dy: min(padding, frame.height / 2))
+    }
+
     override func layout() {
         super.layout()
         // Scrolling may cause AppKit layout without a viewport-size change.
@@ -230,6 +245,7 @@ final class NativeTerminalScrollView: NSScrollView {
         isUpdating = true
         if fontChanged { renderer.font = font }
         relayout()
+        if paddingChanged { tile() }
         isUpdating = false
         refresh(resizeTerminal: fontChanged || paddingChanged)
         invalidatePaddingFill()

@@ -92,7 +92,6 @@ final class TerminalPaneHostView: NSView {
     private var isFocused = false
     private var isFloating = false
     private var terminalPadding = TerminalSettings.padding
-    private var edges: [NSLayoutConstraint] = []
     override var acceptsFirstResponder: Bool { true }
     override var mouseDownCanMoveWindow: Bool { false }
 
@@ -106,7 +105,7 @@ final class TerminalPaneHostView: NSView {
         NSLayoutConstraint.activate([vibrancyView.leadingAnchor.constraint(equalTo:leadingAnchor),
             vibrancyView.trailingAnchor.constraint(equalTo:trailingAnchor),vibrancyView.topAnchor.constraint(equalTo:topAnchor),
             vibrancyView.bottomAnchor.constraint(equalTo:bottomAnchor)])
-        edges = [content.leadingAnchor.constraint(equalTo:leadingAnchor),content.trailingAnchor.constraint(equalTo:trailingAnchor),
+        let edges = [content.leadingAnchor.constraint(equalTo:leadingAnchor),content.trailingAnchor.constraint(equalTo:trailingAnchor),
                  content.topAnchor.constraint(equalTo:topAnchor),content.bottomAnchor.constraint(equalTo:bottomAnchor)]
         NSLayoutConstraint.activate(edges)
         if let terminalView {
@@ -152,8 +151,6 @@ final class TerminalPaneHostView: NSView {
     @objc private func retryConnection() { retryAction?() }
     func updateAppearance() {
         terminalPadding = TerminalSettings.padding
-        let inset = terminalPadding
-        if edges.count == 4 { edges[0].constant = inset; edges[1].constant = -inset; edges[2].constant = inset; edges[3].constant = -inset }
         nameBadge.isFocused = isFocused
         vibrancyView.isHidden = !(AppAppearanceSettings.isWindowHidden || isFloating)
         vibrancyView.blendingMode = isFloating ? AppAppearanceDefaults.floatingPaneVibrancyBlendingMode : AppAppearanceDefaults.vibrancyBlendingMode

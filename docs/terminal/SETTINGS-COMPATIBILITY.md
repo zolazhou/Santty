@@ -66,12 +66,14 @@ does not reset history, modes, process, selection or metadata. A geometry change
 can legitimately cancel a selection / end a render hold via the existing VT resize
 contract; reading anchors preserve content and fractional position.
 
-**Current padding behavior:** `NativeTerminalAppearanceHost` and the production
-`TerminalPaneHostView` apply only the configured padding (in AppKit points), outside
-the NSScrollView. The former fixed 2-point inner inset has been removed: zero means
-zero layout inset, though incomplete cell columns/rows can still leave grid remainder.
-Native history/elasticity coordinates are unchanged. Font/padding layout is batched
-to avoid an intermediate wire resize.
+**Current padding behavior:** The NSScrollView fills `NativeTerminalAppearanceHost`
+and the production `TerminalPaneHostView`. `NativeTerminalScrollView.tile()` lets
+AppKit place the scrollers at the pane edges, then insets only the clip view by
+the configured padding (in AppKit points). Padding does not inset the scrollers.
+Zero means zero layout inset, though incomplete cell columns/rows can still leave
+grid remainder. Document coordinates, native history/elasticity and bounded renderer
+geometry are unchanged. Font/padding layout is batched to avoid an intermediate wire
+resize.
 Colors, selected-cell attributes, cursor text and default-background opacity
 commit alongside a presented frame. Color-only changes respect render hold;
 hidden connected views retain old pixels while default color/display facts update.

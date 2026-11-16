@@ -65,6 +65,41 @@ final class NativeTerminalScrollViewTests: XCTestCase {
         XCTAssertLessThan(view.renderer.frame.height, 500)
     }
 
+    func testInternalPaddingKeepsFractionalHistoryCoordinatesAndBoundedRenderer() throws {
+        let (window, view) = try makeView()
+        defer { window.contentView = nil }
+        let theme = try NativeThemeCatalog.bundled().defaultTheme
+        try view.applySettings(.init(theme: theme, padding: 24))
+        let h = view.renderer.cellSize.height
+        let offset = 5 * h + 5
+        view.contentView.scroll(to: NSPoint(x: 0, y: offset))
+        let converted = view.source.convertedRows
+        for _ in 0..<3 {
+            view.tile()
+            view.layoutSubtreeIfNeeded()
+        }
+        XCTAssertEqual(view.contentView.frame, view.bounds.insetBy(dx: 24, dy: 24))
+        XCTAssertEqual(view.contentView.bounds.minY, offset, accuracy: 0.01)
+        XCTAssertEqual(view.renderer.frame.minY, 5 * h, accuracy: 0.01)
+        XCTAssertEqual(view.source.convertedRows, converted, "tiling must not reinterpret clip resizing as scrolling")
+        XCTAssertEqual(view.cell(atViewportPoint: NSPoint(x: 1, y: h - 5))?.row, 6)
+        let document = try XCTUnwrap(view.documentView)
+        let clip = view.convert(view.contentView.bounds, from: view.contentView)
+        let y = view.isFlipped ? clip.minY + h - 5 : clip.maxY - (h - 5)
+        let point = document.convert(NSPoint(x: clip.minX + 1, y: y), from: view)
+        XCTAssertEqual(point.x, 1, accuracy: 0.01)
+        XCTAssertEqual(point.y, offset + h - 5, accuracy: 0.01)
+        XCTAssertEqual(view.driver.columns, Int(view.contentSize.width / view.renderer.cellSize.width))
+        XCTAssertEqual(view.driver.rows, Int(view.contentSize.height / h))
+        XCTAssertEqual(view.viewport.widthPixels, UInt32(view.contentSize.width * (window.backingScaleFactor)))
+        XCTAssertLessThanOrEqual(view.renderer.frame.height, view.contentSize.height + 3 * h)
+        XCTAssertFalse(view.isAtLiveBottom)
+        view.scrollToLiveScreen()
+        XCTAssertTrue(view.isAtLiveBottom)
+        XCTAssertEqual(view.contentView.bounds.minY,
+                       try XCTUnwrap(view.documentView).frame.height - view.contentSize.height, accuracy: 0.01)
+    }
+
     func testAdapterRetainsRowsAndMapsAttributesWithoutASecondParser() throws {
         let driver = try GhosttyVTDriver(columns: 20, rows: 4)
         driver.feed("\u{1b}[1;4;31mA\u{1b}[0m中e\u{301}")

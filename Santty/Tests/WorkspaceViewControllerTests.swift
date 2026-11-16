@@ -823,7 +823,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
         }
     }
 
-    func testTerminalPaddingSettingControlsTerminalFrame() async throws {
+    func testTerminalPaddingSettingDoesNotInsetScrollViewFrame() async throws {
         try await MainActor.run {
             TerminalSettings.resetPadding()
             let controller = Self.makeController()
@@ -836,10 +836,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
             let terminalFrame = try XCTUnwrap(controller.debugTerminalFrame(for: focusedPaneID))
 
             XCTAssertEqual(controller.debugTerminalPadding(for: focusedPaneID), 18)
-            XCTAssertEqual(terminalFrame.minX, 18, accuracy: 0.0001)
-            XCTAssertEqual(terminalFrame.minY, 18, accuracy: 0.0001)
-            XCTAssertEqual(terminalFrame.width, paneBounds.width - 36, accuracy: 0.0001)
-            XCTAssertEqual(terminalFrame.height, paneBounds.height - 36, accuracy: 0.0001)
+            XCTAssertEqual(terminalFrame, paneBounds)
             TerminalSettings.resetPadding()
         }
     }

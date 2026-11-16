@@ -111,7 +111,8 @@ final class NativeTerminalSettingsTests: XCTestCase {
         var resizes = 0
         terminal.onViewportChange = { _ in resizes += 1 }
         try host.apply(settings(size: 16, padding: 12, opacity: 0.25))
-        XCTAssertEqual(terminal.frame, NSRect(x: 12, y: 12, width: 616, height: 296))
+        XCTAssertEqual(terminal.frame, host.bounds)
+        XCTAssertEqual(terminal.contentView.frame, NSRect(x: 12, y: 12, width: 616, height: 296))
         XCTAssertEqual(terminal.renderer.font.pointSize, 16)
         XCTAssertEqual(terminal.renderer.font.familyName, "Menlo")
         XCTAssertEqual(driver.columns, Int(terminal.contentSize.width / terminal.renderer.cellSize.width))
@@ -133,6 +134,7 @@ final class NativeTerminalSettingsTests: XCTestCase {
         try host.apply(settings(padding: 0))
         host.layoutSubtreeIfNeeded()
         XCTAssertEqual(terminal.frame, host.bounds)
+        XCTAssertEqual(terminal.contentView.frame, terminal.bounds)
     }
 
     func testColorOnlyThemeChangeRespectsPresentationHold() throws {
