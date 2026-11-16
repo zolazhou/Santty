@@ -66,9 +66,12 @@ does not reset history, modes, process, selection or metadata. A geometry change
 can legitimately cancel a selection / end a render hold via the existing VT resize
 contract; reading anchors preserve content and fractional position.
 
-`NativeTerminalAppearanceHost` adds outer padding plus the existing **2-point
-inner padding outside the NSScrollView**. Native history/elasticity coordinates
-are unchanged. Font/padding layout is batched to avoid an intermediate wire resize.
+**Current padding behavior:** `NativeTerminalAppearanceHost` and the production
+`TerminalPaneHostView` apply only the configured padding (in AppKit points), outside
+the NSScrollView. The former fixed 2-point inner inset has been removed: zero means
+zero layout inset, though incomplete cell columns/rows can still leave grid remainder.
+Native history/elasticity coordinates are unchanged. Font/padding layout is batched
+to avoid an intermediate wire resize.
 Colors, selected-cell attributes, cursor text and default-background opacity
 commit alongside a presented frame. Color-only changes respect render hold;
 hidden connected views retain old pixels while default color/display facts update.
@@ -88,6 +91,34 @@ the actual AppKit content bitmap over the actual layer background through Core
 Animation, keeping the original alpha assertion. No renderer workaround, color
 rewrite or weaker expected alpha was added. This is owned offscreen composition,
 not WindowServer/display-profile/manual certification.
+
+## Padding Fill (current production behavior)
+
+`terminal.paddingFill` is `off`, `automatic` (default, also for unknown values), or
+`always`. Automatic uses the published VT alternate-screen flag, not process names,
+PIDs or screen-text inference. The Terminal settings picker applies immediately;
+font zoom preserves the choice. Reading defaults does not write them.
+
+`NativeTerminalPaddingFillView` extends each visible row's first/last background
+horizontally into left/right padding and right-side incomplete-column remainder.
+Top/bottom padding, corners above/below the grid, and incomplete-row remainder keep
+their original background: status-line color blocks never grow taller.
+It resolves palette/RGB/default
+colors and inverse attributes from the **owned published frame**; selection, caret,
+text glyphs and image pixels are not sampled. Default-background alpha is preserved,
+explicit SGR backgrounds remain opaque, and viewport default pixels are not painted
+a second time. Elastic overscroll suppresses extension instead of inventing cells.
+
+The outer decoration sits behind the scroll view. A second viewport-bounded
+instance sits above the renderer in the virtual document, below AppKit's scroller,
+for right-side grid remainder only. Both ignore hit testing and accessibility; inactive fill
+views are hidden so ordinary primary-screen output does not repaint empty surfaces.
+They add no VT capture, input, resize, focus, parser callback, timer or animation wake; synchronized
+output uses the old published edges until the hold releases, and reset clears them.
+`NativePaddingFillTests` exercises actual sRGB painter pixels (including both renderer
+choices), alpha, palette/inverse/selection, holds/reset/screen transitions, fractional
+history scrolling, production layout and injected preference persistence/notifications.
+This is offscreen coverage, not a WindowServer/manual visual certification.
 
 ## Owned title/cwd metadata, independent of presentation
 

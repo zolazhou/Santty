@@ -134,7 +134,7 @@ final class NativeTerminalHostActions {
             let old = try view.settings ?? NativeTerminalSettings(theme:NativeThemeCatalog.bundled().defaultTheme,
                 fontFamily:view.renderer.font.familyName ?? "Menlo",fontSize:view.renderer.font.pointSize,backgroundOpacity:1)
             let size = delta.map { old.fontSize+$0 } ?? zoomResetSize
-            try view.applySettings(.init(theme:old.theme,fontFamily:old.fontFamily,fontSize:size,padding:old.padding,
+            try view.applySettings(.init(theme:old.theme,fontFamily:old.fontFamily,fontSize:size,padding:old.padding,paddingFill:old.paddingFill,
                 backgroundOpacity:old.backgroundOpacity,cursorShape:old.cursorShape,cursorBlink:old.cursorBlink))
         } catch { lastError = String(describing:error) }
     }

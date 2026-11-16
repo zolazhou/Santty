@@ -83,6 +83,7 @@ final class TerminalPaneHostView: NSView {
     var onFocusRequest: ((PaneID) -> Void)?
     var onGeometryChange: (() -> Void)?
     private let content: NSView
+    let paddingFillView = NativeTerminalPaddingFillView()
     private let vibrancyView = AppAppearanceDefaults.makeVibrancyView(tintViewAlpha:AppAppearanceDefaults.vibrancyTintAlpha)
     private let statusBackgroundView = NSView()
     private let statusLabel = NSTextField(labelWithString:"")
@@ -101,6 +102,7 @@ final class TerminalPaneHostView: NSView {
         wantsLayer = true; layer?.masksToBounds = true
         layer?.actions = ["position":NSNull(),"bounds":NSNull(),"frame":NSNull()]
         for view in [vibrancyView,content] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
+        addSubview(paddingFillView, positioned: .above, relativeTo: vibrancyView)
         NSLayoutConstraint.activate([vibrancyView.leadingAnchor.constraint(equalTo:leadingAnchor),
             vibrancyView.trailingAnchor.constraint(equalTo:trailingAnchor),vibrancyView.topAnchor.constraint(equalTo:topAnchor),
             vibrancyView.bottomAnchor.constraint(equalTo:bottomAnchor)])
@@ -109,11 +111,11 @@ final class TerminalPaneHostView: NSView {
         NSLayoutConstraint.activate(edges)
         if let terminalView {
             terminalView.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(terminalView)
-            let inset = TerminalDefaults.innerPadding
-            NSLayoutConstraint.activate([terminalView.leadingAnchor.constraint(equalTo:content.leadingAnchor,constant:inset),
-                terminalView.trailingAnchor.constraint(equalTo:content.trailingAnchor,constant:-inset),
-                terminalView.topAnchor.constraint(equalTo:content.topAnchor,constant:inset),
-                terminalView.bottomAnchor.constraint(equalTo:content.bottomAnchor,constant:-inset)])
+            paddingFillView.bind(to: terminalView)
+            NSLayoutConstraint.activate([terminalView.leadingAnchor.constraint(equalTo:content.leadingAnchor),
+                terminalView.trailingAnchor.constraint(equalTo:content.trailingAnchor),
+                terminalView.topAnchor.constraint(equalTo:content.topAnchor),
+                terminalView.bottomAnchor.constraint(equalTo:content.bottomAnchor)])
         }
         statusBackgroundView.wantsLayer = true; statusBackgroundView.layer?.cornerRadius = 6
         statusLabel.font = .systemFont(ofSize:11,weight:.semibold); statusLabel.textColor = .white
@@ -125,6 +127,8 @@ final class TerminalPaneHostView: NSView {
     required init?(coder: NSCoder) { nil }
     override func layout() {
         super.layout(); nameBadge.layout(in:self)
+        paddingFillView.frame = bounds
+        paddingFillView.invalidate()
         onGeometryChange?()
         let height: CGFloat = retryButton.isHidden ? 28 : 60
         statusBackgroundView.frame = .init(x:8,y:max(8,bounds.height-height-32),width:max(0,min(bounds.width-16,300)),height:height)

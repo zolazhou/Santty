@@ -76,19 +76,20 @@ struct NativeTerminalSettings: Equatable, Sendable {
     let fontFamily: String
     let fontSize: CGFloat
     let padding: CGFloat
+    let paddingFill: TerminalPaddingFill
     let backgroundOpacity: CGFloat
     let cursorShape: NativeTerminalFrame.CursorShape
     let cursorBlink: Bool
-    static let innerPadding: CGFloat = 2
 
     init(theme: NativeTerminalTheme, fontFamily: String = "Menlo", fontSize: CGFloat = 13,
-         padding: CGFloat = 8, backgroundOpacity: CGFloat = 0,
+         padding: CGFloat = 8, paddingFill: TerminalPaddingFill = .automatic, backgroundOpacity: CGFloat = 0,
          cursorShape: NativeTerminalFrame.CursorShape = .block, cursorBlink: Bool = true) {
         self.theme = theme
         let name = fontFamily.trimmingCharacters(in: .whitespacesAndNewlines)
         self.fontFamily = name.isEmpty || name.utf8.count > 256 || name.utf8.contains(0) ? "Menlo" : name
         self.fontSize = fontSize.isFinite ? min(32, max(8, fontSize)) : 13
         self.padding = padding.isFinite ? min(24, max(0, padding)) : 8
+        self.paddingFill = paddingFill
         self.backgroundOpacity = backgroundOpacity.isFinite ? min(1, max(0, backgroundOpacity)) : 0
         self.cursorShape = cursorShape; self.cursorBlink = cursorBlink
     }
@@ -100,7 +101,7 @@ struct NativeTerminalSettings: Equatable, Sendable {
             fontFamily: defaults.string(forKey: "terminal.fontFamily") ?? "Menlo",
             fontSize: defaults.object(forKey: "terminal.fontSize") == nil ? 13 : CGFloat(defaults.double(forKey: "terminal.fontSize")),
             padding: defaults.object(forKey: "terminal.padding") == nil ? 8 : CGFloat(defaults.double(forKey: "terminal.padding")),
-            backgroundOpacity: backgroundOpacity)
+            paddingFill: TerminalSettings.readPaddingFill(from: defaults), backgroundOpacity: backgroundOpacity)
     }
 
     @MainActor var font: NSFont { NSFont(name: fontFamily, size: fontSize) ?? NSFont(name: "Menlo", size: fontSize) ?? .monospacedSystemFont(ofSize: fontSize, weight: .regular) }

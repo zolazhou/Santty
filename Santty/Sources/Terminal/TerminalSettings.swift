@@ -8,6 +8,7 @@ enum TerminalSettings {
     private static let fontFamilyKey = "terminal.fontFamily"
     private static let fontSizeKey = "terminal.fontSize"
     private static let paddingKey = "terminal.padding"
+    private static let paddingFillKey = "terminal.paddingFill"
     private static let renderingEngineKey = "terminal.renderingEngine"
     private static let userDefaults = UserDefaults.standard
 
@@ -102,6 +103,25 @@ enum TerminalSettings {
             userDefaults.set(Double(clampedPadding(newValue)), forKey: paddingKey)
             NotificationCenter.default.post(name: didChangeNotification, object: nil)
         }
+    }
+
+    static var paddingFill: TerminalPaddingFill {
+        get { readPaddingFill(from: userDefaults) }
+        set { setPaddingFill(newValue, defaults: userDefaults) }
+    }
+
+    static func readPaddingFill(from defaults: UserDefaults) -> TerminalPaddingFill {
+        defaults.string(forKey: paddingFillKey).flatMap(TerminalPaddingFill.init(rawValue:)) ?? .automatic
+    }
+
+    static func setPaddingFill(_ value: TerminalPaddingFill, defaults: UserDefaults) {
+        defaults.set(value.rawValue, forKey: paddingFillKey)
+        NotificationCenter.default.post(name: didChangeNotification, object: nil)
+    }
+
+    static func resetPaddingFill(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: paddingFillKey)
+        NotificationCenter.default.post(name: didChangeNotification, object: nil)
     }
 
     static func resetFontFamily() {

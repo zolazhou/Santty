@@ -9,6 +9,7 @@ struct TerminalSettingsPane: View {
     @Binding var terminalFontSize: Double
     @Binding var terminalPadding: Double
     @State private var fontPanelTarget = FontPanelTarget()
+    @State private var terminalPaddingFill = TerminalSettings.paddingFill
 
     var body: some View {
         Form {
@@ -109,13 +110,35 @@ struct TerminalSettingsPane: View {
                             step: 1
                         )
 
-                        Text("\(Int(terminalPadding)) px")
+                        Text("\(Int(terminalPadding)) pt")
                             .monospacedDigit()
                             .frame(width: 48, alignment: .trailing)
 
                         Button("Reset") {
                             TerminalSettings.resetPadding()
                             terminalPadding = Double(TerminalSettings.padding)
+                        }
+                    }
+                }
+
+                LabeledContent("Padding Fill") {
+                    HStack {
+                        Picker("Padding Fill", selection: Binding(
+                            get: { terminalPaddingFill },
+                            set: { value in
+                                terminalPaddingFill = value
+                                TerminalSettings.paddingFill = value
+                            }
+                        )) {
+                            ForEach(TerminalPaddingFill.allCases) { value in
+                                Text(value.title).tag(value)
+                            }
+                        }
+                        .labelsHidden()
+                        .help("Extends background colors horizontally into left/right padding and unused column space, without extending into top/bottom padding or unused row space. Automatic applies on the alternate screen used by full-screen applications. Text position and terminal size do not change.")
+                        Button("Reset") {
+                            TerminalSettings.resetPaddingFill()
+                            terminalPaddingFill = TerminalSettings.paddingFill
                         }
                     }
                 }

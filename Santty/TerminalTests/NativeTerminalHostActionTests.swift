@@ -192,10 +192,11 @@ final class NativeTerminalHostActionTests: XCTestCase {
     }
     func testMenuZoomPreservesSettingsResponderAndTransport() throws {
         let f = try NativeHostFixture(), theme = try NativeThemeCatalog.bundled().defaultTheme
-        try f.view.applySettings(.init(theme:theme,fontSize:14,padding:7,backgroundOpacity:0.25,cursorShape:.bar,cursorBlink:false))
+        try f.view.applySettings(.init(theme:theme,fontSize:14,padding:7,paddingFill:.off,backgroundOpacity:0.25,cursorShape:.bar,cursorBlink:false))
         f.actions.zoomResetSize = 14
         f.view.renderer.increaseFontSize(nil)
         XCTAssertEqual(f.view.settings?.fontSize,15); XCTAssertEqual(f.view.settings?.padding,7)
+        XCTAssertEqual(f.view.settings?.paddingFill,.off)
         XCTAssertEqual(f.view.settings?.backgroundOpacity,0.25); XCTAssertEqual(f.view.settings?.cursorShape,.bar)
         f.view.renderer.resetFontSize(nil); XCTAssertEqual(f.view.settings?.fontSize,14)
         XCTAssertTrue(f.window.firstResponder === f.view.renderer); XCTAssertTrue(f.bytes.data.isEmpty)

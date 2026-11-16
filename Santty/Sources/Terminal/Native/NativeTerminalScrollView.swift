@@ -14,6 +14,8 @@ final class NativeTerminalScrollView: NSScrollView {
     let source = SwiftTermFrameSource()
     let driver: GhosttyVTDriver
     private let virtualDocument = Document()
+    let remainderFillView = NativeTerminalPaddingFillView(remainder: true)
+    weak var outerPaddingFill: NativeTerminalPaddingFillView?
     private var geometry: NativeViewport?
     private var interaction: NativeTerminalInteraction!
     private(set) var scrollModeController: NativeScrollModeController!
@@ -71,6 +73,8 @@ final class NativeTerminalScrollView: NSScrollView {
         virtualDocument.wantsLayer = false
         documentView = virtualDocument
         virtualDocument.addSubview(renderer)
+        virtualDocument.addSubview(remainderFillView)
+        remainderFillView.bind(to: self)
         renderer.frameSource = source
         // Ghostty owns cell ordering. Don't introduce a second bidi policy.
         renderer.bidiHostPolicy = .legacyLeftToRight
@@ -228,6 +232,7 @@ final class NativeTerminalScrollView: NSScrollView {
         relayout()
         isUpdating = false
         refresh(resizeTerminal: fontChanged || paddingChanged)
+        invalidatePaddingFill()
         onSettingsChange?()
     }
 
@@ -261,6 +266,7 @@ final class NativeTerminalScrollView: NSScrollView {
         cancelPresentationTimers()
         geometry = nil
         presentedFrame = nil
+        invalidatePaddingFill()
         lastRenderedRow = nil
         renderer.resetInputState()
         source.resetPresentation()
@@ -472,6 +478,7 @@ final class NativeTerminalScrollView: NSScrollView {
             // A flipped parent places this nonflipped renderer by its top edge.
             let frame = NSRect(x: 0, y: next.renderOrigin, width: size.width, height: size.height)
             if renderer.frame != frame { renderer.frame = frame }
+            if remainderFillView.frame != frame { remainderFillView.frame = frame }
             geometry = next
             presentedFrame = snapshot
             interaction.presentationChanged()
@@ -516,7 +523,13 @@ final class NativeTerminalScrollView: NSScrollView {
         linkHighlightDirty = false
     }
 
+    private func invalidatePaddingFill() {
+        outerPaddingFill?.invalidate()
+        remainderFillView.invalidate()
+    }
+
     private func reportViewport(_ next: NativeViewport) {
+        invalidatePaddingFill()
         let images = presentedFrame?.imageSnapshot
         let imageStatus = images?.limited == true ? " · images limited" : images?.placements.isEmpty == false ? " · images \(images?.placements.count ?? 0)" : ""
         onStatusChange?("\(driver.columns)×\(driver.rows) · row \(next.firstRow) + \(String(format: "%.2f", next.fraction)) pt · cached \(source.lines.count) rows · \(renderer.isUsingMetalRenderer ? "Metal" : "Core Graphics")\(imageStatus)")
