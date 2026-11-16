@@ -1658,7 +1658,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             let targetPaneID = directionalTiledPaneTarget(
                 from: focusedPaneID,
                 direction: direction,
-                in: tabState, acrossWindow: sidebar.isVisible
+                in: tabState, acrossWindow: sidebar.isVisible, wrapping: true
             )
         else {
             return
@@ -1670,7 +1670,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     private func directionalTiledPaneTarget(
         from focusedPaneID: PaneID,
         direction: PaneFocusDirection,
-        in tabState: WorkspaceTabState, acrossWindow: Bool = false
+        in tabState: WorkspaceTabState, acrossWindow: Bool = false, wrapping: Bool = false
     ) -> PaneID? {
         var unfoldedFrames: [PaneID: NSRect] = [:]
         if let tilingView, !tilingView.collapsedPaneIDs.isEmpty,
@@ -1690,37 +1690,57 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         }
 
         let owners = acrossWindow ? ([selectedTabState].compactMap { $0 } + (sidebar.isVisible ? [sidebar.tab] : [])) : [tabState]
-        return owners.flatMap { owner in owner.paneControllers.keys.map { ($0, owner) } }
-            .compactMap { paneID, owner -> DirectionalPaneCandidate? in
-                guard paneID != focusedPaneID,
-                    owner.isPaneTiled(paneID),
+        let panes = owners.flatMap { owner in owner.paneControllers.keys.map { ($0, owner) } }
+            .compactMap { paneID, owner -> (paneID: PaneID, frame: NSRect, focusRecency: Int?)? in
+                guard owner.isPaneTiled(paneID),
                     let candidateFrame = unfoldedFrames[paneID]
                         ?? renderedPaneFrame(for: paneID, in: owner)
                 else {
                     return nil
                 }
 
-                return DirectionalPaneCandidate(
-                    paneID: paneID,
-                    score: directionalFocusScore(
-                        from: focusedFrame,
-                        to: candidateFrame,
-                        direction: direction,
-                        focusRecency: acrossWindow ? (windowFocusHistory.firstIndex(of: paneID) ?? owner.focusRecency(for: paneID).map { windowFocusHistory.count + $0 }) : tabState.focusRecency(for: paneID)
-                    )
+                return (
+                    paneID, candidateFrame,
+                    acrossWindow ? (windowFocusHistory.firstIndex(of: paneID) ?? owner.focusRecency(for: paneID).map { windowFocusHistory.count + $0 }) : tabState.focusRecency(for: paneID)
                 )
             }
-            .compactMap { candidate -> DirectionalPaneCandidate? in
-                candidate.score == nil ? nil : candidate
+
+        func target(from frame: NSRect, includingFocusedPane: Bool) -> PaneID? {
+            panes.compactMap { pane -> DirectionalPaneCandidate? in
+                guard includingFocusedPane || pane.paneID != focusedPaneID,
+                    let score = directionalFocusScore(
+                        from: frame, to: pane.frame, direction: direction,
+                        focusRecency: pane.focusRecency
+                    )
+                else { return nil }
+                return DirectionalPaneCandidate(paneID: pane.paneID, score: score)
             }
             .min { lhs, rhs in
                 guard let lhsScore = lhs.score, let rhsScore = rhs.score else {
                     return false
                 }
-
                 return lhsScore == rhsScore ? lhs.paneID.uuidString < rhs.paneID.uuidString : lhsScore < rhsScore
-            }?
-            .paneID
+            }?.paneID
+        }
+
+        if let paneID = target(from: focusedFrame, includingFocusedPane: false) {
+            return paneID
+        }
+        guard wrapping else { return nil }
+
+        // Repeat the same directional search from just beyond the opposite edge.
+        // Keep the perpendicular position and all existing candidate ranking rules.
+        let bounds = panes.reduce(focusedFrame) { $0.union($1.frame) }
+        let wrappedFrame: NSRect
+        switch direction {
+        case .left: wrappedFrame = focusedFrame.offsetBy(dx: bounds.width, dy: 0)
+        case .right: wrappedFrame = focusedFrame.offsetBy(dx: -bounds.width, dy: 0)
+        case .above: wrappedFrame = focusedFrame.offsetBy(dx: 0, dy: -bounds.height)
+        case .below: wrappedFrame = focusedFrame.offsetBy(dx: 0, dy: bounds.height)
+        }
+        // Let the current pane win when there is no other pane on this axis.
+        let paneID = target(from: wrappedFrame, includingFocusedPane: true)
+        return paneID == focusedPaneID ? nil : paneID
     }
 
     private func renderedPaneFrame(for paneID: PaneID, in tabState: WorkspaceTabState) -> NSRect? {

@@ -1336,6 +1336,119 @@ final class WorkspaceViewControllerTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testDirectionalPaneFocusWrapsAcrossAllEdgesUsingAlignedPane() throws {
+        let controller = Self.makeController()
+        let topLeft = try XCTUnwrap(controller.debugFocusedPaneID)
+        controller.debugSplitFocusedPane(along: .horizontal)
+        let topRight = try XCTUnwrap(controller.debugFocusedPaneID)
+        controller.debugSplitFocusedPane(along: .vertical)
+        let bottomRight = try XCTUnwrap(controller.debugFocusedPaneID)
+        controller.debugFocusPane(withID: topLeft)
+        controller.debugSplitFocusedPane(along: .vertical)
+        let bottomLeft = try XCTUnwrap(controller.debugFocusedPaneID)
+
+        let cases: [(PaneID, PaneFocusDirection, PaneID)] = [
+            (topLeft, .left, topRight), (bottomLeft, .left, bottomRight),
+            (topRight, .right, topLeft), (bottomRight, .right, bottomLeft),
+            (topLeft, .above, bottomLeft), (topRight, .above, bottomRight),
+            (bottomLeft, .below, topLeft), (bottomRight, .below, topRight),
+        ]
+        for (source, direction, expected) in cases {
+            // Make the unaligned candidate more recent to verify overlap still wins.
+            for paneID in [topLeft, topRight, bottomLeft, bottomRight] where paneID != expected {
+                controller.debugFocusPane(withID: paneID)
+            }
+            controller.debugFocusPane(withID: source)
+            controller.debugFocusPane(in: direction)
+            XCTAssertEqual(controller.debugFocusedPaneID, expected, "\(direction)")
+        }
+    }
+
+    @MainActor
+    func testDirectionalPaneFocusWrapUsesRecencyForSplitOppositeEdge() throws {
+        for axis in [SplitAxis.horizontal, .vertical] {
+            let controller = Self.makeController()
+            let source = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugSplitFocusedPane(along: axis)
+            let firstTarget = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugSplitFocusedPane(along: axis == .horizontal ? .vertical : .horizontal)
+            let secondTarget = try XCTUnwrap(controller.debugFocusedPaneID)
+            let direction: PaneFocusDirection = axis == .horizontal ? .left : .above
+
+            for expected in [secondTarget, firstTarget] {
+                controller.debugFocusPane(withID: expected)
+                controller.debugFocusPane(withID: source)
+                controller.debugFocusPane(in: direction)
+                XCTAssertEqual(controller.debugFocusedPaneID, expected)
+            }
+        }
+    }
+
+    @MainActor
+    func testDirectionalPaneFocusWrapSelectsFarEdgeAndMoveDoesNotWrap() throws {
+        for axis in [SplitAxis.horizontal, .vertical] {
+            let controller = Self.makeController()
+            let first = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugSplitFocusedPane(along: axis)
+            controller.debugSplitFocusedPane(along: axis)
+            let last = try XCTUnwrap(controller.debugFocusedPaneID)
+            let layout = controller.debugLayoutNode
+            let backward: PaneFocusDirection = axis == .horizontal ? .left : .above
+            let forward: PaneFocusDirection = axis == .horizontal ? .right : .below
+            let moveCommand = axis == .horizontal ? "pane.move.left" : "pane.move.up"
+
+            controller.debugFocusPane(withID: first)
+            XCTAssertEqual(controller.commandPaletteCommands.first { $0.id == moveCommand }?.isEnabled, false)
+            controller.debugPerformCommand(withID: moveCommand)
+            XCTAssertEqual(controller.debugLayoutNode, layout)
+            XCTAssertEqual(controller.debugFocusedPaneID, first)
+            controller.debugFocusPane(in: backward)
+            XCTAssertEqual(controller.debugFocusedPaneID, last)
+            controller.debugFocusPane(in: forward)
+            XCTAssertEqual(controller.debugFocusedPaneID, first)
+            XCTAssertEqual(controller.debugLayoutNode, layout)
+        }
+    }
+
+    @MainActor
+    func testDirectionalPaneFocusWrapStaysPutWithoutAnotherPaneOnAxis() throws {
+        let controller = Self.makeController()
+        let first = try XCTUnwrap(controller.debugFocusedPaneID)
+        for direction in [PaneFocusDirection.left, .right, .above, .below] {
+            controller.debugFocusPane(in: direction)
+            XCTAssertEqual(controller.debugFocusedPaneID, first)
+        }
+        controller.debugSplitFocusedPane(along: .horizontal)
+        let second = try XCTUnwrap(controller.debugFocusedPaneID)
+        for paneID in [first, second] {
+            controller.debugFocusPane(withID: paneID)
+            for direction in [PaneFocusDirection.above, .below] {
+                controller.debugFocusPane(in: direction)
+                XCTAssertEqual(controller.debugFocusedPaneID, paneID)
+            }
+        }
+    }
+
+    @MainActor
+    func testDirectionalPaneFocusWrapIncludesVisibleSidebarOnEitherSide() throws {
+        for side in [SidebarSide.left, .right] {
+            let controller = Self.makeController()
+            let main = try XCTUnwrap(controller.debugFocusedPaneID)
+            let tab = controller.debugSelectedTabID
+            if side == .left { controller.moveSidebarLeft(nil) }
+            else { controller.moveSidebarRight(nil) }
+            let sidebar = try XCTUnwrap(controller.debugSidebarPaneIDs.first)
+            controller.debugFocusSidebarPane(sidebar)
+            controller.debugFocusPane(in: side == .left ? .left : .right)
+            XCTAssertFalse(controller.debugSidebarFocused)
+            XCTAssertEqual(controller.debugFocusedPaneID, main)
+            controller.debugFocusPane(in: side == .left ? .right : .left)
+            XCTAssertTrue(controller.debugSidebarFocused)
+            XCTAssertEqual(controller.debugSelectedTabID, tab)
+        }
+    }
+
     func testDirectionalPaneFocusUsesRecencyForAmbiguousPositionMatch() async throws {
         try await MainActor.run {
             for showSidebar in [false, true] {
