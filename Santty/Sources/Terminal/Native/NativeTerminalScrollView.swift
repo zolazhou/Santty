@@ -17,6 +17,7 @@ final class NativeTerminalScrollView: NSScrollView {
     let remainderFillView = NativeTerminalPaddingFillView(remainder: true)
     weak var outerPaddingFill: NativeTerminalPaddingFillView?
     private var geometry: NativeViewport?
+    private var heldScrollOffset: CGFloat?
     private var interaction: NativeTerminalInteraction!
     private(set) var scrollModeController: NativeScrollModeController!
     private(set) var hostActions: NativeTerminalHostActions!
@@ -281,6 +282,7 @@ final class NativeTerminalScrollView: NSScrollView {
         scrollModeController?.exit(refresh: false)
         cancelPresentationTimers()
         geometry = nil
+        heldScrollOffset = nil
         presentedFrame = nil
         invalidatePaddingFill()
         lastRenderedRow = nil
@@ -406,7 +408,7 @@ final class NativeTerminalScrollView: NSScrollView {
         do {
             if resizeTerminal { try updateViewportGeometry() }
             if holdPresentationIfNeeded() { return }
-            try renderViewport()
+            try renderViewport(requestedOffset: heldScrollOffset)
             lastCellSize = renderer.cellSize
             lastError = nil
             hasPendingOutput = false
@@ -422,17 +424,30 @@ final class NativeTerminalScrollView: NSScrollView {
         isUpdating = true
         defer { isUpdating = false }
         if holdPresentationIfNeeded() {
-            // Keep the published viewport intact until the short hold releases;
-            // don't relocate an old snapshot to a newly requested row.
-            if let geometry { contentView.scroll(to: NSPoint(x: 0, y: geometry.offset)) }
+            if scrollModeController.isActive {
+                if let geometry { contentView.scroll(to: NSPoint(x: 0, y: geometry.offset)) }
+            } else { preserveHeldScroll() }
             return
         }
         do { try renderViewport(requestedOffset: contentView.bounds.minY) }
         catch { report(error) }
     }
 
+    /// Let AppKit retain the user's cumulative motion, but counter-translate
+    /// the owned frame so its pixels stay at the same screen position. Until
+    /// release, geometry/AX/hit testing still describe that published frame;
+    /// no partial VT output is sampled or relabeled as the requested rows.
+    private func preserveHeldScroll() {
+        guard let geometry else { return }
+        let offset = contentView.bounds.minY
+        heldScrollOffset = offset
+        let origin = NSPoint(x: 0, y: geometry.renderOrigin + offset - geometry.offset)
+        renderer.setFrameOrigin(origin)
+        remainderFillView.setFrameOrigin(origin)
+    }
+
     private func renderViewport(requestedOffset: CGFloat? = nil) throws {
-        if scrollModeController?.isActive != true, let requestedOffset, let geometry {
+        if heldScrollOffset == nil, scrollModeController?.isActive != true, let requestedOffset, let geometry {
             let movement = NativeViewport(rowHeight: geometry.rowHeight, viewportHeight: geometry.viewportHeight,
                 totalRows: geometry.totalRows, offset: requestedOffset)
             if lastRenderedRow == movement.firstRow,
@@ -458,9 +473,12 @@ final class NativeTerminalScrollView: NSScrollView {
                 advanceAnimations: canPresentOutput)
         }
         guard let presentation = nextPresentation else {
-            _ = holdPresentationIfNeeded()
+            if holdPresentationIfNeeded(), requestedOffset != nil, !scrollModeController.isActive {
+                preserveHeldScroll()
+            }
             return
         }
+        heldScrollOffset = nil
         let next = presentation.viewport
         let snapshot = presentation.frame
         let size = CGSize(width: contentSize.width, height: next.renderHeight)

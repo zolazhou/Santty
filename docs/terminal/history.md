@@ -101,7 +101,7 @@ SwiftTerm、Ghostty 及适配参考 herdr-app 的许可证／NOTICE 位于 `Lice
 - `NativeTerminalFrame`：拥有数据的快照和逐行选择范围；行标识使用 Ghostty 的两个 opaque word。只缓存当前视口和 overscan，不复制全部 scrollback。
 - `SwiftTermFrameSource`：增量构建 BufferLine，不创建 SwiftTerm.Terminal；复用未改变的行，保留调色板索引，接近 arena 容量时重建 store。
 - `NativeViewport`：纯几何计算，把连续偏移拆为整数行和行内像素；输入坐标同时考虑弹性区域。
-- `NativeTerminalScrollView`：高文档只表达历史范围，renderer 保持有界；保留 AppKit 原生滚动。live 窗口未显示时仅标记待更新，不转换／绘制输出，重新显示再恢复。同步输出 hold 期间暂时固定已发布视口，解除或超时后更新，避免将旧快照移动到新行。
+- `NativeTerminalScrollView`：高文档只表达历史范围，renderer 保持有界；保留 AppKit 原生滚动。live 窗口未显示时仅标记待更新，不转换／绘制输出，重新显示再恢复。同步输出 hold 期间保持已发布画面的屏幕位置，但保留 AppKit 累积的用户滚动；解除或超时后相对原内容锚点一次应用滚动。不再将 clip 强制拉回旧位置，也不将旧快照标成新行或展示半帧输出。
 - `GhosttyVTHistoryAnchor`：每个 driver 持有一个 VT tracked grid reference，跟踪上次发布内容的单元格；淘汰／reflow 后先解析引用，再在同一把锁下采样帧，不靠行号、文本搜索或另一份历史缓冲。行内移动不重建帧。
 - 输出追加在原本位于底部时跟随；阅读历史时保留内容单元格及行内比例。resize／字号变化后引用继续跟随原单元格，底部范围约束生效时恢复尾随；原内容被淘汰则回到最早可用行，reset／RIS／已呈现屏幕切换／重连回到实时画面。锚点不冻结程序正在改写的内容。
 

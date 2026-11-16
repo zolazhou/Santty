@@ -52,6 +52,91 @@ final class NativeTerminalScrollViewTests: XCTestCase {
         XCTAssertEqual(view.contentView.bounds.minY, 105, accuracy: 0.01)
     }
 
+    func testScrollingUpStaysMonotonicDuringSpinnerAndOutputUpdates() throws {
+        for output in ["\r\u{1b}[2Kspinner", "new output\r\n"] {
+            let (window, view) = try makeView()
+            defer { window.contentView = nil }
+            for _ in 0..<100 {
+                let requested = view.contentView.bounds.minY - 2
+                view.contentView.scroll(to: NSPoint(x: 0, y: requested))
+                view.feed(output)
+                XCTAssertEqual(view.contentView.bounds.minY, requested, accuracy: 0.01)
+                XCTAssertNil(view.lastError)
+            }
+        }
+    }
+
+    func testSpinnerSynchronizedUpdateDoesNotUndoUserScroll() throws {
+        let (window, view) = try makeView()
+        defer { window.contentView = nil }
+        let h = view.renderer.cellSize.height
+        view.contentView.scroll(to: NSPoint(x: 0, y: 100 * h + 5))
+        let published = try XCTUnwrap(view.presentedViewport)
+        let screenY = view.renderer.frame.minY - view.contentView.bounds.minY
+        let converted = view.source.convertedRows
+        let axValue = view.renderer.accessibilityValue() as? String
+        let axFrame = view.renderer.accessibilityFrame(for: NSRange(location: 0, length: 4))
+        view.feed("\u{1b}[?2026h\r\u{1b}[2Kspinner")
+        XCTAssertNotNil(view.driver.renderHoldRemaining)
+        var requested = view.contentView.bounds.minY
+        for distance: CGFloat in [h, h / 4, h * 3] {
+            requested -= distance
+            view.contentView.scroll(to: NSPoint(x: 0, y: requested))
+            view.refresh()
+            XCTAssertEqual(view.contentView.bounds.minY, requested, accuracy: 0.01,
+                           "a spinner redraw must not push user scrolling back down")
+            XCTAssertEqual(view.renderer.frame.minY - view.contentView.bounds.minY, screenY, accuracy: 0.01,
+                           "the held frame stays pinned, not relabeled as different history rows")
+            XCTAssertEqual(view.presentedViewport, published)
+            XCTAssertEqual(view.source.convertedRows, converted)
+            XCTAssertEqual(view.renderer.accessibilityValue() as? String, axValue)
+            XCTAssertEqual(view.renderer.accessibilityFrame(for: NSRange(location: 0, length: 4)), axFrame)
+            XCTAssertNotNil(view.driver.renderHoldRemaining, "scrolling must not end synchronized output")
+        }
+        view.feed("\u{1b}[?2026l")
+        XCTAssertEqual(view.contentView.bounds.minY, requested, accuracy: 0.01)
+        XCTAssertEqual(view.presentedViewport?.offset, requested)
+        XCTAssertEqual(view.renderer.frame.minY, floor(requested / h) * h, accuracy: 0.01)
+        XCTAssertNil(view.lastError)
+    }
+
+    func testScrollBackDuringHeldOutputDoesNotResumeBottomFollowing() throws {
+        let (window, view) = try makeView()
+        defer { window.contentView = nil }
+        let requested = view.contentView.bounds.minY - 2 * view.renderer.cellSize.height
+        view.feed("\u{1b}[?2026h" + String(repeating: "more output\r\n", count: 30))
+        view.contentView.scroll(to: NSPoint(x: 0, y: requested))
+        view.feed("\u{1b}[?2026l")
+        XCTAssertEqual(view.contentView.bounds.minY, requested, accuracy: 0.01)
+        XCTAssertFalse(view.isAtLiveBottom)
+    }
+
+    func testHeldScrollTimeoutAppliesFractionalMotionWithoutAnotherChunk() async throws {
+        let (window, view) = try makeView()
+        defer { window.contentView = nil }
+        view.contentView.scroll(to: NSPoint(x: 0, y: 100 * view.renderer.cellSize.height + 5))
+        let requested = view.contentView.bounds.minY - 2
+        view.feed("\u{1b}[?2026hspinner")
+        view.contentView.scroll(to: NSPoint(x: 0, y: requested))
+        try await Task.sleep(for: .milliseconds(1200))
+        XCTAssertEqual(view.presentedViewport?.offset, requested)
+        XCTAssertEqual(view.contentView.bounds.minY - view.renderer.frame.minY, 3, accuracy: 0.01,
+                       "release must restore renderer geometry even for motion within one row")
+        XCTAssertNil(view.driver.renderHoldRemaining)
+    }
+
+    func testResetDiscardsHeldScrollIntentAndItsFrameTranslation() throws {
+        let (window, view) = try makeView()
+        defer { window.contentView = nil }
+        view.feed("\u{1b}[?2026hspinner")
+        view.contentView.scroll(to: NSPoint(x: 0, y: 100 * view.renderer.cellSize.height + 5))
+        view.reset(with: "new screen")
+        XCTAssertEqual(view.contentView.bounds.minY, 0)
+        XCTAssertEqual(view.renderer.frame.minY, 0)
+        XCTAssertEqual(view.presentedViewport?.offset, 0)
+        XCTAssertEqual(view.source.lines[0]?[0].getText(), "n")
+    }
+
     func testResizeAndResetDoNotKeepOldRowsOrCreateHugeSurface() throws {
         let (window, view) = try makeView()
         defer { window.contentView = nil }
