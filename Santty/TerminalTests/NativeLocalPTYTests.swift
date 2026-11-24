@@ -168,6 +168,38 @@ final class NativeLocalPTYSessionTests: XCTestCase {
         } catch { try? await lab.stop(); throw error }
     }
 
+    func testMacEditingBindingsEditARealPrivateReadlineBuffer() async throws {
+        for (code, modifiers, setup, insertion, expected): (UInt16, NSEvent.ModifierFlags, String, String, String) in [
+            (51, .command, "", "", ""), (117, .command, "\u{1}", "", ""),
+            (51, .command, "\u{1}\u{1b}f\u{6}", "", "beta"), (117, .command, "\u{1}\u{1b}f\u{6}", "", "alpha "),
+            (123, .command, "", "X", "Xalpha beta"), (124, .command, "\u{1}", "X", "alpha betaX"),
+            (123, .option, "", "X", "alpha Xbeta"), (124, .option, "\u{1}", "X", "alphaX beta"),
+            (51, .option, "", "", "alpha "), (117, .option, "\u{1}", "", " beta"),
+        ] {
+            let lab = try NativeLocalPTYTestSession(driver: GhosttyVTDriver()) { _ in }
+            do {
+                let result = lab.root.appendingPathComponent("readline-result")
+                // No user startup files or terminals. Readline, not screen
+                // echo, determines the final buffer saved by the owned child.
+                try "set editing-mode emacs\n".write(to: lab.home.appendingPathComponent(".inputrc"), atomically: true, encoding: .utf8)
+                try lab.start(viewport: viewport, executable: "/bin/bash", args: ["--noprofile", "--norc", "-c",
+                    "IFS= read -e -p 'EDIT-READY>' line; printf %s \"$line\" > '\(result.path)'"])
+                try await waitFor("Readline prompt") { try self.text(lab).contains("EDIT-READY>") }
+                let view = NativeTerminalInputView(frame: .init(x: 0, y: 0, width: 640, height: 240))
+                view.output = lab.output; view.inputEnabled = true
+                XCTAssertTrue(try lab.output.sendText("alpha beta" + setup))
+                let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers,
+                    timestamp: 1, windowNumber: 0, context: nil, characters: "\u{7f}",
+                    charactersIgnoringModifiers: "\u{7f}", isARepeat: false, keyCode: code))
+                view.keyDown(with: event)
+                XCTAssertTrue(try lab.output.sendText(insertion + "\r"))
+                try await waitFor("Readline result") { self.finished(lab) }
+                XCTAssertEqual(try String(contentsOf: result, encoding: .utf8), expected, "keyCode=\(code), modifiers=\(modifiers)")
+                try await lab.stop()
+            } catch { try? await lab.stop(); throw error }
+        }
+    }
+
     func testRawChildReceivesLiteralUTF8EnterAndCtrlCBytes() async throws {
         let python = ["/usr/bin/python3", "/opt/homebrew/bin/python3"].first { FileManager.default.isExecutableFile(atPath: $0) }!
         let lab = try NativeLocalPTYTestSession(driver: GhosttyVTDriver()) { _ in }

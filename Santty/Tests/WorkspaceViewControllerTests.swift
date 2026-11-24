@@ -2270,6 +2270,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
                     [
                         "sidebar.toggle", "sidebar.left", "sidebar.right", "sidebar.browser", "sidebar.workspaces", "sidebar.agents",
                         "agents.show", "workspace.new", "workspace.rename", "workspace.new.herdr.remote", "workspace.new.herdr", "workspace.close", "pane.rename",
+                        "pane.copyID",
                         "pane.split.horizontal",
                         "pane.split.vertical",
                         "pane.terminal.new", "pane.workspaces.new",
@@ -2514,6 +2515,23 @@ final class WorkspaceViewControllerTests: XCTestCase {
             XCTAssertEqual(controller.debugTabIDs.count, 2)
             XCTAssertEqual(controller.debugSelectedTabID, controller.debugTabIDs.last)
         }
+    }
+
+    @MainActor
+    func testCopyPaneIDFollowsFocusBetweenMainAndSidebar() throws {
+        let controller = Self.makeController()
+        let mainPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+
+        controller.copyFocusedPaneID(to: pasteboard)
+        XCTAssertEqual(pasteboard.string(forType: .string), mainPaneID.uuidString)
+
+        controller.toggleSidebar(nil)
+        let sidebarPaneID = try XCTUnwrap(controller.debugSidebarPaneIDs.first)
+        controller.debugFocusSidebarPane(sidebarPaneID)
+        controller.copyFocusedPaneID(to: pasteboard)
+        XCTAssertEqual(pasteboard.string(forType: .string), sidebarPaneID.uuidString)
     }
 
     func testPaneResizeCommandsMoveAndEqualizeFocusedSplit() async throws {

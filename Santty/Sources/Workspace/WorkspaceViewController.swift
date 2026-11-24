@@ -905,6 +905,12 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         updatePaneName(field.stringValue, for: pane)
     }
 
+    func copyFocusedPaneID(to pasteboard: NSPasteboard = .general) {
+        guard let paneID = focusedPaneController?.id else { return }
+        pasteboard.clearContents()
+        pasteboard.setString(paneID.uuidString, forType: .string)
+    }
+
     private func updatePaneName(_ name: String, for pane: any PaneControlling) {
         guard !isClosingWindow else { return }
 
@@ -2908,6 +2914,13 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
                 shortcut: nil,
                 isEnabled: focusedPaneController != nil,
                 perform: { [weak self] in self?.renamePane(nil) }
+            ),
+            AppCommand(
+                id: "pane.copyID",
+                title: "Copy Pane ID",
+                shortcut: nil,
+                isEnabled: focusedPaneController != nil,
+                perform: { [weak self] in self?.copyFocusedPaneID() }
             ),
             AppCommand(
                 id: "pane.split.horizontal",

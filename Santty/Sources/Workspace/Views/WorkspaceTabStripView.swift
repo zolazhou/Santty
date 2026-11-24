@@ -141,7 +141,6 @@ final class WorkspaceTabStripView: NSView {
     private let tabHeight: CGFloat = 32
     private let minimumTabWidth: CGFloat = 60
     private let maximumTabWidth: CGFloat = 220
-    private let newTabButtonWidth: CGFloat = 28
     private let reorderAnimationDuration: TimeInterval = 0.16
 
     private struct DragPreviewState {
@@ -202,6 +201,10 @@ final class WorkspaceTabStripView: NSView {
         collectionView.register(
             WorkspaceTabCollectionViewItem.self,
             forItemWithIdentifier: WorkspaceTabCollectionViewItem.identifier
+        )
+        collectionView.register(
+            WorkspaceNewTabCollectionViewItem.self,
+            forItemWithIdentifier: WorkspaceNewTabCollectionViewItem.identifier
         )
         collectionView.registerForDraggedTypes([Self.tabPasteboardType])
         collectionView.setDraggingSourceOperationMask(.move, forLocal: true)
@@ -426,8 +429,7 @@ final class WorkspaceTabStripView: NSView {
                 continue
             }
 
-            if indexPath.item == currentItems.count {
-                configureNewTabButton(collectionItem.tabButton)
+            guard indexPath.item < currentItems.count else {
                 continue
             }
 
@@ -444,25 +446,6 @@ final class WorkspaceTabStripView: NSView {
         let indexWidth: CGFloat = 18
         let width = 10 + titleWidth + 8 + indexWidth + 10
         return min(max(ceil(width), minimumTabWidth), maximumTabWidth)
-    }
-
-    private func configureNewTabButton(_ tabButton: WorkspaceTabButtonView) {
-        tabButton.title = "+"
-        tabButton.index = nil
-        tabButton.isSelected = false
-        tabButton.minimumWidth = newTabButtonWidth
-        tabButton.maximumWidth = newTabButtonWidth
-        tabButton.fixedWidth = newTabButtonWidth
-        tabButton.forwardsMouseDownToResponderChain = false
-        tabButton.titleFont = .systemFont(ofSize: 15, weight: .medium)
-        tabButton.titleAlignment = .center
-        tabButton.contentInset = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
-        tabButton.showsCloseButton = false
-        tabButton.target = self
-        tabButton.action = #selector(handleNewTabButton)
-        tabButton.onClose = nil
-        tabButton.updateAppearance()
-        tabButtons = tabButtons.filter { $0.value !== tabButton }
     }
 
     @objc private func handleTabButton(_ sender: WorkspaceTabButtonView) {
@@ -521,17 +504,22 @@ extension WorkspaceTabStripView: NSCollectionViewDataSource {
         _ collectionView: NSCollectionView,
         itemForRepresentedObjectAt indexPath: IndexPath
     ) -> NSCollectionViewItem {
+        let currentItems = displayedItems
+        guard indexPath.item < currentItems.count else {
+            let collectionItem = collectionView.makeItem(
+                withIdentifier: WorkspaceNewTabCollectionViewItem.identifier,
+                for: indexPath
+            ) as! WorkspaceNewTabCollectionViewItem
+            collectionItem.button.target = self
+            collectionItem.button.action = #selector(handleNewTabButton)
+            collectionItem.updateAppearance()
+            return collectionItem
+        }
+
         let collectionItem = collectionView.makeItem(
             withIdentifier: WorkspaceTabCollectionViewItem.identifier,
             for: indexPath
         ) as! WorkspaceTabCollectionViewItem
-
-        let currentItems = displayedItems
-        guard indexPath.item < currentItems.count else {
-            configureNewTabButton(collectionItem.tabButton)
-            return collectionItem
-        }
-
         let item = currentItems[indexPath.item]
         configure(collectionItem.tabButton, with: item, at: indexPath.item)
         tabButtons[item.id] = collectionItem.tabButton
@@ -547,7 +535,7 @@ extension WorkspaceTabStripView: NSCollectionViewDelegateFlowLayout {
     ) -> NSSize {
         let currentItems = displayedItems
         guard indexPath.item < currentItems.count else {
-            return NSSize(width: newTabButtonWidth, height: tabHeight)
+            return NSSize(width: tabHeight, height: tabHeight)
         }
 
         return NSSize(width: width(for: currentItems[indexPath.item]), height: tabHeight)
@@ -712,6 +700,46 @@ extension WorkspaceTabStripView: NSCollectionViewDelegate {
     }
 
     var debugDisplayedTabIDs: [UUID] { displayedItems.map(\.id) }
+}
+
+@MainActor
+private final class WorkspaceNewTabCollectionViewItem: NSCollectionViewItem {
+    static let identifier = NSUserInterfaceItemIdentifier("WorkspaceNewTabCollectionViewItem")
+
+    let button = NSButton()
+    private let vibrancyView = AppAppearanceDefaults.makeVibrancyView(
+        tintViewAlpha: AppAppearanceDefaults.vibrancyTintAlpha
+    )
+
+    override func loadView() {
+        view = NSView()
+        view.wantsLayer = true
+        view.layer?.cornerRadius = WorkspaceTabButtonView.cornerRadius
+        view.layer?.masksToBounds = true
+        view.layer?.borderWidth = 1
+        view.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+
+        button.title = ""
+        button.isBordered = false
+        button.bezelStyle = .shadowlessSquare
+        button.imagePosition = .imageOnly
+        button.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        button.contentTintColor = .white.withAlphaComponent(0.82)
+        button.setAccessibilityLabel("New Tab")
+        button.toolTip = "New Tab"
+
+        for subview in [vibrancyView, button] {
+            subview.frame = view.bounds
+            subview.autoresizingMask = [.width, .height]
+            view.addSubview(subview)
+        }
+        updateAppearance()
+    }
+
+    func updateAppearance() {
+        vibrancyView.isHidden = !AppAppearanceSettings.isWindowHidden
+    }
 }
 
 private final class WorkspaceTabCollectionViewItem: NSCollectionViewItem {

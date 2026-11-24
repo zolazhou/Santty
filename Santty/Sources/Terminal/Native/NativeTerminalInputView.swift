@@ -202,6 +202,10 @@ final class NativeTerminalInputView: TerminalRenderView, @MainActor NSTextInputC
     override func keyDown(with event: NSEvent) {
         if scrollModeController?.keyDown(event) == true { return }
         guard inputEnabled else { return }
+        if let binding = editingBinding(for: event) {
+            sendEditingBinding(binding, for: event)
+            return
+        }
         if event.modifierFlags.contains(.command) { super.keyDown(with: event); return }
         onInputActivity?()
         // Cocoa text-editing bindings can consume terminal shortcuts (for
@@ -240,6 +244,15 @@ final class NativeTerminalInputView: TerminalRenderView, @MainActor NSTextInputC
         if performFontKeyEquivalent(event) { return true }
         if scrollModeController?.keyEquivalent(event) == true { return true }
         if scrollModeController?.isActive == true { return false }
+        // AppKit offers equivalents to unfocused views too. Only the current
+        // responder may turn a Command editing binding into terminal input.
+        if event.type == .keyDown, event.modifierFlags.contains(.command),
+           let window, event.window == nil || event.window === window,
+           window.firstResponder === self, !isHiddenOrHasHiddenAncestor,
+           let binding = editingBinding(for: event) {
+            sendEditingBinding(binding, for: event)
+            return true
+        }
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command {
             if event.charactersIgnoringModifiers?.lowercased() == "c" {
                 if let hostActions { return hostActions.copy() }
@@ -257,6 +270,44 @@ final class NativeTerminalInputView: TerminalRenderView, @MainActor NSTextInputC
             return true
         }
         return super.performKeyEquivalent(with: event)
+    }
+
+    /// Host bindings, not physical key reports: like copy/paste they remain
+    /// host-owned under Kitty. Option word editing is legacy-only; enhanced
+    /// keyboard applications receive the original Option key and its release.
+    private func editingBinding(for event: NSEvent) -> String? {
+        guard inputEnabled, !hasMarkedText() else { return nil }
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        if modifiers == .command {
+            switch event.keyCode {
+            case 51: return "\u{15}" // kill backwards (Ctrl+U)
+            case 117: return "\u{b}" // kill forwards (Ctrl+K)
+            case 123: return "\u{1}" // beginning of input (Ctrl+A)
+            case 124: return "\u{5}" // end of input (Ctrl+E)
+            default: return nil
+            }
+        }
+        guard modifiers == .option,
+              (try? output?.driver.keyboardModes.kittyFlags) == 0 else { return nil }
+        switch event.keyCode {
+        case 51: return "\u{1b}\u{7f}" // backward-kill-word
+        case 117: return "\u{1b}d" // kill-word
+        case 123: return "\u{1b}b" // backward-word
+        case 124: return "\u{1b}f" // forward-word
+        default: return nil
+        }
+    }
+
+    private func sendEditingBinding(_ text: String, for event: NSEvent) {
+        let value = NativeKeyNormalizer.normalize(.init(event: event), option: optionBehavior)
+        guard keys.accepts(value, isHostBinding: true) else { return }
+        onInputActivity?()
+        if (try? output?.sendText(text)) == true {
+            // Track repeats/reset, but never report a physical release for a
+            // host action whose physical press was not sent to the program.
+            keys.delivered(value, reportsRelease: false, isHostBinding: true)
+            resetCaretBlink()
+        }
     }
 
     private func performFontKeyEquivalent(_ event: NSEvent) -> Bool {

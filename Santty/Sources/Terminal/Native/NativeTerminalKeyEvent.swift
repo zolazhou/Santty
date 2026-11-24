@@ -156,16 +156,19 @@ enum NativeKeyNormalizer {
 /// Release identity comes from the delivered press, not a new keyboard layout.
 /// Clearing on focus/reconnect also suppresses orphan repeats and releases.
 struct NativeKeySequence {
-    private var pressed: [UInt16: (key: NativeTerminalKeyEvent, reportsRelease: Bool)] = [:]
+    private var pressed: [UInt16: (key: NativeTerminalKeyEvent, reportsRelease: Bool, isHostBinding: Bool)] = [:]
 
-    func accepts(_ event: NativeTerminalKeyEvent) -> Bool {
+    func accepts(_ event: NativeTerminalKeyEvent, isHostBinding: Bool = false) -> Bool {
         guard event.action == GHOSTTY_KEY_ACTION_REPEAT else { return true }
-        guard let original = pressed[event.keyCode]?.key else { return false }
+        // A held legacy host binding must not become a physical Kitty repeat
+        // (or vice versa) when the foreground program changes keyboard modes.
+        guard let record = pressed[event.keyCode], record.isHostBinding == isHostBinding else { return false }
+        let original = record.key
         return original.key == event.key && original.unshiftedCodepoint == event.unshiftedCodepoint
     }
 
-    mutating func delivered(_ event: NativeTerminalKeyEvent, reportsRelease: Bool = true) {
-        if event.action == GHOSTTY_KEY_ACTION_PRESS { pressed[event.keyCode] = (event, reportsRelease) }
+    mutating func delivered(_ event: NativeTerminalKeyEvent, reportsRelease: Bool = true, isHostBinding: Bool = false) {
+        if event.action == GHOSTTY_KEY_ACTION_PRESS { pressed[event.keyCode] = (event, reportsRelease, isHostBinding) }
     }
 
     mutating func release(_ current: NativeTerminalKeyEvent) -> NativeTerminalKeyEvent? {

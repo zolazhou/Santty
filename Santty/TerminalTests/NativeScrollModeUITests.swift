@@ -96,6 +96,27 @@ final class NativeScrollModeUITests: XCTestCase {
         XCTAssertEqual(bytes.data.suffix(5),Data("fresh".utf8))
     }
 
+    func testMacEditingBindingsCannotEscapeScrollModeOrReplayAfterExit() throws {
+        let view = try fixture(), (_, bytes) = attach(view)
+        XCTAssertTrue(view.scrollModeController.enter())
+        for modifiers: NSEvent.ModifierFlags in [.command, .option] {
+            for code: UInt16 in [51, 117, 123, 124] {
+                let event = try key("\u{7f}", code: code, modifiers: modifiers)
+                if modifiers == .command { XCTAssertFalse(view.renderer.performKeyEquivalent(with: event)) }
+                view.renderer.keyDown(with: event)
+            }
+        }
+        XCTAssertTrue(bytes.data.isEmpty)
+        view.scrollModeController.exit()
+        for modifiers: NSEvent.ModifierFlags in [.command, .option] {
+            for code: UInt16 in [51, 117, 123, 124] {
+                view.renderer.keyDown(with: try key("\u{7f}", code: code, modifiers: modifiers, repeatKey: true))
+                view.renderer.keyUp(with: try key("\u{7f}", code: code, modifiers: modifiers, type: .keyUp))
+            }
+        }
+        XCTAssertTrue(bytes.data.isEmpty)
+    }
+
     func testExitKeyReleaseAndRepeatAreNotReplayedToKittyConsumer() throws {
         let view = try fixture(), (_,bytes) = attach(view)
         view.driver.feed("\u{1b}[>31u")

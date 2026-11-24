@@ -35,6 +35,40 @@ Physical Ghostty/W3C identity, logical Control identity, layout text and unshift
 
 IME/dictation commits are UTF-8 text, not a fabricated unidentified key and not bracketed paste. Physical keys during preedit stay with the input method. A delete which only ends preedit must not also delete terminal input. Empty marked text removes its overlay. Focus loss, disconnect, reset and Option-policy changes clear composition and delivered-key state. Orphan repeats/releases are dropped; release identity survives layout changes, and repeat cannot silently become a different layout key.
 
+## macOS editing bindings
+
+The focused terminal handles these host bindings before handing other Command
+shortcuts back to AppKit. They send literal shell editing actions through the
+existing gated user writer, not fabricated physical key reports or bracketed
+paste. The shell/application's keymap determines the actual editing operation.
+
+| Shortcut | Action bytes | Usual Emacs/Readline operation |
+| --- | --- | --- |
+| Cmd+Backspace | Ctrl+U (`15`) | Delete backwards to input start |
+| Cmd+Forward Delete (Cmd+Fn+Backspace) | Ctrl+K (`0b`) | Delete to input end |
+| Cmd+Left / Right | Ctrl+A / Ctrl+E (`01` / `05`) | Move to input start / end |
+| Option+Left / Right | ESC b / ESC f | Move one word backwards / forwards |
+| Option+Backspace | ESC DEL | Delete previous word |
+| Option+Forward Delete | ESC d | Delete next word |
+
+Command bindings remain host-owned in legacy, modifyOtherKeys and Kitty modes.
+Option word bindings apply only outside Kitty, independently of the Option text
+policy; Kitty receives the original Option chord and matching release. Extra
+Shift/Control/Command/Option combinations are not silently simplified. Plain
+Backspace, Forward Delete, Home/End and Page Up/Down retain VT encoding.
+
+Preedit and Scroll Mode keep ownership. Unfocused/foreign-window/hidden views
+cannot claim Command editing equivalents. Accepted host bindings track repeats,
+but never emit an orphan physical key release; reset/offline/failed writes cannot
+admit later repeats. A held key cannot cross between host binding and physical
+Kitty repeat admission when the program changes modes.
+
+Evidence: native AppKit keyDown and key-equivalent byte tests, Kitty mode/release
+and held-key transition tests, IME/focus/offline/reset/Scroll Mode refusal, plus
+an owned private Bash Readline buffer that saves and verifies all eight actions
+(including deletion from the middle of the buffer). These synthetic events do
+not certify every keyboard device/layout or user-customized shell keymap.
+
 ## Behavior and evidence
 
 | Area | Reference / decision | Current automated evidence |
@@ -46,6 +80,7 @@ IME/dictation commits are UTF-8 text, not a fabricated unidentified key and not 
 | Option | Herdr side policy; SwiftTerm macOS text-input policy | left/right/both Meta versus text, across legacy/Kitty; composed text under report-all has no orphan release |
 | AppKit vs GPUI difference | SwiftTerm deliberately sends Option/AltGr composition as text even under report-all | Native view uses text intent; low-level C encoder vectors separately retain Herdr's physical-key expectations |
 | Application modes | Modes read from VT, never duplicated | Cursor keys, keypad and DEC 1035 Num Lock override; default numeric keypad is intentional, not an encoder regression |
+| macOS editing bindings | Explicit host-owned Command actions; legacy Option word actions, not a second VT keyboard encoder | Eight binding byte vectors; private Readline results; Kitty original Option press/release and mode-transition repeat isolation; input/focus/IME/Scroll Mode guards |
 | IME | SwiftTerm preedit/commit/edit distinction | Unicode/emoji commits under report-all, cancel/delete, empty preedit, focus cleanup and actual candidate coordinates |
 | Paste | Ghostty C sanitization/framing; Herdr legacy CRLF normalization | bracket on/off, delimiter injection/control bytes, CRLF as one CR when unbracketed |
 | Real consumer | Private core/session/home only, clean nvim | SIGINT + subsequent shell input; nvim command entry/execution; literal multiline paste in normal and insert modes; command-line bracketed paste |
