@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var workspaceDividerThickness: Double
     @State private var isWindowHidden: Bool
     @State private var windowCornerRadius: Double
+    @State private var terminalRenderingEngine: TerminalSettings.RenderingEngine
     @State private var terminalThemeName: String
     @State private var terminalFontFamily: String
     @State private var terminalFontSize: Double
@@ -31,6 +32,7 @@ struct SettingsView: View {
         workspaceDividerThickness: CGFloat = AppAppearanceSettings.workspaceDividerThickness,
         isWindowHidden: Bool = AppAppearanceSettings.isWindowHidden,
         windowCornerRadius: CGFloat = AppAppearanceSettings.windowCornerRadius,
+        terminalRenderingEngine: TerminalSettings.RenderingEngine = TerminalSettings.renderingEngine,
         terminalThemeName: String = TerminalSettings.themeName,
         terminalFontFamily: String = TerminalSettings.fontFamily,
         terminalFontSize: CGFloat = TerminalSettings.fontSize,
@@ -59,6 +61,7 @@ struct SettingsView: View {
         _workspaceDividerThickness = State(initialValue: Double(workspaceDividerThickness))
         _isWindowHidden = State(initialValue: isWindowHidden)
         _windowCornerRadius = State(initialValue: Double(windowCornerRadius))
+        _terminalRenderingEngine = State(initialValue: terminalRenderingEngine)
         _terminalThemeName = State(initialValue: terminalThemeName)
         _terminalFontFamily = State(initialValue: terminalFontFamily)
         _terminalFontSize = State(initialValue: Double(terminalFontSize))
@@ -166,6 +169,7 @@ struct SettingsView: View {
             )
         case .terminal:
             TerminalSettingsPane(
+                terminalRenderingEngine: $terminalRenderingEngine,
                 terminalThemeName: $terminalThemeName,
                 terminalFontFamily: $terminalFontFamily,
                 terminalFontSize: $terminalFontSize,

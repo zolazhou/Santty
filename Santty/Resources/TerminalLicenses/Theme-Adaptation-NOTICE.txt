@@ -1,0 +1,68 @@
+Native theme catalog adaptation
+
+The 485 exact-name color records are extracted offline from libghostty-spm
+1d84cf66fe29abd1f24f10b88dcfc25882cf68ee, Sources/GhosttyTheme (ThemeDefinition,
+ThemeCatalog_Generated and Themes_*.swift). generate-theme-catalog.py validates
+all initializer fields/catalog membership and records source SHA-256 values.
+TerminalThemes.json is an internal frozen data artifact, not a user config format.
+The runtime does not import GhosttyTheme/GhosttyTerminal or load the old C core.
+No full Ghostty configuration/theme-file parser is provided. Colors, palette,
+cursor text and selection data keep their original names/values; native typed
+settings and publication/lifecycle glue are Santty adaptations.
+
+CG/Metal renderer interfaces remain SwiftTerm's pinned MIT components; native
+settings reuse their font/color/caret/opacity APIs without a second emulator.
+Metadata is an owned bounded snapshot of the precompiled VT's title/pwd, never
+filesystem-resolved. Core semantics and reset callback differences are probed
+independently. Snapshot/host integration is not whole-app or GUI certification.
+
+Upstream wrapper permission:
+
+MIT License
+
+Copyright (c) 2026 @Lakr233
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Color data permission:
+
+MIT License
+
+Color scheme data sourced from iTerm2-Color-Schemes
+(https://github.com/mbadolato/iTerm2-Color-Schemes)
+
+Copyright (c) 2011-present Mark Badolato
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

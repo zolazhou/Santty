@@ -1,0 +1,60 @@
+Standalone PTY integration reuses SwiftTerm LocalProcess, LocalProcessDelegate,
+TerminalIOPipeline and PseudoTerminalHelpers from pinned revision
+28c6d1d95de156a36a2eaa278177ee7f8a15d322 (MIT, full permission in SwiftTerm.txt).
+Lifecycle test patterns reference LocalProcessLifecycleTests.swift at that pin;
+independent literal bytes, actual program/PTY state and owned resources provide
+expectations. LocalProcessTerminalView/HeadlessTerminal and their emulators are
+not instantiated. Explicit environment avoids LocalProcess's Terminal-based
+default environment helper.
+
+The reproducible LocalPTYHost patch adds locked macOS PTY name/foreground-group
+snapshots and terminal-owner close using TIOCSIG for the kernel's current
+foreground group plus the existing reuse-safe child reaper. Original child-only
+terminate() behavior is unchanged. A proven ignored-chdir failure now exits 127
+using only async-signal-safe calls in the child; it no longer executes in the
+parent directory. No precompiled Ghostty core code is rebuilt or modified.
+
+NativeLocalPTYSession now owns the reusable one-launch lifecycle;
+NativeLocalPTYLab supplies only private HOME/XDG/cwd plus verified directory
+cleanup around that same session. NativeLocalPTYLaunch explicitly separates
+local production login/account/environment policy from private tests. A local
+close barrier checks pane/session identity before and after awaiting all owners,
+without introducing a second workspace registry or changing Herdr close policy.
+Child-locale conversion attribution is in Launch-Adaptation-NOTICE.txt.
+The session retains private serial parse-worker direct delivery and a separate
+private lifecycle queue,
+synchronous VT parsing and bounded checked input FIFO,
+no retries/replay on partial writes or exit, separate automatic-reply admission
+during close, revision-checked UI state and bounded verified cleanup. Local
+foreground group-leader/cwd inspection is best effort with controlling-tty,
+session, start-time and repeated-group checks; it is never used for signals,
+remote metadata or process-table enumeration.
+
+The seventh reproducible PTYOutputDrain patch opts this native wrapper into a
+finite readable-byte fence for natural exit, delivering captured output before
+termination without a parser deadline or waiting for descendant EOF. Legacy
+clients retain the existing 0.5-second limit. Guarded explicit close also keeps
+the executing-callback barrier (without blocking the caller). Explicit close
+can cancel without joining the caller; outputDrainComplete reports cutoff,
+cancellation and observed fence failure. No borrowed output survives a callback.
+Darwin PTY masters use TIOCOUTQ, not FIONREAD (which reports slave input); the
+explicit non-Swift-importable ioctl ABI constants are SDK-checked in independent
+C, with a separate pipe control. This is not cross-platform certification.
+Darwin can discard short-child PTY output before the gather fence. The eighth
+PTYLaunchCapture patch adds a CLOEXEC permission gate plus a parent-owned slave
+keeper before user exec, preventing the last-slave lifetime gap on the guarded
+path. Permission follows I/O/monitor preparation, failed/cancelled preparations
+never execute, and the existing reaper handles aborts. Descriptor-local SIGPIPE
+suppression avoids global signal changes. After fork only async-signal-safe
+calls run in the child; one keeper FD remains per live guarded session and is
+closed off main after callback/drain ownership ends. Legacy public fork behavior
+is unchanged; active guarded policy is launch-scoped, not a runtime backend switch.
+The independent C probe retains the original losing unretained ten-byte control
+and a guarded delayed-capture case with exactly the same output. Plain native
+printf and real LocalProcess stalled-start regressions use no program ACK.
+No production delay, C-core rebuild, altered wire bytes or lossless-all-kernels
+claim is made; explicit discard/tcflush/arbitrary descendants remain outside it.
+Foreground/root terminal close is not a promise to kill escaped/disowned daemon
+trees. The private foreground-force test uses an owned file lease and a rescue
+FIFO, not cached-PID kill operations. Test counts are not local-shell GUI,
+whole-app migration, cross-device or performance certification.

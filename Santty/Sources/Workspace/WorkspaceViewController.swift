@@ -1,6 +1,5 @@
 import AppKit
 import Combine
-import GhosttyTerminal
 
 struct PaneFocusRatios: Codable, Sendable, Equatable {
     var horizontal: CGFloat
@@ -212,10 +211,21 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         guard let id = request.paneID,
             let pane = paneOwnerTabs.lazy.compactMap({ $0.paneControllers[id] }).first
         else { throw CLIError("Pane not found. Run santty list --json to refresh pane IDs.", code: "pane_not_found") }
-        guard let terminal = pane as? TerminalPaneController else {
+        guard pane is TerminalPaneController else {
             throw CLIError("Only terminal panes support reading text.")
         }
-        return try terminal.readForCLI(request)
+        throw CLIError("Use the asynchronous terminal read boundary.",code:"read_unavailable")
+    }
+
+    func handleCLIReadRequest(_ request: CLIRequest) async throws -> CLIResponse {
+        try request.validate()
+        guard let id = request.paneID, let tab = paneOwnerTabs.first(where:{ $0.paneControllers[id] != nil }),
+              let target = tab.paneControllers[id] else { throw CLIError("Pane not found. Run santty list --json to refresh pane IDs.",code:"pane_not_found") }
+        guard let pane = target as? TerminalPaneController else { throw CLIError("Only terminal panes support reading text.") }
+        return try await pane.readForCLI(request,isCurrent:{ [weak self, weak tab, weak pane] in
+            guard let self, let tab, let pane else { return false }
+            return self.paneOwnerTabs.contains { $0 === tab } && tab.paneControllers[id] === pane
+        })
     }
 
     private var tilingView: WorkspaceTilingView?
@@ -230,6 +240,9 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     private var paneNamesVisible = false
     private var isCommandHeld = false
     private var isClosingWindow = false
+    private var windowCloseTask: Task<Bool, Never>?
+    private var preparedWindowScope: (() -> Bool)?
+    var resourceCloseErrorHandler: ((any Error) -> Void)?
     private var cliWindowClosePending = false
     private var cliWindowCloseRequestID: String?
     private var cliPreservingResponder = false
@@ -264,10 +277,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
               let pane = focusedTerminalPaneController, let target = pane.inputSourceTargetView,
               let window = target.window, window.isKeyWindow, window.attachedSheet == nil,
               window.firstResponder === target else { return nil }
-        return .init(paneID: pane.id, view: target, foreground: { [weak pane] in
-            guard let pane else { throw CLIError("The terminal pane was closed") }
-            return try await pane.inputSourceForeground()
-        })
+        return pane.nativeInputSourceTarget
     }
 
     private var focusedBrowserPaneController: BrowserPaneController? {
@@ -563,14 +573,10 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             return true
         }
 
-        guard confirmCloseWindowIfNeeded() else { return false }
-        guard workspacePersistenceActivated else { return true }
-        guard !isClosingWindow else { return false }
-        isClosingWindow = true
+        guard confirmCloseWindowIfNeeded(), !isClosingWindow else { return false }
         Task { [weak self] in
-            guard let self else { return }
-            defer { isClosingWindow = false }
-            if await confirmWorkspaceSaveForClose() { requestWindowClose(workspaceSaveConfirmed: true) }
+            guard let self, await self.prepareForWindowClose() else { return }
+            self.requestWindowClose(workspaceSaveConfirmed:true)
         }
         return false
     }
@@ -832,6 +838,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     @objc func newTab(_: Any?) {
+        guard !isClosingWindow else { return }
         sidebarIsFocused = false
         updatePanePresentation(in: sidebar.tab)
 
@@ -898,7 +905,14 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         updatePaneName(field.stringValue, for: pane)
     }
 
+    func copyFocusedPaneID(to pasteboard: NSPasteboard = .general) {
+        guard let paneID = focusedPaneController?.id else { return }
+        pasteboard.clearContents()
+        pasteboard.setString(paneID.uuidString, forType: .string)
+    }
+
     private func updatePaneName(_ name: String, for pane: any PaneControlling) {
+        guard !isClosingWindow else { return }
 
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         pane.name = trimmed.isEmpty ? nil : trimmed
@@ -972,9 +986,20 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         runPending: Bool = false,
         viewerOnly: Bool = false
     ) -> TerminalPaneController {
-        let herdr = (kind ?? workspaceKind) == .herdr ? HerdrTerminalSession(paneID: id, cwd: workingDirectory, binding: binding, remote: kind == nil ? workspaceRemote : remote, runPending: runPending, viewerOnly: viewerOnly, client: herdrCoreClient) : nil
-        herdr?.beforeRun = { [weak self] in try await self?.flushWorkspaceState() }
-        let paneController = TerminalPaneController(id: id, workingDirectory: workingDirectory, herdrSession: herdr)
+        let paneController: TerminalPaneController
+        if (kind ?? workspaceKind) == .herdr {
+            do {
+                let owner = try NativeTerminalPaneSession.herdr(paneID:id,driver:GhosttyVTDriver(),client:herdrCoreClient,
+                    workingDirectory:workingDirectory,binding:binding,remote:kind == nil ? workspaceRemote : remote,
+                    runPending:runPending,viewerOnly:viewerOnly,controlSocketPath:CLITransport.socketPath,
+                    beforeRun:{ [weak self] in try await self?.flushWorkspaceState() })
+                paneController = TerminalPaneController(id:id,workingDirectory:workingDirectory,session:owner)
+            } catch { paneController = TerminalPaneController(id:id,workingDirectory:workingDirectory,initializationError:error) }
+        } else { paneController = TerminalPaneController(id:id,workingDirectory:workingDirectory) }
+        paneController.isCurrent = { [weak self, weak paneController] in
+            guard let self, let paneController else { return false }
+            return self.paneOwnerTabs.contains { $0.paneControllers[id] === paneController }
+        }
         paneController.updateAppearance()
 
         paneController.onFocusRequest = { [weak self] paneID in
@@ -1043,6 +1068,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func splitFocusedPane(along axis: SplitAxis) {
+        guard !isClosingWindow else { return }
         guard canSplitFocusedPane else {
             NSSound.beep()
             return
@@ -1071,6 +1097,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         along axis: SplitAxis,
         makeNewPaneController: () -> any PaneControlling
     ) {
+        guard !isClosingWindow else { return }
         guard
             let tabState = activePaneTab,
             tabState.focusedPaneController != nil,
@@ -1089,6 +1116,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func replaceFocusedPane(with newPaneController: any PaneControlling) {
+        guard !isClosingWindow else { return }
         guard
             let tabState = selectedTabState,
             let focusedPaneID = tabState.focusedPaneID,
@@ -1419,10 +1447,11 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         performClosePane(withID: paneID, in: tabState)
     }
 
-    private func performClosePane(withID paneID: PaneID, in tabState: WorkspaceTabState, forCLI: Bool = false) {
-        if let pane = tabState.paneControllers[paneID], closeHerdrPanes([pane], then: { [weak self, weak tabState] in
+    private func performClosePane(withID paneID: PaneID, in tabState: WorkspaceTabState, forCLI: Bool = false, resourcesClosed: Bool = false) {
+        guard !isClosingWindow else { return }
+        if !resourcesClosed, let pane = tabState.paneControllers[paneID], closeHerdrPanes([pane], then: { [weak self, weak tabState] in
             guard let self, let tabState else { return }
-            self.performClosePane(withID: paneID, in: tabState)
+            self.performClosePane(withID:paneID,in:tabState,forCLI:forCLI,resourcesClosed:true)
         }) { return }
 
         if tabState === sidebar.tab {
@@ -1494,26 +1523,64 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         else { closeTab(withID: tabState.id, bypassTabConfirmation: true) }
     }
 
-    private func closeHerdrPanes(_ panes: [any PaneControlling], then completion: @escaping @MainActor () -> Void) -> Bool {
-        let terminals = panes.compactMap { $0 as? TerminalPaneController }.filter { $0.herdrSession != nil && $0.herdrSession?.state != .finished }
-        guard !terminals.isEmpty else { return false }
-        let ids = Set(terminals.map(\.id))
-        guard closingHerdrPaneIDs.isDisjoint(with: ids) else { return true }
+    /// Membership snapshot only, not a layout/history mirror. New panes/tabs
+    /// must not be silently discarded by a close that was already awaiting IO.
+    private func closeScope(_ owners: [WorkspaceTabState], exactAllTabs: Bool = false) -> @MainActor () -> Bool {
+        let snapshots = owners.map { ($0,$0.paneControllers) }
+        let identities = Set(owners.map(ObjectIdentifier.init))
+        return { [weak self] in
+            guard let self else { return false }
+            if exactAllTabs, Set(self.paneOwnerTabs.map(ObjectIdentifier.init)) != identities { return false }
+            return snapshots.allSatisfy { tab, panes in
+                self.paneOwnerTabs.contains { $0 === tab }
+                    && tab.paneControllers.count == panes.count
+                    && panes.allSatisfy { tab.paneControllers[$0.key] === $0.value }
+            }
+        }
+    }
+
+    private func closeTargets(_ panes: [any PaneControlling]) throws -> [PaneCloseTarget] {
+        try panes.map { pane in
+            guard let tab = paneOwnerTabs.first(where:{ $0.paneControllers[pane.id] === pane }) else { throw PaneCloseFailure.paneChanged }
+            let handle = (pane as? TerminalPaneController)?.closeHandle
+            return PaneCloseTarget(id:pane.id,owner:pane,
+                validate:{ try handle?.validate($0) },begin:{ try handle?.begin($0) },
+                finish:{ try await handle?.finish($0) },isCurrent:{ [weak self, weak tab, pane] in
+                    guard let self, let tab else { return false }
+                    return self.paneOwnerTabs.contains { $0 === tab } && tab.paneControllers[pane.id] === pane
+                })
+        }
+    }
+
+    /// All concrete native Local/Herdr owners in the affected containers are
+    /// validated and fenced before independent awaited cleanup and layout commit.
+    private func closeHerdrPanes(_ panes: [any PaneControlling], isScopeCurrent: @escaping @MainActor () -> Bool = { true },
+                                 then completion: @escaping @MainActor () -> Void) -> Bool {
+        guard panes.contains(where:{ ($0 as? TerminalPaneController)?.closeHandle.needsAwait(for:.terminate) == true }) else { return false }
+        let ids = Set(panes.map(\.id))
+        guard closingHerdrPaneIDs.isDisjoint(with:ids) else { return true }
+        let targets: [PaneCloseTarget]
+        do { targets = try closeTargets(panes) } catch { return true }
+        let affected = paneOwnerTabs.filter { tab in panes.contains { tab.paneControllers[$0.id] === $0 } }
+        let matches = closeScope(affected)
         closingHerdrPaneIDs.formUnion(ids)
         Task { [weak self] in
             guard let self else { return }
             defer { self.closingHerdrPaneIDs.subtract(ids) }
             do {
-                for terminal in terminals { try await terminal.herdrSession?.closeTerminal() }
-                completion()
-            } catch {
-                let alert = NSAlert()
-                alert.messageText = "Could Not Close Herdr Terminal"
-                alert.informativeText = error.localizedDescription
-                alert.runModal()
-            }
+                try await PaneCloseTransaction.perform(targets,intent:.terminate,
+                    scopeIsCurrent:{ matches() && isScopeCurrent() },then:completion)
+            } catch { self.presentResourceCloseError(error) }
         }
         return true
+    }
+
+    private func presentResourceCloseError(_ error: any Error) {
+        if let resourceCloseErrorHandler { resourceCloseErrorHandler(error); return }
+        let alert = NSAlert()
+        alert.messageText = "Could Not Close Terminal Resources"
+        alert.informativeText = error.localizedDescription
+        alert.runModal()
     }
 
     private func removePaneControllerState(for paneID: PaneID, in tabState: WorkspaceTabState) {
@@ -1597,7 +1664,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
             let targetPaneID = directionalTiledPaneTarget(
                 from: focusedPaneID,
                 direction: direction,
-                in: tabState, acrossWindow: sidebar.isVisible
+                in: tabState, acrossWindow: sidebar.isVisible, wrapping: true
             )
         else {
             return
@@ -1609,7 +1676,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     private func directionalTiledPaneTarget(
         from focusedPaneID: PaneID,
         direction: PaneFocusDirection,
-        in tabState: WorkspaceTabState, acrossWindow: Bool = false
+        in tabState: WorkspaceTabState, acrossWindow: Bool = false, wrapping: Bool = false
     ) -> PaneID? {
         var unfoldedFrames: [PaneID: NSRect] = [:]
         if let tilingView, !tilingView.collapsedPaneIDs.isEmpty,
@@ -1629,37 +1696,57 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         }
 
         let owners = acrossWindow ? ([selectedTabState].compactMap { $0 } + (sidebar.isVisible ? [sidebar.tab] : [])) : [tabState]
-        return owners.flatMap { owner in owner.paneControllers.keys.map { ($0, owner) } }
-            .compactMap { paneID, owner -> DirectionalPaneCandidate? in
-                guard paneID != focusedPaneID,
-                    owner.isPaneTiled(paneID),
+        let panes = owners.flatMap { owner in owner.paneControllers.keys.map { ($0, owner) } }
+            .compactMap { paneID, owner -> (paneID: PaneID, frame: NSRect, focusRecency: Int?)? in
+                guard owner.isPaneTiled(paneID),
                     let candidateFrame = unfoldedFrames[paneID]
                         ?? renderedPaneFrame(for: paneID, in: owner)
                 else {
                     return nil
                 }
 
-                return DirectionalPaneCandidate(
-                    paneID: paneID,
-                    score: directionalFocusScore(
-                        from: focusedFrame,
-                        to: candidateFrame,
-                        direction: direction,
-                        focusRecency: acrossWindow ? (windowFocusHistory.firstIndex(of: paneID) ?? owner.focusRecency(for: paneID).map { windowFocusHistory.count + $0 }) : tabState.focusRecency(for: paneID)
-                    )
+                return (
+                    paneID, candidateFrame,
+                    acrossWindow ? (windowFocusHistory.firstIndex(of: paneID) ?? owner.focusRecency(for: paneID).map { windowFocusHistory.count + $0 }) : tabState.focusRecency(for: paneID)
                 )
             }
-            .compactMap { candidate -> DirectionalPaneCandidate? in
-                candidate.score == nil ? nil : candidate
+
+        func target(from frame: NSRect, includingFocusedPane: Bool) -> PaneID? {
+            panes.compactMap { pane -> DirectionalPaneCandidate? in
+                guard includingFocusedPane || pane.paneID != focusedPaneID,
+                    let score = directionalFocusScore(
+                        from: frame, to: pane.frame, direction: direction,
+                        focusRecency: pane.focusRecency
+                    )
+                else { return nil }
+                return DirectionalPaneCandidate(paneID: pane.paneID, score: score)
             }
             .min { lhs, rhs in
                 guard let lhsScore = lhs.score, let rhsScore = rhs.score else {
                     return false
                 }
-
                 return lhsScore == rhsScore ? lhs.paneID.uuidString < rhs.paneID.uuidString : lhsScore < rhsScore
-            }?
-            .paneID
+            }?.paneID
+        }
+
+        if let paneID = target(from: focusedFrame, includingFocusedPane: false) {
+            return paneID
+        }
+        guard wrapping else { return nil }
+
+        // Repeat the same directional search from just beyond the opposite edge.
+        // Keep the perpendicular position and all existing candidate ranking rules.
+        let bounds = panes.reduce(focusedFrame) { $0.union($1.frame) }
+        let wrappedFrame: NSRect
+        switch direction {
+        case .left: wrappedFrame = focusedFrame.offsetBy(dx: bounds.width, dy: 0)
+        case .right: wrappedFrame = focusedFrame.offsetBy(dx: -bounds.width, dy: 0)
+        case .above: wrappedFrame = focusedFrame.offsetBy(dx: 0, dy: -bounds.height)
+        case .below: wrappedFrame = focusedFrame.offsetBy(dx: 0, dy: bounds.height)
+        }
+        // Let the current pane win when there is no other pane on this axis.
+        let paneID = target(from: wrappedFrame, includingFocusedPane: true)
+        return paneID == focusedPaneID ? nil : paneID
     }
 
     private func renderedPaneFrame(for paneID: PaneID, in tabState: WorkspaceTabState) -> NSRect? {
@@ -1766,6 +1853,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func selectTab(withID tabID: UUID, restorePreviousAutoZoom: Bool = true) {
+        guard !isClosingWindow else { return }
         guard tabs.contains(where: { $0.id == tabID }) else { return }
         sidebarIsFocused = false
         updatePanePresentation(in: sidebar.tab)
@@ -1824,7 +1912,8 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         updateTabStrip()
     }
 
-    private func closeTab(withID tabID: UUID, bypassTabConfirmation: Bool = false) {
+    private func closeTab(withID tabID: UUID, bypassTabConfirmation: Bool = false, windowConfirmationGranted: Bool = false) {
+        guard !isClosingWindow else { return }
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else {
             return
         }
@@ -1839,10 +1928,10 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
         if tabs.count == 1 {
             if !bypassTabConfirmation, tabState.paneControllers.values.contains(where: { ($0 as? TerminalPaneController)?.herdrSession != nil }),
                !confirmCloseTabIfNeeded(tabState) { return }
-            if closeHerdrPanes(Array(tabState.paneControllers.values), then: { [weak self] in self?.closeTab(withID: tabID, bypassTabConfirmation: true) }) { return }
-            guard confirmCloseWindowIfNeeded() else {
-                return
-            }
+            guard windowConfirmationGranted || confirmCloseWindowIfNeeded() else { return }
+            if closeHerdrPanes(Array(tabState.paneControllers.values), then: { [weak self] in
+                self?.closeTab(withID:tabID,bypassTabConfirmation:true,windowConfirmationGranted:true)
+            }) { return }
 
             tabs.remove(at: index)
             selectedTabID = nil
@@ -1882,6 +1971,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func updateSelectedTabTitle(_ title: String) {
+        guard !isClosingWindow else { return }
         guard let selectedTabState else {
             return
         }
@@ -2826,6 +2916,13 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
                 perform: { [weak self] in self?.renamePane(nil) }
             ),
             AppCommand(
+                id: "pane.copyID",
+                title: "Copy Pane ID",
+                shortcut: nil,
+                isEnabled: focusedPaneController != nil,
+                perform: { [weak self] in self?.copyFocusedPaneID() }
+            ),
+            AppCommand(
                 id: "pane.split.horizontal",
                 title: "Split Horizontally",
                 shortcut: KeybindingSettings.displayShortcut(for: .splitPaneHorizontally),
@@ -3164,6 +3261,7 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
     }
 
     private func startPaneControllersIfNeeded(in tabState: WorkspaceTabState, allowFocus: Bool = true) {
+        guard hasAppeared else { return }
         for pane in tabState.paneControllers.values {
             // Empty browsers start by focusing their address field. Background CLI
             // operations must leave that to an explicit later focus/presentation.
@@ -3209,18 +3307,19 @@ final class WorkspaceViewController: NSViewController, NSMenuItemValidation, NSM
 
     private func requestWindowClose(workspaceSaveConfirmed: Bool = false) {
         didRequestWindowCloseForTesting = true
-
-        guard let window = view.window else {
-            return
-        }
-
-        if !workspaceSaveConfirmed, workspaceStore != nil, workspacePersistenceActivated {
-            Task { [weak self] in
-                guard let self, await self.confirmWorkspaceSaveForClose() else { return }
+        guard let window = view.window else { return }
+        // A CLI reply may already have been written, but sidebar/background
+        // viewers still need final detach and a post-run save before destruction.
+        if !workspaceSaveConfirmed || windowCloseTask == nil {
+            Task { [weak self, weak window] in
+                guard let self, let window, await self.prepareForWindowClose() else { return }
                 self.bypassNextWindowCloseConfirmation = true
                 window.performClose(nil)
             }
         } else {
+            guard preparedWindowScope?() == true else {
+                windowCloseTask = nil; isClosingWindow = false; return
+            }
             bypassNextWindowCloseConfirmation = true
             window.performClose(nil)
         }
@@ -3378,6 +3477,11 @@ extension WorkspaceViewController {
         view.layoutSubtreeIfNeeded()
     }
 
+    /// Ordering/identity test seam: no process launch, focus or layout rewrite.
+    func debugInstallPaneForCloseTesting(_ pane: TerminalPaneController) {
+        guard let tab = paneOwnerTabs.first(where:{ $0.paneControllers[pane.id] != nil }) else { return }
+        tab.paneControllers[pane.id] = pane
+    }
     var debugLayoutNode: LayoutNode? { selectedTabState?.layoutNode }
     var debugPaneIDsInTraversalOrder: [PaneID] {
         selectedTabState?.layoutNode?.paneIDsInTraversalOrder ?? []
@@ -3464,8 +3568,11 @@ extension WorkspaceViewController {
         selectedTabState?.terminalPaneController(for: paneID)?.debugScrollModeIndicatorFrames
     }
 
-    func debugRenderedTerminalConfig(for paneID: PaneID) -> String? {
-        selectedTabState?.terminalPaneController(for: paneID)?.debugRenderedTerminalConfig
+    func debugLaunchForTesting(for paneID: PaneID) -> NativeLocalPTYLaunch? {
+        selectedTabState?.terminalPaneController(for:paneID)?.session?.localLaunch
+    }
+    func debugTerminalSettings(for paneID: PaneID) -> NativeTerminalSettings? {
+        selectedTabState?.terminalPaneController(for: paneID)?.debugNativeSettings
     }
 
     func debugPlaceholderFrame(for paneID: PaneID) -> NSRect? {
@@ -3583,7 +3690,7 @@ extension WorkspaceViewController {
     func debugSimulatePaneExit(withID paneID: PaneID) {
         tabState(containing: paneID)?
             .terminalPaneController(for: paneID)?
-            .terminalDidClose(processAlive: false)
+            .simulateExitForTesting()
     }
 
     func debugUpdateSplitFractions(at path: [LayoutPathComponent], to fractions: [CGFloat]) {
@@ -3647,7 +3754,7 @@ extension WorkspaceViewController {
             return
         }
 
-        paneController.terminalDidChangeTitle(title)
+        paneController.setTitleForTesting(title)
     }
 
     func debugSetPaneWorkingDirectory(_ workingDirectory: String, for paneID: PaneID) {
@@ -3658,7 +3765,7 @@ extension WorkspaceViewController {
             return
         }
 
-        paneController.terminalDidChangeWorkingDirectory(workingDirectory)
+        paneController.setWorkingDirectoryForTesting(workingDirectory)
     }
 
     func debugPerformCommand(withID commandID: String) {
@@ -3860,7 +3967,11 @@ extension WorkspaceViewController {
 
     private func removeCurrentLocalWorkspace() {
         let currentID = localWorkspaceID
-        if closeHerdrPanes(tabs.flatMap { Array($0.paneControllers.values) }, then: { [weak self] in
+        let tabIdentities = Set(tabs.map(ObjectIdentifier.init))
+        if closeHerdrPanes(tabs.flatMap { Array($0.paneControllers.values) }, isScopeCurrent:{ [weak self] in
+            guard let self else { return false }
+            return self.localWorkspaceID == currentID && Set(self.tabs.map(ObjectIdentifier.init)) == tabIdentities
+        }, then: { [weak self] in
             guard let self, self.localWorkspaceID == currentID else { return }
             self.removeCurrentLocalWorkspace()
         }) { return }
@@ -3877,6 +3988,7 @@ extension WorkspaceViewController {
     }
 
     func selectLocalWorkspace(_ id: UUID) {
+        guard !isClosingWindow else { return }
         guard closingHerdrPaneIDs.isEmpty else { return }
         guard id == localWorkspaceID || otherLocalWorkspaces.contains(where: { $0.id == id }) else { return }
         sidebarIsFocused = false
@@ -3973,6 +4085,7 @@ extension WorkspaceViewController {
     }
 
     private func scheduleWorkspaceSave() {
+        guard !isClosingWindow else { return } // final close saves explicitly after pending runs settle
         refreshHerdrSharing()
         guard workspaceStore?.canWrite == true, workspacePersistenceActivated, !suppressWorkspaceSaving else { return }
         workspaceSaveTask?.cancel()
@@ -3994,6 +4107,43 @@ extension WorkspaceViewController {
     }
 
     var hasWorkspacePersistence: Bool { workspaceStore != nil && workspacePersistenceActivated }
+
+    /// Window and application quit share one final-detach/save operation across
+    /// all workspaces, tabs and the sidebar. No Herdr terminal is killed here.
+    func prepareForWindowClose() async -> Bool {
+        guard !cliWindowClosePending else { return false } // socket result must precede final-window destruction
+        if let windowCloseTask {
+            let result = await windowCloseTask.value
+            if result, preparedWindowScope?() != true {
+                self.windowCloseTask = nil; isClosingWindow = false; return false
+            }
+            return result
+        }
+        guard closingHerdrPaneIDs.isEmpty else { return false }
+        let matches = closeScope(paneOwnerTabs,exactAllTabs:true)
+        preparedWindowScope = matches
+        let targets: [PaneCloseTarget]
+        do { targets = try closeTargets(paneOwnerTabs.flatMap { Array($0.paneControllers.values) }) }
+        catch { return false }
+        isClosingWindow = true
+        let operation = Task { @MainActor [self] in
+            guard await confirmWorkspaceSaveForClose(), matches() else { isClosingWindow = false; windowCloseTask = nil; return false }
+            do {
+                try await PaneCloseTransaction.perform(targets,intent:.detach,scopeIsCurrent:matches,then:{})
+                // A run may have completed while detach awaited it. Persist its
+                // final binding/ambiguity, not the pre-detach snapshot alone.
+                guard await confirmWorkspaceSaveForClose(), matches() else { isClosingWindow = false; windowCloseTask = nil; return false }
+                return true // keep the busy fence until actual window/app exit
+            } catch {
+                isClosingWindow = false; windowCloseTask = nil
+                presentResourceCloseError(error); return false
+            }
+        }
+        windowCloseTask = operation
+        let prepared = await operation.value
+        if prepared, !matches() { windowCloseTask = nil; isClosingWindow = false; return false }
+        return prepared
+    }
 
     func confirmWorkspaceSaveForClose() async -> Bool {
         do { try await flushWorkspaceState(); return true }
@@ -4084,6 +4234,7 @@ extension WorkspaceViewController {
     }
 
     private func replaceRestoredPane(_ id: PaneID, with controller: any PaneControlling) {
+        guard !isClosingWindow else { return }
         guard let tab = tabState(containing: id), tab.paneControllers[id] is RestoredPanePlaceholderController else { return }
         controller.name = tab.paneControllers[id]?.name
         tab.paneControllers[id] = controller
@@ -4403,6 +4554,7 @@ extension WorkspaceViewController {
               view.window?.attachedSheet == nil, NSApp.modalWindow == nil else {
             throw CLIError("Finish the current close operation first.", code: "busy")
         }
+        let browserURL = try request.initialBrowserURL()
         if request.command == "pane.new" || request.command == "pane.split" {
             guard paneOwnerTabs.reduce(0, { $0 + $1.paneControllers.count }) < 512 else {
                 throw CLIError("Workspace pane limit reached.", code: "limit_reached")
@@ -4419,6 +4571,9 @@ extension WorkspaceViewController {
             if owner.id == localWorkspaceID { tabs.append(tab) }
             else if let index = otherLocalWorkspaces.firstIndex(where: { $0.id == owner.id }) {
                 otherLocalWorkspaces[index].tabs.append(tab)
+            }
+            if let browserURL, let browser = pane as? BrowserPaneController {
+                browser.loadURL(browserURL, focus: false)
             }
             if request.focus == true { cliFocus(pane.id, tab: tab, owner: owner, activate: false) }
             else { cliRefresh(tab) }
@@ -4443,12 +4598,14 @@ extension WorkspaceViewController {
             let preserveResponder = focusedPaneController?.id != id
             closingHerdrPaneIDs.insert(id)
             defer { closingHerdrPaneIDs.remove(id) }
-            if let terminal = pane as? TerminalPaneController { try await terminal.herdrSession?.closeTerminal() }
-            // GUI actions may have run during the await. Never remove a replacement.
-            guard tab.paneControllers[id] === pane else { throw CLIError("Pane changed while closing.", code: "pane_changed") }
-            cliPreservingResponder = preserveResponder
-            performClosePane(withID: id, in: tab, forCLI: true)
-            cliPreservingResponder = false
+            let targets = try closeTargets([pane])
+            do {
+                try await PaneCloseTransaction.perform(targets,intent:.terminate,scopeIsCurrent:closeScope([tab])) {
+                    cliPreservingResponder = preserveResponder
+                    defer { cliPreservingResponder = false }
+                    performClosePane(withID:id,in:tab,forCLI:true,resourcesClosed:true)
+                }
+            } catch PaneCloseFailure.paneChanged { throw CLIError("Pane changed while closing.",code:"pane_changed") }
             if cliWindowClosePending { cliWindowCloseRequestID = request.requestID }
             if preserveResponder, let responder, let responderView = responder as? NSView, responderView.window === window {
                 window?.makeFirstResponder(responder)
@@ -4456,7 +4613,7 @@ extension WorkspaceViewController {
             scheduleWorkspaceSave()
             do { try await flushWorkspaceState() }
             catch {
-                cliWindowClosePending = false
+                cliWindowClosePending = false; cliWindowCloseRequestID = nil
                 throw CLIError("Pane closed, but saving workspace state failed: \(error.localizedDescription)", code: "persistence_failed")
             }
             response.status = "closed"
@@ -4470,6 +4627,9 @@ extension WorkspaceViewController {
                              axis: horizontal ? .horizontal : .vertical,
                              before: request.direction == "left" || request.direction == "up", focus: false) else {
                 throw CLIError("Could not split pane.", code: "unsupported_layout")
+            }
+            if let browserURL, let browser = newPane as? BrowserPaneController {
+                browser.loadURL(browserURL, focus: false)
             }
             if request.focus == true { cliFocus(newPane.id, tab: tab, owner: owner, activate: false) }
             response.paneID = newPane.id; response.status = "created"

@@ -1,0 +1,18 @@
+--- a/Sources/SwiftTerm/Mac/MacTerminalRenderView.swift
++++ b/Sources/SwiftTerm/Mac/MacTerminalRenderView.swift
+@@ -198,6 +198,15 @@
+         frameSignal.markDirty()
+     }
+ 
++    /// Prepares and draws the current external frame synchronously on the
++    /// main actor. A virtualized NSScrollView host uses this at row boundaries
++    /// so it can relocate its bounded surface without showing an old snapshot
++    /// at the new document position. Fractional scrolling needs no new frame.
++    /// Normal output should continue to use requestRedraw() for coalescing.
++    public func presentExternalFrame() {
++        frameTick()
++    }
++
+     // MARK: CoreGraphicsPaintHost
+ 
+     var cellDimension: TerminalView.CellDimension!

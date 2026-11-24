@@ -1,5 +1,4 @@
 import Foundation
-import GhosttyTerminal
 
 @MainActor
 final class HerdrTerminalSession {
@@ -18,7 +17,7 @@ final class HerdrTerminalSession {
     private var machine: HerdrMachine?
     private let cwd: String?
     private let client: HerdrCoreClient
-    private var viewport: InMemoryTerminalViewport?
+    private var viewport: TerminalStreamViewport?
     private var surfaceReady = false
     private var requested = false
     private var stopped = false
@@ -30,17 +29,34 @@ final class HerdrTerminalSession {
     private var sentSize: [UInt16]?
     private var sentFacts: Data?
     private(set) var createResultUnknown = false
-    private let inputSink = HerdrTerminalInput()
-    lazy var memory = InMemoryTerminalSession(write: { [inputSink] data in
+    private nonisolated let inputSink = HerdrTerminalInput()
+    typealias OutputFactory = @MainActor (
+        @escaping @Sendable (Data) -> Void,
+        @escaping @Sendable (TerminalStreamViewport) -> Void
+    ) -> any TerminalStreamEndpoint
+    private let outputFactory: OutputFactory
+    private let controlSocketPath: String?
+    private let displayColors: @MainActor () -> [String: String]
+    private(set) lazy var output: any TerminalStreamEndpoint = outputFactory({ [inputSink] data in
         inputSink.write(data)
-    }, resize: { [weak self] viewport in
-        Task { @MainActor [weak self] in self?.resize(viewport) }
+    }, { [weak self] viewport in
+        Task { @MainActor [weak self] in self?.updateViewport(viewport) }
     })
 
-    init(paneID: UUID, cwd: String?, binding: HerdrTerminalBinding?, remote: HerdrRemote? = nil, runPending: Bool = false, viewerOnly: Bool = false, client: HerdrCoreClient = .shared) {
+    init(paneID: UUID, cwd: String?, binding: HerdrTerminalBinding?, remote: HerdrRemote? = nil,
+         runPending: Bool = false, viewerOnly: Bool = false, client: HerdrCoreClient = .shared,
+         outputFactory: @escaping OutputFactory, controlSocketPath: String? = nil,
+         displayColors: @escaping @MainActor () -> [String: String] = { [:] }) {
         self.paneID = paneID; self.cwd = cwd; self.binding = binding; self.client = client
         self.remote = remote; self.createResultUnknown = runPending; self.viewerOnly = viewerOnly
+        self.outputFactory = outputFactory; self.controlSocketPath = controlSocketPath
+        self.displayColors = displayColors
     }
+
+    /// Synchronous routing to the channel current at this call; never queues
+    /// input on the main actor for delivery after a reconnect.
+    @discardableResult
+    nonisolated func writeInput(_ data: Data) -> Bool { inputSink.write(data) }
 
     func start() {
         guard !requested else { return }
@@ -110,7 +126,7 @@ final class HerdrTerminalSession {
                         }
                         var environment = ["TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "Santty",
                                            "SANTTY_PANE_ID": paneID.uuidString]
-                        if remote == nil { environment["SANTTY_CONTROL_SOCKET"] = CLITransport.socketPath }
+                        if remote == nil, let controlSocketPath { environment["SANTTY_CONTROL_SOCKET"] = controlSocketPath }
                         var params: [String: Any] = ["keep": true, "no_parent": true,
                             "labels": ["santty-pane": paneID.uuidString], "env": environment]
                         if let remote {
@@ -156,22 +172,28 @@ final class HerdrTerminalSession {
                     ["terminal": binding.routedAddress, "cols": viewport.columns, "rows": viewport.rows,
                      "history": client.settings.historyLines, "resumed": true, "display": displayFacts()])
                 guard !stopped, surfaceReady, remote == nil || remoteReady else { connection.detach(channel: attached.channel); return }
+                guard client.binding(for: attached.terminal, remote: remote, connection: connection) == binding else {
+                    connection.detach(channel: attached.channel)
+                    throw HerdrCoreError("Core attached a different terminal identity", kind: "identity_changed")
+                }
                 onReset?()
-                memory.receive("\u{1b}c\u{1b}[3J")
+                output.reset()
                 self.connection = connection
                 channel = attached.channel
-                let consumer = HerdrTerminalOutput(memory: memory, connection: connection, channel: attached.channel) { [weak self] error in
+                let consumer = HerdrTerminalOutput(output: output, connection: connection, channel: attached.channel) { [weak self] error in
                     Task { @MainActor [weak self] in
                         guard let self, self.connection === connection, self.channel == attached.channel else { return }
                         self.streamEnded(error)
                     }
                 }
                 self.consumer = consumer
+                // Restore data may already contain queries. Bind replies before
+                // registering the stream, not after its first frames can parse.
+                inputSink.attach(connection: connection, channel: attached.channel)
                 connection.register(channel: attached.channel) { result in consumer.receive(result) }
                 apply(attached.terminal)
                 state = .live
-                inputSink.attach(connection: connection, channel: attached.channel)
-                if let latest = self.viewport { resize(latest) }
+                if let latest = self.viewport { updateViewport(latest) }
                 setFocused(focused)
                 onChange?()
             } catch is CancellationError { }
@@ -193,7 +215,7 @@ final class HerdrTerminalSession {
         onChange?()
     }
 
-    private func resize(_ viewport: InMemoryTerminalViewport) {
+    func updateViewport(_ viewport: TerminalStreamViewport) {
         guard viewport.columns > 0, viewport.rows > 0 else { return }
         self.viewport = viewport
         if let channel, let connection {
@@ -220,13 +242,7 @@ final class HerdrTerminalSession {
     }
 
     private func displayFacts() -> [String: Any] {
-        var facts: [String: Any] = [:]
-        if let theme = TerminalDefaults.themeDefinition {
-            func hex(_ text: String) -> String { text.hasPrefix("#") ? text : "#" + text }
-            facts["fg"] = hex(theme.foreground)
-            facts["bg"] = hex(theme.background)
-            facts["cursor"] = hex(theme.cursorColor ?? theme.foreground)
-        }
+        var facts: [String: Any] = displayColors().mapValues { $0 as Any }
         if let viewport, viewport.cellWidthPixels > 0, viewport.cellHeightPixels > 0 {
             facts["cell"] = [viewport.cellWidthPixels, viewport.cellHeightPixels]
         }
@@ -267,10 +283,30 @@ final class HerdrTerminalSession {
         if let channel { connection?.detach(channel: channel) }
         channel = nil; connection = nil; sentSize = nil; sentFacts = nil
     }
-    func closeTerminal() async throws {
+    /// Synchronous close admission fence; no new viewer attach/input while a
+    /// multi-pane close waits for its peers. Does not kill a program.
+    func beginViewerClose() {
         stopped = true
         disconnectViewer()
         client.removeObserver(observerID)
+        // Keep the machine observer until cleanup succeeds. A failed remote
+        // close must still observe recovery and reconnect the original binding.
+    }
+
+    /// Final viewer detach for window/app closure, not transient view hiding.
+    /// Await a pending run so its binding/ambiguity can still be saved, but
+    /// never kill the program or reconnect this viewer afterwards.
+    func detachViewer() async {
+        surfaceReady = false
+        beginViewerClose()
+        client.removeMachineObserver(observerID)
+        if let task { await task.value }
+        if state != .finished { state = .disconnected }
+        onChange?()
+    }
+
+    func closeTerminal() async throws {
+        beginViewerClose()
         if let task { await task.value }
         if viewerOnly {
             client.removeMachineObserver(observerID)
@@ -325,12 +361,16 @@ private final class HerdrTerminalInput: @unchecked Sendable {
         lock.withLock { target = (connection, channel) }
     }
     func detach() { lock.withLock { target = nil } }
-    func write(_ data: Data) {
+    @discardableResult
+    func write(_ data: Data) -> Bool {
         lock.withLock {
-            guard let (connection, channel) = target else { return }
+            guard let (connection, channel) = target else { return false }
             for start in stride(from: 0, to: data.count, by: 16 * 1024) {
-                connection.send(channel: channel, kind: 0, payload: Data(data[start..<min(start + 16 * 1024, data.count)]))
+                let lower = data.index(data.startIndex, offsetBy: start)
+                let upper = data.index(data.startIndex, offsetBy: min(start + 16 * 1024, data.count))
+                connection.send(channel: channel, kind: 0, payload: Data(data[lower..<upper]))
             }
+            return true
         }
     }
 }
@@ -339,13 +379,13 @@ private final class HerdrTerminalInput: @unchecked Sendable {
 private final class HerdrTerminalOutput: @unchecked Sendable {
     private let lock = NSLock()
     private var active = true
-    private let memory: InMemoryTerminalSession
+    private let output: any TerminalStreamEndpoint
     private let connection: HerdrCoreTransport
     private let channel: UInt32
     private let ended: @Sendable (HerdrCoreError?) -> Void
-    init(memory: InMemoryTerminalSession, connection: HerdrCoreTransport, channel: UInt32,
+    init(output: any TerminalStreamEndpoint, connection: HerdrCoreTransport, channel: UInt32,
          ended: @escaping @Sendable (HerdrCoreError?) -> Void) {
-        self.memory = memory; self.connection = connection; self.channel = channel; self.ended = ended
+        self.output = output; self.connection = connection; self.channel = channel; self.ended = ended
     }
     func invalidate() { lock.withLock { active = false } }
     func receive(_ result: Result<HerdrCoreFrame, HerdrCoreError>) {
@@ -356,10 +396,10 @@ private final class HerdrTerminalOutput: @unchecked Sendable {
             guard frame.kind == 0 else { return }
             let enqueued = lock.withLock {
                 guard active else { return false }
-                memory.receive(frame.payload)
+                output.receive(frame.payload)
                 return true
             }
-            guard enqueued, memory.waitForPendingOutput(), lock.withLock({ active }) else { return }
+            guard enqueued, output.waitForPendingOutput(), lock.withLock({ active }) else { return }
             connection.credit(channel: channel, bytes: frame.payload.count)
         }
     }

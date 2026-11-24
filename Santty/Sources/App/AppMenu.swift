@@ -101,6 +101,7 @@ enum AppMenu {
             )
         )
         mainMenu.addItem(makeEditMenuItem())
+        mainMenu.addItem(makeViewMenuItem())
         mainMenu.addItem(makePaneMenuItem(target: workspaceTarget))
         mainMenu.addItem(makeTabMenuItem(target: workspaceTarget))
         mainMenu.addItem(makeWindowMenuItem(target: applicationTarget))
@@ -173,6 +174,22 @@ enum AppMenu {
         menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         menu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
+        return item
+    }
+
+    private static func makeViewMenuItem() -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "View")
+        item.submenu = menu
+        for (title, action, key) in [
+            ("Increase Font Size", #selector(NativeTerminalInputView.increaseFontSize(_:)), "="),
+            ("Decrease Font Size", #selector(NativeTerminalInputView.decreaseFontSize(_:)), "-"),
+            ("Reset Font Size", #selector(NativeTerminalInputView.resetFontSize(_:)), "0")
+        ] {
+            let command = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
+            command.keyEquivalentModifierMask = .command
+            // nil target: AppKit resolves the actual focused terminal responder.
+        }
         return item
     }
 

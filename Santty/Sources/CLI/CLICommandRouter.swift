@@ -23,14 +23,18 @@ final class CLICommandRouter {
 
     var capabilities: CLICapabilities {
         CLICapabilities(commands: ["list", "read", "search", "capabilities"] + CLIRequest.paneCommands,
-                        controlEnabled: Self.controlEnabled, inputEnabled: Self.inputEnabled, instanceID: instanceID)
+                        controlEnabled: Self.controlEnabled, inputEnabled: Self.inputEnabled,
+                        instanceID: instanceID, supportsBrowserURL: true)
     }
 
     func handle(_ request: CLIRequest, workspace: WorkspaceViewController) async -> CLIResponse {
         do {
             try request.validate()
             if request.command == "capabilities" { return CLIResponse(capabilities: capabilities) }
-            if !request.isMutation { return try workspace.handleCLIRequest(request) }
+            if !request.isMutation {
+                if request.command == "list" { return try workspace.handleCLIRequest(request) }
+                return try await workspace.handleCLIReadRequest(request)
+            }
             let allowed = request.isInput ? Self.inputEnabled : Self.controlEnabled
             guard allowed else {
                 throw CLIError(request.isInput ? "Enable CLI terminal input in Settings → General." : "Enable CLI pane control in Settings → General.", code: "permission_denied")

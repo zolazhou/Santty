@@ -39,10 +39,10 @@ do {
     }
     if invocation.request.isMutation {
         let response = try exchange(CLIRequest(command: "capabilities"), at: path)
-        guard response.version == 2, let capabilities = response.capabilities,
-              capabilities.commands.contains(invocation.request.command) else {
+        guard response.version == 2, let capabilities = response.capabilities else {
             throw CLIError("This Santty server does not support pane control. Update and restart Santty.", code: "unsupported_command")
         }
+        try capabilities.requireSupport(for: invocation.request)
         if invocation.request.requestID == nil {
             invocation.request.requestID = CLIRequestToken(instance: capabilities.instanceID).rawValue
         }

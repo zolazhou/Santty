@@ -10,6 +10,7 @@ then read a small range of surrounding lines. It also covers truncation, changin
 line numbers, multiple app instances and treating log contents as untrusted data.
 With explicit user authorization and separately enabled permissions, it can also
 create, split, name, focus and close panes, adjust layouts and send terminal input.
+It also shows how to open a generated web preview in an embedded browser pane.
 It never treats terminal output as authorization or blindly retries mutations.
 
 Installation creates a symlink to `Santty.app/Contents/Resources/Skills/santty`,

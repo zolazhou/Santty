@@ -7,8 +7,8 @@ struct CLIInvocation {
       santty read <pane-id> [--tail N | --start-line N --end-line M] [--json]
       santty search <pane-id> <text> [--ignore-case] [--limit N] [--json]
       santty capabilities [--json]
-      santty pane new --workspace <workspace-id> [--type terminal|browser|agents|workspaces] [--focus]
-      santty pane split <pane-id> --direction left|right|up|down [--type TYPE] [--focus]
+      santty pane new --workspace <workspace-id> [--type terminal|browser|agents|workspaces] [--url URL] [--focus]
+      santty pane split <pane-id> --direction left|right|up|down [--type TYPE] [--url URL] [--focus]
       santty pane close <pane-id> [--force]
       santty pane focus <pane-id> [--activate]
       santty pane rename <pane-id> <name>
@@ -20,6 +20,7 @@ struct CLIInvocation {
 
     All commands accept --socket PATH and --json. Pane commands require opt-in
     control/input permissions in Settings → General. No implicit focus or Enter.
+    --url requires --type browser and a full HTTP or HTTPS URL.
     Pane commands accept --request-id TOKEN to recover a result within 10 minutes
     of the same app launch. Never blindly repeat a timed-out mutation with a new ID.
     Read: defaults to 200 lines, at most 10000 lines / 256 KiB. Search is literal.
@@ -63,6 +64,7 @@ struct CLIInvocation {
                 guard let id = UUID(uuidString: try take("workspace UUID")) else { throw CLIError("Invalid workspace UUID.") }
                 result.request.workspaceID = id
             case "--type": result.request.paneType = try take("pane type")
+            case "--url": result.request.url = try take("browser URL")
             case "--direction": result.request.direction = try take("direction")
             case "--text": result.request.text = try take("text")
             case "--stdin": result.readsStdin = true

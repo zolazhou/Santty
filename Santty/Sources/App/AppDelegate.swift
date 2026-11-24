@@ -1,5 +1,4 @@
 import Cocoa
-import GhosttyTerminal
 
 @MainActor
 enum MainWindowAutosave {
@@ -58,8 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             installKeybindingSettingsObserver()
         }
 
-        let _ = TerminalController.shared.setTheme(TerminalDefaults.theme)
-        let _ = TerminalController.shared.setTerminalConfiguration(TerminalDefaults.configuration)
+        _ = try? GhosttyVTSystem.prepare()
         installTerminalSettingsObserver()
         configureCommandPalette()
 
@@ -154,10 +152,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {
-        guard workspaceViewController?.hasWorkspacePersistence == true else { return .terminateNow }
+        guard let workspaceViewController else { return .terminateNow }
         Task { @MainActor in
-            let saved = await workspaceViewController?.confirmWorkspaceSaveForClose() != false
-            NSApp.reply(toApplicationShouldTerminate: saved)
+            let prepared = await workspaceViewController.prepareForWindowClose()
+            NSApp.reply(toApplicationShouldTerminate:prepared)
         }
         return .terminateLater
     }
@@ -260,9 +258,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { _ in
             Task { @MainActor in
-                let _ = TerminalController.shared.setTheme(TerminalDefaults.theme)
-                let _ = TerminalController.shared.setTerminalConfiguration(
-                    TerminalDefaults.configuration)
+                // Workspace observers apply immutable native settings snapshots.
             }
         }
     }

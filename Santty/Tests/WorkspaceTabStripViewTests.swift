@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import Santty
 
@@ -128,6 +129,43 @@ final class WorkspaceTabStripViewTests: XCTestCase {
         XCTAssertEqual(plan.previewIDs, tabIDs)
         XCTAssertEqual(plan.modelDestinationIndex, 1)
         XCTAssertNil(plan.previewMove)
+    }
+
+    @MainActor
+    func testNewTabUsesNativeSymbolButtonAndKeepsItsActionAfterReload() throws {
+        let strip = WorkspaceTabStripView(frame: NSRect(x: 0, y: 0, width: 640, height: 32))
+        let collection = try XCTUnwrap(strip.subviews.compactMap { $0 as? NSCollectionView }.first)
+        let dataSource = try XCTUnwrap(collection.dataSource)
+        var newTabCount = 0
+        strip.onNewTab = { newTabCount += 1 }
+
+        for tabCount in [0, 2] {
+            strip.items = Self.tabIDs(count: tabCount).map {
+                WorkspaceTabStripItem(id: $0, title: "santty", isSelected: false)
+            }
+            let indexPath = IndexPath(item: tabCount, section: 0)
+            let item = dataSource.collectionView(collection, itemForRepresentedObjectAt: indexPath)
+            let button = try XCTUnwrap(item.view.subviews.compactMap { $0 as? NSButton }.first)
+            let size = strip.collectionView(
+                collection,
+                layout: try XCTUnwrap(collection.collectionViewLayout),
+                sizeForItemAt: indexPath
+            )
+            XCTAssertEqual(size.width, size.height)
+            XCTAssertEqual(size.height, WorkspaceTabButtonView.cornerRadius * 2)
+            item.view.frame = NSRect(origin: .zero, size: size)
+            item.view.layoutSubtreeIfNeeded()
+
+            XCTAssertEqual(button.title, "")
+            XCTAssertEqual(button.imagePosition, .imageOnly)
+            XCTAssertNotNil(button.image)
+            XCTAssertEqual(button.accessibilityLabel(), "New Tab")
+            XCTAssertEqual(button.frame, item.view.bounds)
+            XCTAssertEqual(item.view.layer?.cornerRadius, WorkspaceTabButtonView.cornerRadius)
+            XCTAssertNil(strip.collectionView(collection, pasteboardWriterForItemAt: indexPath))
+            button.performClick(nil)
+        }
+        XCTAssertEqual(newTabCount, 2)
     }
 
     private static func tabIDs(count: Int) -> [UUID] {

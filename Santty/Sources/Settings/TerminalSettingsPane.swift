@@ -3,14 +3,41 @@ import SwiftUI
 
 @MainActor
 struct TerminalSettingsPane: View {
+    @Binding var terminalRenderingEngine: TerminalSettings.RenderingEngine
     @Binding var terminalThemeName: String
     @Binding var terminalFontFamily: String
     @Binding var terminalFontSize: Double
     @Binding var terminalPadding: Double
     @State private var fontPanelTarget = FontPanelTarget()
+    @State private var terminalPaddingFill = TerminalSettings.paddingFill
 
     var body: some View {
         Form {
+            Section {
+                LabeledContent("Rendering Engine") {
+                    HStack {
+                        Picker("Rendering Engine", selection: Binding(
+                            get: { terminalRenderingEngine },
+                            set: { engine in
+                                terminalRenderingEngine = engine
+                                TerminalSettings.renderingEngine = engine
+                            }
+                        )) {
+                            ForEach(TerminalSettings.RenderingEngine.allCases) { engine in
+                                Text(engine.title).tag(engine)
+                            }
+                        }
+                        .labelsHidden()
+
+                        Button("Reset") {
+                            TerminalSettings.resetRenderingEngine()
+                            terminalRenderingEngine = TerminalSettings.renderingEngine
+                        }
+                    }
+                }
+            } footer: {
+                Text("Applies immediately to all terminals without restarting sessions. If switching fails, the affected pane keeps its current engine and shows a warning.")
+            }
             InputSourceSettingsSections()
             Section {
                 LabeledContent("Theme") {
@@ -83,13 +110,35 @@ struct TerminalSettingsPane: View {
                             step: 1
                         )
 
-                        Text("\(Int(terminalPadding)) px")
+                        Text("\(Int(terminalPadding)) pt")
                             .monospacedDigit()
                             .frame(width: 48, alignment: .trailing)
 
                         Button("Reset") {
                             TerminalSettings.resetPadding()
                             terminalPadding = Double(TerminalSettings.padding)
+                        }
+                    }
+                }
+
+                LabeledContent("Padding Fill") {
+                    HStack {
+                        Picker("Padding Fill", selection: Binding(
+                            get: { terminalPaddingFill },
+                            set: { value in
+                                terminalPaddingFill = value
+                                TerminalSettings.paddingFill = value
+                            }
+                        )) {
+                            ForEach(TerminalPaddingFill.allCases) { value in
+                                Text(value.title).tag(value)
+                            }
+                        }
+                        .labelsHidden()
+                        .help("Extends background colors horizontally into left/right padding and unused column space, without extending into top/bottom padding or unused row space. Automatic applies on the alternate screen used by full-screen applications. Text position and terminal size do not change.")
+                        Button("Reset") {
+                            TerminalSettings.resetPaddingFill()
+                            terminalPaddingFill = TerminalSettings.paddingFill
                         }
                     }
                 }
@@ -108,6 +157,7 @@ struct TerminalSettingsPane: View {
 
 @MainActor
 private struct TerminalSettingsPanePreview: View {
+    @State private var terminalRenderingEngine = TerminalSettings.renderingEngine
     @State private var terminalThemeName = TerminalSettings.themeName
     @State private var terminalFontFamily = TerminalSettings.fontFamily
     @State private var terminalFontSize = Double(TerminalSettings.fontSize)
@@ -115,6 +165,7 @@ private struct TerminalSettingsPanePreview: View {
 
     var body: some View {
         TerminalSettingsPane(
+            terminalRenderingEngine: $terminalRenderingEngine,
             terminalThemeName: $terminalThemeName,
             terminalFontFamily: $terminalFontFamily,
             terminalFontSize: $terminalFontSize,

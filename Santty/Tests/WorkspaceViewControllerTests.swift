@@ -411,12 +411,9 @@ final class WorkspaceViewControllerTests: XCTestCase {
             controller.debugSplitFocusedPane(along: .horizontal)
 
             let childPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
-            let renderedConfiguration = try XCTUnwrap(
-                controller.debugRenderedTerminalConfig(for: childPaneID)
-            )
-
-            XCTAssertNotEqual(childPaneID, parentPaneID)
-            XCTAssertTrue(renderedConfiguration.contains("working-directory = /tmp/project"))
+            let launch = try XCTUnwrap(controller.debugLaunchForTesting(for:childPaneID))
+            XCTAssertNotEqual(childPaneID,parentPaneID)
+            XCTAssertEqual(launch.workingDirectory,"/tmp/project")
         }
     }
 
@@ -455,11 +452,8 @@ final class WorkspaceViewControllerTests: XCTestCase {
             controller.debugSplitFocusedPane(along: .horizontal)
 
             let childPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
-            let renderedConfiguration = try XCTUnwrap(
-                controller.debugRenderedTerminalConfig(for: childPaneID)
-            )
-
-            XCTAssertFalse(renderedConfiguration.contains("working-directory ="))
+            let launch = try XCTUnwrap(controller.debugLaunchForTesting(for:childPaneID))
+            XCTAssertEqual(launch.workingDirectory,launch.environment["HOME"])
         }
     }
 
@@ -829,7 +823,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
         }
     }
 
-    func testTerminalPaddingSettingControlsTerminalFrame() async throws {
+    func testTerminalPaddingSettingDoesNotInsetScrollViewFrame() async throws {
         try await MainActor.run {
             TerminalSettings.resetPadding()
             let controller = Self.makeController()
@@ -842,10 +836,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
             let terminalFrame = try XCTUnwrap(controller.debugTerminalFrame(for: focusedPaneID))
 
             XCTAssertEqual(controller.debugTerminalPadding(for: focusedPaneID), 18)
-            XCTAssertEqual(terminalFrame.minX, 18, accuracy: 0.0001)
-            XCTAssertEqual(terminalFrame.minY, 18, accuracy: 0.0001)
-            XCTAssertEqual(terminalFrame.width, paneBounds.width - 36, accuracy: 0.0001)
-            XCTAssertEqual(terminalFrame.height, paneBounds.height - 36, accuracy: 0.0001)
+            XCTAssertEqual(terminalFrame, paneBounds)
             TerminalSettings.resetPadding()
         }
     }
@@ -1339,6 +1330,119 @@ final class WorkspaceViewControllerTests: XCTestCase {
 
             controller.debugFocusPane(in: .above)
             XCTAssertEqual(controller.debugFocusedPaneID, topRightPaneID)
+        }
+    }
+
+    @MainActor
+    func testDirectionalPaneFocusWrapsAcrossAllEdgesUsingAlignedPane() throws {
+        let controller = Self.makeController()
+        let topLeft = try XCTUnwrap(controller.debugFocusedPaneID)
+        controller.debugSplitFocusedPane(along: .horizontal)
+        let topRight = try XCTUnwrap(controller.debugFocusedPaneID)
+        controller.debugSplitFocusedPane(along: .vertical)
+        let bottomRight = try XCTUnwrap(controller.debugFocusedPaneID)
+        controller.debugFocusPane(withID: topLeft)
+        controller.debugSplitFocusedPane(along: .vertical)
+        let bottomLeft = try XCTUnwrap(controller.debugFocusedPaneID)
+
+        let cases: [(PaneID, PaneFocusDirection, PaneID)] = [
+            (topLeft, .left, topRight), (bottomLeft, .left, bottomRight),
+            (topRight, .right, topLeft), (bottomRight, .right, bottomLeft),
+            (topLeft, .above, bottomLeft), (topRight, .above, bottomRight),
+            (bottomLeft, .below, topLeft), (bottomRight, .below, topRight),
+        ]
+        for (source, direction, expected) in cases {
+            // Make the unaligned candidate more recent to verify overlap still wins.
+            for paneID in [topLeft, topRight, bottomLeft, bottomRight] where paneID != expected {
+                controller.debugFocusPane(withID: paneID)
+            }
+            controller.debugFocusPane(withID: source)
+            controller.debugFocusPane(in: direction)
+            XCTAssertEqual(controller.debugFocusedPaneID, expected, "\(direction)")
+        }
+    }
+
+    @MainActor
+    func testDirectionalPaneFocusWrapUsesRecencyForSplitOppositeEdge() throws {
+        for axis in [SplitAxis.horizontal, .vertical] {
+            let controller = Self.makeController()
+            let source = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugSplitFocusedPane(along: axis)
+            let firstTarget = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugSplitFocusedPane(along: axis == .horizontal ? .vertical : .horizontal)
+            let secondTarget = try XCTUnwrap(controller.debugFocusedPaneID)
+            let direction: PaneFocusDirection = axis == .horizontal ? .left : .above
+
+            for expected in [secondTarget, firstTarget] {
+                controller.debugFocusPane(withID: expected)
+                controller.debugFocusPane(withID: source)
+                controller.debugFocusPane(in: direction)
+                XCTAssertEqual(controller.debugFocusedPaneID, expected)
+            }
+        }
+    }
+
+    @MainActor
+    func testDirectionalPaneFocusWrapSelectsFarEdgeAndMoveDoesNotWrap() throws {
+        for axis in [SplitAxis.horizontal, .vertical] {
+            let controller = Self.makeController()
+            let first = try XCTUnwrap(controller.debugFocusedPaneID)
+            controller.debugSplitFocusedPane(along: axis)
+            controller.debugSplitFocusedPane(along: axis)
+            let last = try XCTUnwrap(controller.debugFocusedPaneID)
+            let layout = controller.debugLayoutNode
+            let backward: PaneFocusDirection = axis == .horizontal ? .left : .above
+            let forward: PaneFocusDirection = axis == .horizontal ? .right : .below
+            let moveCommand = axis == .horizontal ? "pane.move.left" : "pane.move.up"
+
+            controller.debugFocusPane(withID: first)
+            XCTAssertEqual(controller.commandPaletteCommands.first { $0.id == moveCommand }?.isEnabled, false)
+            controller.debugPerformCommand(withID: moveCommand)
+            XCTAssertEqual(controller.debugLayoutNode, layout)
+            XCTAssertEqual(controller.debugFocusedPaneID, first)
+            controller.debugFocusPane(in: backward)
+            XCTAssertEqual(controller.debugFocusedPaneID, last)
+            controller.debugFocusPane(in: forward)
+            XCTAssertEqual(controller.debugFocusedPaneID, first)
+            XCTAssertEqual(controller.debugLayoutNode, layout)
+        }
+    }
+
+    @MainActor
+    func testDirectionalPaneFocusWrapStaysPutWithoutAnotherPaneOnAxis() throws {
+        let controller = Self.makeController()
+        let first = try XCTUnwrap(controller.debugFocusedPaneID)
+        for direction in [PaneFocusDirection.left, .right, .above, .below] {
+            controller.debugFocusPane(in: direction)
+            XCTAssertEqual(controller.debugFocusedPaneID, first)
+        }
+        controller.debugSplitFocusedPane(along: .horizontal)
+        let second = try XCTUnwrap(controller.debugFocusedPaneID)
+        for paneID in [first, second] {
+            controller.debugFocusPane(withID: paneID)
+            for direction in [PaneFocusDirection.above, .below] {
+                controller.debugFocusPane(in: direction)
+                XCTAssertEqual(controller.debugFocusedPaneID, paneID)
+            }
+        }
+    }
+
+    @MainActor
+    func testDirectionalPaneFocusWrapIncludesVisibleSidebarOnEitherSide() throws {
+        for side in [SidebarSide.left, .right] {
+            let controller = Self.makeController()
+            let main = try XCTUnwrap(controller.debugFocusedPaneID)
+            let tab = controller.debugSelectedTabID
+            if side == .left { controller.moveSidebarLeft(nil) }
+            else { controller.moveSidebarRight(nil) }
+            let sidebar = try XCTUnwrap(controller.debugSidebarPaneIDs.first)
+            controller.debugFocusSidebarPane(sidebar)
+            controller.debugFocusPane(in: side == .left ? .left : .right)
+            XCTAssertFalse(controller.debugSidebarFocused)
+            XCTAssertEqual(controller.debugFocusedPaneID, main)
+            controller.debugFocusPane(in: side == .left ? .right : .left)
+            XCTAssertTrue(controller.debugSidebarFocused)
+            XCTAssertEqual(controller.debugSelectedTabID, tab)
         }
     }
 
@@ -2166,6 +2270,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
                     [
                         "sidebar.toggle", "sidebar.left", "sidebar.right", "sidebar.browser", "sidebar.workspaces", "sidebar.agents",
                         "agents.show", "workspace.new", "workspace.rename", "workspace.new.herdr.remote", "workspace.new.herdr", "workspace.close", "pane.rename",
+                        "pane.copyID",
                         "pane.split.horizontal",
                         "pane.split.vertical",
                         "pane.terminal.new", "pane.workspaces.new",
@@ -2326,8 +2431,8 @@ final class WorkspaceViewControllerTests: XCTestCase {
                 modifiers: NSEvent.ModifierFlags = [],
                 keyCode: UInt16 = 0,
                 awaitingSecondG: Bool = false
-            ) throws -> TerminalScrollModeKeyAction {
-                TerminalScrollModeKeyAction(
+            ) throws -> NativeScrollModeKeyAction {
+                NativeScrollModeKeyAction(
                     event: try XCTUnwrap(
                         Self.makeKeyEvent(key, modifiers: modifiers, keyCode: keyCode)
                     ),
@@ -2370,7 +2475,7 @@ final class WorkspaceViewControllerTests: XCTestCase {
             )
             XCTAssertEqual(try action("h"), .move(.left))
             XCTAssertEqual(try action("l"), .move(.right))
-            let wordActions: [(String, TerminalScrollMovement, TerminalScrollMovement)] = [
+            let wordActions: [(String, NativeScrollMovement, NativeScrollMovement)] = [
                 ("w", .wordForward(big: false), .wordForward(big: true)),
                 ("b", .wordBackward(big: false), .wordBackward(big: true)),
                 ("e", .wordEnd(big: false), .wordEnd(big: true)),
@@ -2410,6 +2515,23 @@ final class WorkspaceViewControllerTests: XCTestCase {
             XCTAssertEqual(controller.debugTabIDs.count, 2)
             XCTAssertEqual(controller.debugSelectedTabID, controller.debugTabIDs.last)
         }
+    }
+
+    @MainActor
+    func testCopyPaneIDFollowsFocusBetweenMainAndSidebar() throws {
+        let controller = Self.makeController()
+        let mainPaneID = try XCTUnwrap(controller.debugFocusedPaneID)
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+
+        controller.copyFocusedPaneID(to: pasteboard)
+        XCTAssertEqual(pasteboard.string(forType: .string), mainPaneID.uuidString)
+
+        controller.toggleSidebar(nil)
+        let sidebarPaneID = try XCTUnwrap(controller.debugSidebarPaneIDs.first)
+        controller.debugFocusSidebarPane(sidebarPaneID)
+        controller.copyFocusedPaneID(to: pasteboard)
+        XCTAssertEqual(pasteboard.string(forType: .string), sidebarPaneID.uuidString)
     }
 
     func testPaneResizeCommandsMoveAndEqualizeFocusedSplit() async throws {

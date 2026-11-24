@@ -1,710 +1,288 @@
 import AppKit
-import Darwin
-import GhosttyTerminal
+import GhosttyVt
 
 @MainActor
 final class TerminalPaneController: NSObject, PaneControlling {
     let id: PaneID
+    let session: NativeTerminalPaneSession?
+    let terminalView: NativeTerminalScrollView?
     private let terminalHostView: TerminalPaneHostView
-
-    var hostView: NSView {
-        terminalHostView
+    private var frontend: NativeTerminalFrontend?
+    private var inputSourcePort: NativeTerminalInputSourcePort?
+    var nativeInputSourceTarget: PaneInputSourceCoordinator.Target? { inputSourcePort?.target }
+    let closeHandle: PaneCloseHandle
+    var herdrSession: HerdrTerminalSession? { session?.herdrSession }
+    var hostView: NSView { terminalHostView }
+    private var requestedStart = false
+    private var starting = false
+    private var initializationError: String?
+    private var lastAppliedSettings: NativeTerminalSettings?
+    private var lastRequestedRenderingEngine: TerminalSettings.RenderingEngine?
+    private(set) var renderingWarning: String?
+    var renderingEngine: TerminalSettings.RenderingEngine? {
+        terminalView.map { $0.renderer.isUsingMetalRenderer ? .metal : .coreGraphics }
     }
-
-    private let terminalView: TerminalView
-    private let terminalController: TerminalController
-    let herdrSession: HerdrTerminalSession?
-    private let openURL: @MainActor (URL) -> Bool
-    private let foregroundProcessIDProvider: @MainActor () -> Int32?
-    private let processWorkingDirectoryProvider: (Int32) -> String?
-
-    private(set) var isLive = true
-    private(set) var hasStarted = false
-    private(set) var lastKnownTitle = "Shell"
-    var name: String? {
-        didSet { terminalHostView.nameBadge.name = name }
-    }
-    private(set) var currentWorkingDirectory: String?
-    private var isFloating = false
     private var paneIsFocused = false
-    private(set) var isScrollModeActive = false
-    private var isAwaitingSecondScrollModeG = false
-
-    var onFocusRequest: ((PaneID) -> Void)? {
-        didSet {
-            terminalHostView.onFocusRequest = onFocusRequest
-        }
-    }
-
+    private var isFloating = false
+    private var wasLive = true
+    private var wasAcceptingInput = false
+    private var testingExited = false
+    var isCurrent: () -> Bool = { true }
+    var onFocusRequest: ((PaneID) -> Void)? { didSet { terminalHostView.onFocusRequest = onFocusRequest } }
     var onTitleChange: ((PaneID) -> Void)?
     var onExit: ((PaneID) -> Void)?
-
+    var name: String? { didSet { terminalHostView.nameBadge.name = name } }
+    var hasStarted: Bool { session?.hasStarted == true }
+    var isScrollModeActive: Bool { terminalView?.scrollModeController.isActive == true }
+    var isLive: Bool {
+        guard !testingExited, initializationError == nil, let session, !session.isClosed else { return false }
+        if let herdr = session.herdrSession { return herdr.state != .finished }
+        switch session.localSession?.state {
+        case .exited, .outputIncomplete, .failed: return false
+        default: return true
+        }
+    }
+    var lastKnownTitle: String { session?.title ?? "Shell" }
+    private(set) var currentWorkingDirectory: String?
+    var workingDirectoryForNewPane: String? {
+        if session?.localSession != nil, let pid = foregroundProcessIDProvider?(), let path = processWorkingDirectoryProvider?(pid), !path.isEmpty { return path }
+        if let local = session?.localSession { return local.processInfo?.workingDirectory ?? currentWorkingDirectory ?? {
+            if case let .local(path) = session?.directoryForNewPane { return path }; return nil
+        }() }
+        guard let directory = session?.directoryForNewPane else { return currentWorkingDirectory }
+        switch directory { case let .local(path), let .herdr(path,_): return path }
+    }
+    /// Real Local group, never a shell PID or a remote PID interpreted locally.
+    var foregroundProcessID: Int? { session?.localSession?.processInfo?.foregroundProcessGroupID.map(Int.init) }
     var displayTitle: String {
-
-        if let herdrSession {
-            switch herdrSession.state {
-            case .connecting: return lastKnownTitle + " (Connecting)"
-            case .disconnected: return lastKnownTitle + " (Disconnected)"
+        if let initializationError { return initializationError }
+        if let state = herdrSession?.state {
+            switch state {
+            case .connecting: return lastKnownTitle+" (Connecting)"
+            case .disconnected: return lastKnownTitle+" (Disconnected)"
             case let .failed(message): return message
-            case .live, .finished: break
+            default: break
             }
         }
-        return isLive ? lastKnownTitle : "\(lastKnownTitle) (Exited)"
+        return isLive ? lastKnownTitle : lastKnownTitle+" (Exited)"
     }
-
-    var focusTargetView: NSView {
-        return terminalHostView.scrollModeView ?? (isLive && (herdrSession == nil || herdrSession?.state == .live) ? terminalView : terminalHostView)
+    var focusTargetView: NSView { hasStarted || session?.acceptsInput == true ? terminalView?.renderer ?? terminalHostView : terminalHostView }
+    var inputSourceTargetView: NSView? {
+        guard isLive, !isScrollModeActive, session?.acceptsInput == true else { return nil }
+        return terminalView?.renderer
     }
+    private let renderingEngineProvider: @MainActor () -> TerminalSettings.RenderingEngine
+    private let configureRenderer: @MainActor (NativeTerminalScrollView, TerminalSettings.RenderingEngine) throws -> Void
+    private let openURL: @MainActor (URL) -> Bool
+    private let foregroundProcessIDProvider: (@MainActor () -> Int32?)?
+    private let processWorkingDirectoryProvider: ((Int32) -> String?)?
 
-
-    var foregroundProcessID: Int? {
-        if let herdrSession { return herdrSession.record?.foreground.map { Int($0.pid) } }
-        guard isLive, let processID = foregroundProcessIDProvider() else {
-            return nil
+    init(id: PaneID = UUID(), workingDirectory: String? = nil, session supplied: NativeTerminalPaneSession? = nil,
+         initializationError suppliedError: (any Error)? = nil, resourceCloseHandle: PaneCloseHandle? = nil,
+         foregroundProcessIDProvider: (@MainActor () -> Int32?)? = nil,
+         processWorkingDirectoryProvider: ((Int32) -> String?)? = nil,
+         renderingEngineProvider: @escaping @MainActor () -> TerminalSettings.RenderingEngine = { TerminalSettings.renderingEngine },
+         configureRenderer: @escaping @MainActor (NativeTerminalScrollView, TerminalSettings.RenderingEngine) throws -> Void = { view, engine in try view.setMetal(engine == .metal) },
+         openURL: @escaping @MainActor (URL) -> Bool = { NSWorkspace.shared.open($0) }) {
+        self.id = id; self.openURL = openURL
+        self.renderingEngineProvider = renderingEngineProvider; self.configureRenderer = configureRenderer
+        self.foregroundProcessIDProvider = foregroundProcessIDProvider; self.processWorkingDirectoryProvider = processWorkingDirectoryProvider
+        currentWorkingDirectory = workingDirectory
+        var owner = supplied, problem = suppliedError
+        if owner == nil, problem == nil {
+            do {
+                let driver = try GhosttyVTDriver()
+                let launch = try NativeLocalPTYLaunch.productionLocal(paneID:id,controlSocket:CLITransport.socketPath,
+                    context:.current(),workingDirectory:workingDirectory,
+                    appVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "0")
+                owner = .local(launch:launch,driver:driver)
+            } catch { problem = error }
         }
-
-        return Int(processID)
+        precondition(owner == nil || owner?.paneID == id)
+        self.session = owner
+        initializationError = problem.map { "Terminal unavailable: \($0.localizedDescription)" }
+        terminalView = owner.map { NativeTerminalScrollView(driver:$0.driver,frame:.init(x:0,y:0,width:720,height:480)) }
+        terminalHostView = TerminalPaneHostView(paneID:id,terminalView:terminalView)
+        precondition(resourceCloseHandle == nil || resourceCloseHandle?.id == id)
+        closeHandle = resourceCloseHandle ?? PaneCloseHandle(id:id,policy:.awaitedOwner,
+            hasResources:{ owner?.hasStarted == true || owner?.herdrSession?.binding != nil || owner?.herdrSession?.createResultUnknown == true },
+            normalize:{ owner?.herdrSession?.viewerOnly == true ? .detach : owner?.localSession != nil ? .terminate : $0 },
+            validateOwner:{ try owner?.validateClose($0) },suspend:{ try? owner?.beginClosing($0) },operation:{ intent in try await owner?.close(intent) })
+        super.init()
+        terminalHostView.paneController = self
+        if let owner, let terminalView {
+            do {
+                frontend = try NativeTerminalFrontend(session:owner,view:terminalView,isCurrent:{ [weak self] in self?.isCurrent() == true })
+                frontend?.onFocusChange = { [weak self] focused in self?.reflectTerminalFocus(focused) }
+                inputSourcePort = NativeTerminalInputSourcePort(paneID:id,view:terminalView,
+                    isCurrent:{ [weak self] in self?.isCurrent() == true },foreground:{ [weak self] in
+                        guard let self else { throw CLIError("Pane changed") }; return try await self.inputSourceForeground()
+                    })
+                try applySettings()
+                terminalView.openLink = openURL
+            } catch { initializationError = "Terminal unavailable: \(error.localizedDescription)" }
+            owner.onChange = { [weak self] in self?.stateChanged() }
+            terminalHostView.onGeometryChange = { [weak self] in self?.startWhenReady() }
+        }
+        terminalHostView.onFocusRequest = { [weak self] id in self?.onFocusRequest?(id) }
+        updatePresentation(isFocused:false)
     }
+    isolated deinit { frontend?.detach() } // process cleanup is an awaited close transaction, never a view free/join
 
+    func startIfNeeded() { requestedStart = true; startWhenReady() }
+    private func startWhenReady() {
+        guard requestedStart, !hasStarted, !starting, !closeHandle.hasBegun, isCurrent(), let frontend else { return }
+        starting = true; defer { starting = false }
+        do { try frontend.startIfNeeded(); initializationError = nil }
+        catch NativeTerminalScrollView.GeometryError.unavailable { return }
+        catch { initializationError = "Terminal unavailable: \(error.localizedDescription)" }
+        stateChanged()
+    }
+    func fitToSize() {
+        guard let terminalView else { return }
+        if requestedStart, !hasStarted { startWhenReady() }
+        else { _ = try? terminalView.synchronizeViewport(); terminalView.presentPendingOutput() }
+    }
+    func setNameVisible(_ visible: Bool) { terminalHostView.nameBadge.isRevealed = visible }
+    func updatePresentation(isFocused: Bool,isFloating: Bool = false) {
+        paneIsFocused = isFocused; self.isFloating = isFloating
+        terminalHostView.updatePresentation(isFocused:isFocused,isFloating:isFloating,
+            isLive:isLive && (session?.acceptsInput == true || !hasStarted),displayTitle:displayTitle,
+            renderingWarning:renderingWarning)
+    }
+    private func stateChanged() {
+        guard isCurrent() else { return }
+        if let record = herdrSession?.record { currentWorkingDirectory = record.foreground?.cwd ?? record.cwd }
+        terminalHostView.setRetryAction(herdrSession?.state == .disconnected || {
+            if case .failed = herdrSession?.state { return true }; return false
+        }() ? { [weak self] in self?.session?.retryConnection() } : nil)
+        let acceptsInput = session?.acceptsInput == true
+        if acceptsInput, !wasAcceptingInput, isCurrent(), paneIsFocused,
+           let view = terminalView, let window = view.window, window.firstResponder === terminalHostView {
+            // Finish an explicit focus request that landed on our own loading
+            // host. Metadata, reconnects and other responders cannot gain focus.
+            window.makeFirstResponder(view.renderer)
+        }
+        wasAcceptingInput = acceptsInput
+        if wasLive, !isLive { terminalView?.scrollModeController.exit(); if !closeHandle.hasBegun { onExit?(id) } }
+        wasLive = isLive
+        updatePresentation(isFocused:paneIsFocused,isFloating:isFloating)
+        onTitleChange?(id)
+    }
+    private func applySettings() throws {
+        guard let frontend else { return }
+        let next = try TerminalDefaults.settings()
+        if next != lastAppliedSettings {
+            try frontend.applySettings(next) { [weak self] in self?.terminalHostView.updateAppearance() }
+            lastAppliedSettings = next
+        }
+        applyRenderingEngine()
+    }
+    private func applyRenderingEngine() {
+        let requested = renderingEngineProvider()
+        guard let terminalView, requested != lastRequestedRenderingEngine else { return }
+        lastRequestedRenderingEngine = requested
+        do {
+            if requested != renderingEngine { try configureRenderer(terminalView, requested) }
+            renderingWarning = nil
+        } catch {
+            // A presentation failure must not become a session failure/onExit.
+            // Do not retry on every font/theme/layout notification.
+            renderingWarning = "Unable to switch to \(requested.title). Using \(renderingEngine?.title ?? "Core Graphics")."
+        }
+        updatePresentation(isFocused: paneIsFocused, isFloating: isFloating)
+    }
+    func applyTerminalSettings() { guard isCurrent() else { return }; do { try applySettings() } catch { initializationError = error.localizedDescription; stateChanged() } }
+    func updateAppearance() { terminalHostView.updateAppearance(); if isCurrent() { applyTerminalSettings() } }
+    func copySelection(_ sender: Any?) { terminalHostView.copy(sender) }
+    func readForCLI(_ request: CLIRequest, isCurrent: @escaping @MainActor () -> Bool = { true }) async throws -> CLIResponse {
+        guard let session else { throw CLIError("Terminal content unavailable.",code:"read_unavailable") }
+        return try await session.read(request,isCurrent:{ [weak self] in self?.isCurrent() == true && isCurrent() })
+    }
+    func sendForCLI(_ request: CLIRequest) throws {
+        guard isCurrent(), isLive, !closeHandle.hasBegun, !isScrollModeActive, terminalView?.renderer.hasMarkedText() == false,
+              let session, session.acceptsInput else { throw CLIError("Terminal is not ready for input. Input was not queued.",code:"input_unavailable") }
+        let accepted: Bool
+        if request.command == "pane.send-text" { accepted = try session.output.paste(request.text ?? "") }
+        else { accepted = try session.output.send(NativeTerminalNamedKey.event(CLIKey(request.key ?? ""))) }
+        guard accepted else { throw CLIError("Terminal did not accept input.",code:"input_unavailable") }
+    }
+    func enterScrollMode() {
+        guard isLive, let terminalView else { return }
+        if terminalView.scrollModeController.enter() { terminalView.window?.makeFirstResponder(terminalView.renderer) }
+    }
+    func exitScrollMode() { terminalView?.scrollModeController.exit() }
+    func handleScrollModeKeyEvent(_ event: NSEvent) -> Bool { terminalView?.scrollModeController.keyDown(event) ?? false }
     func inputSourceForeground() async throws -> InputSourceForeground {
-
-        if let session = herdrSession, session.remote != nil {
-            guard session.state == .live, let foreground = session.record?.foreground else {
-                throw CLIError("Remote foreground process information is unavailable")
-            }
-            return InputSourceForeground(groupID: Int(foreground.pid), processes: [
-                .init(id: Int(foreground.pid), name: foreground.name, command: foreground.name)
-            ])
+        if session?.localSession != nil, let group = foregroundProcessIDProvider?(), group > 0 {
+            let processes = await Task.detached(priority:.utility) { TerminalProcessInspector.currentProcessTable(processGroupID:group) }.value
+            try Task.checkCancellation()
+            guard isCurrent(), foregroundProcessIDProvider?() == group else { throw CLIError("Foreground changed") }
+            return .init(groupID:Int(group),processes:processes.map { .init(id:$0.processID,name:$0.executableName ?? "",command:$0.command) })
         }
-        guard let groupID = foregroundProcessID else { throw CLIError("Foreground process information is unavailable") }
-        let processes = await Task.detached(priority: .utility) {
-            TerminalProcessInspector.currentProcessTable().filter { $0.processGroupID == groupID }
-                .map { InputSourceForeground.Process(id: $0.processID, name: $0.executableName ?? "", command: $0.command) }
+        guard let session, session.acceptsInput else { throw CLIError("Foreground information unavailable") }
+        if let herdr = session.herdrSession {
+            guard let foreground = herdr.record?.foreground else { throw CLIError("Core foreground information unavailable") }
+            return .init(groupID:Int(foreground.pid),processes:[.init(id:Int(foreground.pid),name:foreground.name,command:foreground.name)])
+        }
+        guard let local = session.localSession, let before = local.processInfo,
+              let group = before.foregroundProcessGroupID else { throw CLIError("Owned foreground group unavailable") }
+        let processes = await Task.detached(priority:.utility) {
+            TerminalProcessInspector.currentProcessTable(processGroupID:group).map {
+                InputSourceForeground.Process(id:$0.processID,name:$0.executableName ?? "",command:$0.command)
+            }
         }.value
         try Task.checkCancellation()
-        guard foregroundProcessID == groupID else { throw CLIError("Foreground process changed during lookup") }
-        return InputSourceForeground(groupID: groupID, processes: processes)
+        guard let after = local.processInfo, before.shellPid == after.shellPid,
+              after.foregroundProcessGroupID == group else { throw CLIError("Foreground changed during lookup") }
+        return .init(groupID:Int(group),processes:processes)
     }
-
-    var inputSourceTargetView: NSView? {
-        guard isLive, !isScrollModeActive, herdrSession == nil || herdrSession?.state == .live else { return nil }
-        return terminalView
+    func simulateExitForTesting() { testingExited = true; session?.output.setInputEnabled(false); stateChanged() }
+    func reflectTerminalFocus(_ focused: Bool) { if focused, !isFloating { onFocusRequest?(id) } }
+    func setTitleForTesting(_ title: String) {
+        session?.output.receive(Data(("\u{1b}]2;"+title+"\u{7}").utf8)); session?.refreshMetadata()
     }
-
-    var workingDirectoryForNewPane: String? {
-        if let herdrSession { return herdrSession.record?.foreground?.cwd ?? currentWorkingDirectory }
-        guard
-            isLive,
-            let processID = foregroundProcessIDProvider(),
-            let processWorkingDirectory = processWorkingDirectoryProvider(processID),
-            !processWorkingDirectory.isEmpty
-        else {
-            return currentWorkingDirectory
-        }
-
-        return processWorkingDirectory
+    func setWorkingDirectoryForTesting(_ path: String) { currentWorkingDirectory = path }
+    static func linkURL(_ text: String) -> URL? { NativeTerminalLink.url(text) }
+    func terminalDidRequestOpenURL(_ text: String) { if let url = Self.linkURL(text) { _ = openURL(url) } }
+    @discardableResult func submitPrompt(_ prompt: String, expected: NativeUserInputLease? = nil) -> Bool {
+        guard isCurrent(), !closeHandle.hasBegun, !prompt.isEmpty, !isScrollModeActive, let session, session.acceptsInput,
+              terminalView?.renderer.hasMarkedText() == false,
+              expected == nil || session.output.userInputLease == expected else { return false }
+        terminalView?.window?.makeFirstResponder(terminalView?.renderer)
+        guard (try? session.output.paste(prompt)) == true else { return false }
+        return (try? session.output.sendKey(GHOSTTY_KEY_ENTER)) == true
     }
-
-    init(
-        id: PaneID = UUID(),
-        workingDirectory: String? = nil,
-        herdrSession: HerdrTerminalSession? = nil,
-        foregroundProcessIDProvider: (@MainActor () -> Int32?)? = nil,
-        processWorkingDirectoryProvider: @escaping (Int32) -> String? = {
-            ProcessWorkingDirectoryResolver.workingDirectory(for: $0)
-        },
-        openURL: @escaping @MainActor (URL) -> Bool = { NSWorkspace.shared.open($0) }
-    ) {
-        self.id = id
-        self.herdrSession = herdrSession
-        self.openURL = openURL
-        currentWorkingDirectory = workingDirectory
-
-        let terminalView = TerminalView(frame: NSRect(x: 0, y: 0, width: 720, height: 480))
-        let terminalController = TerminalController(
-            configuration: Self.terminalConfiguration(
-                for: id,
-                workingDirectory: workingDirectory
-            ),
-            theme: TerminalDefaults.theme
-        )
-        terminalView.configuration = TerminalSurfaceOptions(backend: herdrSession.map { .inMemory($0.memory) } ?? .exec)
-        terminalView.controller = terminalController
-
-        self.terminalView = terminalView
-        self.terminalController = terminalController
-        self.foregroundProcessIDProvider = foregroundProcessIDProvider ?? {
-            [weak terminalView] in
-            terminalView?.foregroundPid
-        }
-        self.processWorkingDirectoryProvider = processWorkingDirectoryProvider
-        terminalHostView = TerminalPaneHostView(paneID: id, terminalView: terminalView)
-
-        super.init()
-
-        terminalView.delegate = self
-        herdrSession?.onReset = { [weak self] in self?.exitScrollMode() }
-        herdrSession?.onChange = { [weak self] in
-            guard let self, let session = self.herdrSession else { return }
-            if let record = session.record {
-                if !record.title.isEmpty { self.lastKnownTitle = record.title }
-                self.currentWorkingDirectory = record.foreground?.cwd ?? record.cwd
-            }
-            switch session.state {
-            case .disconnected, .failed: self.terminalHostView.setRetryAction { [weak session] in session?.retry() }
-            default: self.terminalHostView.setRetryAction(nil)
-            }
-            let wasLive = self.isLive
-            self.isLive = session.state != .finished
-            self.onTitleChange?(self.id)
-            if session.state == .live, self.paneIsFocused, !self.isScrollModeActive,
-               self.terminalView.window?.firstResponder === self.terminalHostView {
-                self.terminalView.window?.makeFirstResponder(self.terminalView)
-            }
-            if wasLive, !self.isLive { self.exitScrollMode(); self.onExit?(self.id) }
-        }
-        if terminalView.scrollModeGrid != nil { herdrSession?.surfaceAttached() }
-        updatePresentation(isFocused: false)
-    }
-
-    deinit {
-        MainActor.assumeIsolated {
-            terminalView.delegate = nil
-            // Draining the view's controller frees its Ghostty surface, and
-            // that free joins the surface's IO thread without a timeout.
-            // Doing it from the deallocation of the pane that owns the view
-            // parks the main thread whenever the IO thread misses its quit
-            // wakeup: the app stops answering events until it is force quit.
-            // Retire the view on a later runloop turn instead, outside the
-            // release cascade that is running right now.
-            TerminalViewRetirement.retire(terminalView)
-        }
-    }
-
-    func startIfNeeded() {
-        guard !hasStarted else {
-            return
-        }
-
-        hasStarted = true
-        herdrSession?.start()
-    }
-
-    func fitToSize() {
-        terminalView.fitToSize()
-    }
-
-    func setNameVisible(_ visible: Bool) {
-        terminalHostView.nameBadge.isRevealed = visible
-    }
-
-    func updatePresentation(isFocused: Bool, isFloating: Bool = false) {
-        self.isFloating = isFloating
-        paneIsFocused = isFocused
-        terminalHostView.updatePresentation(
-            isFocused: isFocused,
-            isFloating: isFloating,
-            isLive: isLive && (herdrSession == nil || herdrSession?.state == .live),
-            displayTitle: displayTitle
-        )
-    }
-
-    func copySelection(_ sender: Any?) {
-        terminalHostView.copy(sender)
-    }
-
-    func readForCLI(_ request: CLIRequest) throws -> CLIResponse {
-        // shortcut: snapshot the full buffer; use ranged Ghostty reads if polling becomes costly.
-        guard let text = terminalView.readScreenText() else {
-            throw CLIError("Terminal content is unavailable; the pane may not have started or may have closed.")
-        }
-        return try CLITextSnapshot.response(text, request: request)
-    }
-
-    /// Programmatic terminal input without selecting the pane, committing an IME
-    /// composition, changing the clipboard, or leaving Scroll Mode.
-    func sendForCLI(_ request: CLIRequest) throws {
-        guard isLive, !isScrollModeActive, !terminalView.hasMarkedText(),
-              herdrSession == nil || herdrSession?.state == .live else {
-            throw CLIError("Terminal is not ready for input (offline, exited, Scroll Mode or IME composition). Input was not queued.", code: "input_unavailable")
-        }
-        let accepted: Bool
-        if request.command == "pane.send-text" {
-            accepted = terminalView.paste(text: request.text ?? "")
-        } else {
-            let key = try CLIKey(request.key ?? "")
-            let named: [String: TerminalKey] = ["enter": .enter, "tab": .tab, "escape": .escape,
-                "backspace": .backspace, "delete": .delete, "home": .home, "end": .end,
-                "pageup": .pageUp, "pagedown": .pageDown, "left": .arrowLeft,
-                "right": .arrowRight, "up": .arrowUp, "down": .arrowDown]
-            var modifiers: TerminalInputModifiers = []
-            if key.control { modifiers.insert(.ctrl) }
-            if key.shift { modifiers.insert(.shift) }
-            let press: TerminalKeyPress?
-            if let namedKey = named[key.base] { press = TerminalKeyPress(namedKey, modifiers: modifiers) }
-            else { press = key.base.first.flatMap { TerminalKeyPress(typing: $0, modifiers: modifiers) } }
-            guard let press else { throw CLIError("Unsupported key.") }
-            accepted = terminalView.sendKey(press)
-        }
-        guard accepted else { throw CLIError("Terminal surface did not accept input. The pane may not have started.", code: "input_unavailable") }
-    }
-
-    func enterScrollMode() {
-
-        guard isLive, !isScrollModeActive, herdrSession == nil || herdrSession?.state == .live else {
-            return
-        }
-
-        guard terminalController.setTerminalConfiguration(Self.terminalConfiguration(
-            for: id, workingDirectory: currentWorkingDirectory, scrollMode: true
-        )) else {
-            NSSound.beep()
-            return
-        }
-        terminalView.clearScrollModeSelection()
-
-        isScrollModeActive = true
-        isAwaitingSecondScrollModeG = false
-        terminalHostView.showScrollMode()
-    }
-
-    func exitScrollMode() {
-        guard isScrollModeActive else {
-            return
-        }
-
-        isScrollModeActive = false
-        isAwaitingSecondScrollModeG = false
-
-        terminalHostView.hideScrollMode()
-        terminalController.setTerminalConfiguration(Self.terminalConfiguration(
-            for: id, workingDirectory: currentWorkingDirectory
-        ))
-    }
-
-    func handleScrollModeKeyEvent(_ event: NSEvent) -> Bool {
-        guard isScrollModeActive, event.type == .keyDown else {
-            return false
-        }
-        if let eventWindow = event.window {
-            guard eventWindow === terminalView.window,
-                  eventWindow.firstResponder === terminalHostView.scrollModeView
-            else { return false }
-        }
-
-        let action = TerminalScrollModeKeyAction(
-            event: event,
-            awaitingSecondG: isAwaitingSecondScrollModeG
-        )
-        isAwaitingSecondScrollModeG = false
-
-        switch action {
-        case .exit:
-            exitScrollMode()
-        case .cancel:
-            if terminalHostView.scrollModeView?.cancelSelection() != true { exitScrollMode() }
-        case let .move(movement):
-            terminalHostView.scrollModeView?.move(movement)
-        case let .select(linewise):
-            terminalHostView.scrollModeView?.toggleSelection(linewise: linewise)
-        case .copy:
-            terminalHostView.scrollModeView?.copySelection()
-        case .awaitSecondG:
-            isAwaitingSecondScrollModeG = true
-        case .consume:
-            break
-        }
-
-        return true
-    }
-
     func showPromptEditor(relativeTo window: NSWindow) {
-        guard isLive else {
-            NSSound.beep()
-            return
-        }
-
-        let textView = PromptEditorTextView(frame: NSRect(x: 0, y: 0, width: 480, height: 180))
-        textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        textView.isRichText = false
-        textView.allowsUndo = true
-        textView.isAutomaticQuoteSubstitutionEnabled = false
-        textView.isAutomaticDashSubstitutionEnabled = false
-        textView.isAutomaticTextReplacementEnabled = false
-        textView.isAutomaticSpellingCorrectionEnabled = false
-
-        let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 500, height: 200))
-        scrollView.borderType = .bezelBorder
-        scrollView.hasVerticalScroller = true
-        scrollView.autohidesScrollers = true
-        scrollView.documentView = textView
-
-        let alert = NSAlert()
-        alert.messageText = "Prompt Editor"
-        alert.informativeText = currentWorkingDirectory.map { "Current directory: \($0)" }
-            ?? "Current directory is not available yet."
-        alert.accessoryView = scrollView
-        alert.addButton(withTitle: "Send")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = textView
-        textView.onCancel = { [weak alert] in
-            guard let alert else {
-                return
-            }
-
-            alert.window.sheetParent?.endSheet(
-                alert.window,
-                returnCode: .alertSecondButtonReturn
-            )
-        }
-
-        alert.beginSheetModal(for: window) { [weak self, textView] response in
-            guard response == .alertFirstButtonReturn else {
-                return
-            }
-
-            guard let self else {
-                return
-            }
-
-            let prompt = textView.string
-            guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                NSSound.beep()
-                return
-            }
-
-            self.submitPrompt(prompt)
+        guard let session, session.acceptsInput, let lease = session.output.userInputLease else { return }
+        let text = PromptEditorTextView(frame:.init(x:0,y:0,width:480,height:180))
+        text.font = .monospacedSystemFont(ofSize:13,weight:.regular); text.isRichText = false; text.allowsUndo = true
+        text.isAutomaticQuoteSubstitutionEnabled = false; text.isAutomaticDashSubstitutionEnabled = false
+        text.isAutomaticTextReplacementEnabled = false; text.isAutomaticSpellingCorrectionEnabled = false
+        let scroll = NSScrollView(frame:.init(x:0,y:0,width:500,height:200)); scroll.documentView = text; scroll.hasVerticalScroller = true
+        let alert = NSAlert(); alert.messageText = "Prompt Editor"; alert.accessoryView = scroll
+        alert.addButton(withTitle:"Send"); alert.addButton(withTitle:"Cancel"); alert.window.initialFirstResponder = text
+        text.onCancel = { [weak alert] in if let alert { alert.window.sheetParent?.endSheet(alert.window,returnCode:.alertSecondButtonReturn) } }
+        alert.beginSheetModal(for:window) { [weak self,text] result in
+            guard result == .alertFirstButtonReturn, !text.string.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,
+                  self?.submitPrompt(text.string,expected:lease) == true else { return }
         }
     }
-
-    @discardableResult func submitPrompt(_ prompt: String) -> Bool {
-        guard isLive, herdrSession == nil || herdrSession?.state == .live else { NSSound.beep(); return false }
-        terminalView.window?.makeFirstResponder(terminalView)
-
-        guard terminalView.paste(text: prompt) else { return false }
-        return terminalView.sendKey(.enter)
-    }
-
-    func updateAppearance() {
-        terminalHostView.updateAppearance()
-    }
-
-    func applyTerminalSettings() {
-        herdrSession?.updateDisplay()
-
-        let _ = terminalController.setTheme(TerminalDefaults.theme)
-        let _ = terminalController.setTerminalConfiguration(
-            Self.terminalConfiguration(
-                for: id,
-                workingDirectory: currentWorkingDirectory,
-                scrollMode: isScrollModeActive
-            )
-        )
-    }
-
-    var debugBorderColor: NSColor {
-        terminalHostView.debugBorderColor
-    }
-
-    var debugBorderWidth: CGFloat {
-        terminalHostView.debugBorderWidth
-    }
-
-    var debugUsesHiddenWindowPresentation: Bool {
-        terminalHostView.debugUsesHiddenWindowPresentation
-    }
-
-    var debugVibrancyBlendingMode: NSVisualEffectView.BlendingMode {
-        terminalHostView.debugVibrancyBlendingMode
-    }
-
-    var debugVibrancyTintAlpha: CGFloat? {
-        terminalHostView.debugVibrancyTintAlpha
-    }
-
-    var debugTerminalFrame: NSRect {
-        terminalHostView.debugTerminalFrame
-    }
-
-    var debugTerminalPadding: CGFloat {
-        terminalHostView.debugTerminalPadding
-    }
-
-    var debugPaneBounds: NSRect {
-        terminalHostView.debugPaneBounds
-    }
-
-    var debugRenderedTerminalConfig: String {
-        terminalController.renderedConfig
-    }
-
-    var debugScrollModeIndicatorIsVisible: Bool {
-        terminalHostView.debugScrollModeIndicatorIsVisible
-    }
-
-    var debugScrollModeIndicatorFrames: (background: NSRect, label: NSRect) {
-        terminalHostView.debugScrollModeIndicatorFrames
-    }
-
-    private static func terminalConfiguration(
-        for paneID: PaneID,
-        workingDirectory: String?,
-        scrollMode: Bool = false
-    ) -> TerminalConfiguration {
-        TerminalConfiguration(startingFrom: TerminalDefaults.configuration) { builder in
-
-            if scrollMode {
-                // Synthetic selection gestures must never reach the running app,
-                // activate links or move the shell's input cursor.
-                builder.withCustom("mouse-reporting", "false")
-                builder.withCustom("cursor-click-to-move", "false")
-                builder.withCustom("copy-on-select", "false")
-                builder.withCustom("link-url", "false")
-            }
-            if let workingDirectory {
-                builder.withCustom("working-directory", workingDirectory)
-            }
-            builder.withCustom("env", "SANTTY_PANE_ID=\(paneID.uuidString)")
-            builder.withCustom("env", "SANTTY_CONTROL_SOCKET=\(CLITransport.socketPath)")
-        }
-    }
+    var debugBorderColor: NSColor { terminalHostView.debugBorderColor }
+    var debugBorderWidth: CGFloat { terminalHostView.debugBorderWidth }
+    var debugUsesHiddenWindowPresentation: Bool { terminalHostView.debugUsesHiddenWindowPresentation }
+    var debugVibrancyBlendingMode: NSVisualEffectView.BlendingMode { terminalHostView.debugVibrancyBlendingMode }
+    var debugVibrancyTintAlpha: CGFloat? { terminalHostView.debugVibrancyTintAlpha }
+    var debugTerminalFrame: NSRect { terminalHostView.debugTerminalFrame }
+    var debugTerminalPadding: CGFloat { terminalHostView.debugTerminalPadding }
+    var debugPaneBounds: NSRect { terminalHostView.debugPaneBounds }
+    var debugNativeSettings: NativeTerminalSettings? { terminalView?.settings }
+    var debugScrollModeIndicatorIsVisible: Bool { terminalHostView.debugScrollModeIndicatorIsVisible }
+    var debugScrollModeIndicatorFrames: (background:NSRect,label:NSRect) { terminalHostView.debugScrollModeIndicatorFrames }
 }
 
 private final class PromptEditorTextView: NSTextView {
     var onCancel: (() -> Void)?
-
-    override func cancelOperation(_ sender: Any?) {
-        onCancel?()
-    }
-
-    override func keyDown(with event: NSEvent) {
-        guard event.keyCode != 53 else {
-            onCancel?()
-            return
-        }
-
-        super.keyDown(with: event)
-    }
-}
-
-extension TerminalPaneController: TerminalSurfaceOpenURLDelegate {
-    static func linkURL(_ text: String) -> URL? {
-        guard !text.isEmpty,
-              text.rangeOfCharacter(from: .controlCharacters) == nil else { return nil }
-        if text.hasPrefix("/") { return URL(fileURLWithPath: text) }
-        guard let url = URL(string: text, encodingInvalidCharacters: false),
-              let scheme = url.scheme?.lowercased() else { return nil }
-        if ["http", "https"].contains(scheme), url.host?.isEmpty != false { return nil }
-        return url
-    }
-
-    func terminalDidRequestOpenURL(_ text: String, kind _: TerminalOpenURLKind) {
-        guard let url = Self.linkURL(text) else { NSSound.beep(); return }
-        guard herdrSession?.remote == nil || !url.isFileURL else { NSSound.beep(); return }
-        // OSC 8 targets are producer-controlled; confirm potentially executable handlers.
-        if !["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") {
-            let alert = NSAlert()
-            alert.messageText = "Open terminal link?"
-            alert.informativeText = "This link may open a file or another application:\n\(url.absoluteString)"
-            alert.addButton(withTitle: "Cancel")
-            alert.addButton(withTitle: "Open")
-            guard alert.runModal() == .alertSecondButtonReturn else { return }
-        }
-        if !openURL(url) { NSSound.beep() }
-    }
-}
-
-extension TerminalPaneController: TerminalSurfaceTitleDelegate {
-    func terminalDidChangeTitle(_ title: String) {
-        if !title.isEmpty {
-            lastKnownTitle = title
-        }
-
-        onTitleChange?(id)
-    }
-}
-
-extension TerminalPaneController: TerminalSurfaceResizeDelegate {
-    func terminalDidResize(columns _: Int, rows _: Int) {
-        terminalHostView.scrollModeView?.needsLayout = true
-    }
-}
-
-extension TerminalPaneController: TerminalSurfaceScrollbarDelegate {
-    func terminalDidUpdateScrollbar(_ scrollbar: TerminalScrollbar) {
-        terminalHostView.scrollModeView?.updateViewport(TerminalScrollViewport(scrollbar))
-    }
-}
-
-extension TerminalPaneController: TerminalSurfacePwdDelegate {
-    func terminalDidChangeWorkingDirectory(_ path: String) {
-        currentWorkingDirectory = path
-    }
-}
-
-extension TerminalPaneController: TerminalSurfaceCloseDelegate {
-    func terminalDidClose(processAlive _: Bool) {
-        guard isLive else {
-            return
-        }
-
-        isLive = false
-        exitScrollMode()
-        onExit?(id)
-    }
-}
-
-extension TerminalPaneController: TerminalSurfaceFocusDelegate {
-    func terminalDidChangeFocus(_ focused: Bool) {
-        herdrSession?.setFocused(focused)
-        guard focused, !isFloating else {
-            return
-        }
-
-        onFocusRequest?(id)
-    }
-}
-
-enum TerminalScrollModeKeyAction: Equatable {
-    case exit
-    case cancel
-    case move(TerminalScrollMovement)
-    case select(linewise: Bool)
-    case copy
-    case awaitSecondG
-    case consume
-
-    init(event: NSEvent, awaitingSecondG: Bool) {
-        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
-        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
-
-        if event.keyCode == 53 || event.characters == "\u{1b}" {
-            self = .cancel
-            return
-        }
-
-        if modifiers.isEmpty, key == "q" || key == "i" || event.keyCode == 36 {
-            self = .exit
-            return
-        }
-
-        if awaitingSecondG {
-            if modifiers.isEmpty, key == "g" {
-                self = .move(.top)
-                return
-            }
-        }
-
-        switch (modifiers, key, event.keyCode) {
-        case ([], "h", _), ([], _, 123): self = .move(.left)
-        case ([], "l", _), ([], _, 124): self = .move(.right)
-        case ([], "j", _), ([], _, 125): self = .move(.down)
-        case ([], "k", _), ([], _, 126): self = .move(.up)
-        case ([], "0", _): self = .move(.lineStart)
-        case ([.shift], "^", _), ([.shift], "6", _), ([], "^", _): self = .move(.firstNonblank)
-        case ([], "w", _): self = .move(.wordForward(big: false))
-        case ([], "b", _): self = .move(.wordBackward(big: false))
-        case ([], "e", _): self = .move(.wordEnd(big: false))
-        case ([.shift], "w", _): self = .move(.wordForward(big: true))
-        case ([.shift], "b", _): self = .move(.wordBackward(big: true))
-        case ([.shift], "e", _): self = .move(.wordEnd(big: true))
-        case ([.shift], "$", _), ([.shift], "4", _), ([], "$", _): self = .move(.lineEnd)
-        case ([], "v", _): self = .select(linewise: false)
-        case ([.shift], "v", _): self = .select(linewise: true)
-        case ([], "y", _), ([.command], "c", _): self = .copy
-        case ([.control], "d", _):
-            self = .move(.halfDown)
-        case ([.control], "u", _):
-            self = .move(.halfUp)
-        case ([.control], "f", _), ([], _, 121):
-            self = .move(.pageDown)
-        case ([.control], "b", _), ([], _, 116):
-            self = .move(.pageUp)
-        case ([.shift], "g", _), ([], _, 119):
-            self = .move(.bottom)
-        case ([], "g", _):
-            self = .awaitSecondG
-        case ([], _, 115):
-            self = .move(.top)
-        default:
-            self = .consume
-        }
-    }
-}
-
-enum ProcessWorkingDirectoryResolver {
-    static func workingDirectory(for processID: Int32) -> String? {
-        guard processID > 0 else {
-            return nil
-        }
-
-        var pathInfo = proc_vnodepathinfo()
-        let expectedByteCount = Int32(MemoryLayout<proc_vnodepathinfo>.size)
-        let byteCount = proc_pidinfo(
-            processID,
-            PROC_PIDVNODEPATHINFO,
-            0,
-            &pathInfo,
-            expectedByteCount
-        )
-        guard byteCount == expectedByteCount else {
-            return nil
-        }
-
-        let path: String? = withUnsafeBytes(of: pathInfo.pvi_cdir.vip_path) { pathBytes in
-            guard let baseAddress = pathBytes.baseAddress else {
-                return nil
-            }
-
-            return String(
-                validatingCString: baseAddress.assumingMemoryBound(to: CChar.self)
-            )
-        }
-        guard let path, !path.isEmpty else {
-            return nil
-        }
-
-        return path
-    }
-}
-
-
-extension TerminalPaneController: TerminalSurfaceLifecycleDelegate {
-    func terminalDidAttachSurface(_ surface: TerminalSurface) { herdrSession?.surfaceAttached() }
-    func terminalDidDetachSurface() { herdrSession?.surfaceDetached() }
-}
-
-/// Tears a terminal surface down after the pane graph that owned it has
-/// finished releasing.
-///
-/// Setting `controller` to nil re-enters the surface coordinator, which calls
-/// `ghostty_surface_free`; that call joins the surface's IO thread and cannot
-/// be interrupted. Releasing a pane happens inside layout, responder changes
-/// and workspace switches, so the join must not run there: one missed wakeup
-/// leaves the main thread blocked indefinitely. Views are held until the next
-/// runloop turn, which keeps the surface valid until then.
-@MainActor
-private enum TerminalViewRetirement {
-    private static var pending: [TerminalView] = []
-    private static var isDraining = false
-
-    static func retire(_ view: TerminalView) {
-        guard view.controller != nil else { return }
-        pending.append(view)
-        guard !isDraining else { return }
-        isDraining = true
-        DispatchQueue.main.async {
-            isDraining = false
-            drain()
-        }
-    }
-
-    private static func drain() {
-        let views = pending
-        pending.removeAll()
-        for view in views {
-            view.delegate = nil
-            view.controller = nil
-        }
-    }
+    override func cancelOperation(_ sender: Any?) { onCancel?() }
+    override func keyDown(with event: NSEvent) { if event.keyCode == 53 { onCancel?() } else { super.keyDown(with:event) } }
 }

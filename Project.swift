@@ -41,6 +41,9 @@ let signingSettings: SettingsDictionary =
         "PROVISIONING_PROFILE_SPECIFIER": "",
     ]
 
+// The application owns the sole precompiled VT + renderer/platform backend.
+// Terminal regression tests import that application module, never a lab app.
+
 let project = Project(
     name: "Santty",
     options: .options(
@@ -50,9 +53,7 @@ let project = Project(
         )
     ),
     packages: [
-        // Prepared by `mise run ghostty:prepare`: pinned upstream Swift source
-        // plus text/selection bridges. The C core is still a binary dependency.
-        .local(path: "Vendor/libghostty-spm"),
+        .local(path: "Vendor/native-terminal/SwiftTerm"),
         .remote(
             url: "https://github.com/sindresorhus/KeyboardShortcuts",
             requirement: .upToNextMajor(from: "3.1.0")
@@ -95,8 +96,8 @@ let project = Project(
             ],
             dependencies: [
                 .target(name: "SanttyCLI"),
-                .package(product: "GhosttyTheme"),
-                .package(product: "GhosttyTerminal"),
+                .package(product: "SwiftTerm"),
+                .xcframework(path: "Vendor/native-terminal/ghostty-vt.xcframework"),
                 .package(product: "KeyboardShortcuts"),
                 .package(product: "Sparkle"),
                 .sdk(name: "AppKit", type: .framework),
@@ -111,7 +112,8 @@ let project = Project(
             ],
             settings: .settings(
                 base: [
-                    "ASSETCATALOG_COMPILER_APPICON_NAME": "$(SANTTY_APP_ICON_NAME)"
+                    "ASSETCATALOG_COMPILER_APPICON_NAME": "$(SANTTY_APP_ICON_NAME)",
+                    "OTHER_LDFLAGS": ["$(inherited)", "-lc++"]
                 ],
                 configurations: [
                     .debug(
@@ -157,9 +159,21 @@ let project = Project(
             sources: ["Santty/Tests/**"],
             dependencies: [
                 .target(name: "Santty"),
-                .package(product: "GhosttyTheme"),
-                .package(product: "GhosttyTerminal"),
+                .package(product: "SwiftTerm"),
                 .package(product: "KeyboardShortcuts"),
+            ]
+        ),
+        .target(
+            name: "SanttyTerminalTests",
+            destinations: .macOS,
+            product: .unitTests,
+            bundleId: "\(bundleIdentifier).terminal-tests",
+            deploymentTargets: .macOS("14.0"),
+            infoPlist: .default,
+            sources: ["Santty/TerminalTests/**"],
+            dependencies: [
+                .target(name: "Santty"),
+                .package(product: "SwiftTerm"),
             ]
         ),
     ]

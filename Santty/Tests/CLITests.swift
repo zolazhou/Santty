@@ -1,5 +1,4 @@
 import AppKit
-import GhosttyTerminal
 import XCTest
 
 @testable import Santty
@@ -342,37 +341,25 @@ final class CLITests: XCTestCase {
     }
 
     @MainActor
-    func testGhosttySnapshotIncludesScrollbackAndDoesNotChangeViewportOrClipboard() async throws {
-        var displayCount: UInt32 = 0
-        guard CGGetActiveDisplayList(0, nil, &displayCount) == .success, displayCount > 0 else {
-            throw XCTSkip("Ghostty's Metal renderer requires a logged-in graphical display.")
-        }
-        let session = InMemoryTerminalSession(write: { _ in }, resize: { _ in })
-        let terminal = TerminalView(frame: NSRect(x: 0, y: 0, width: 640, height: 240))
-        terminal.controller = TerminalController(configuration: TerminalDefaults.configuration)
-        terminal.configuration = TerminalSurfaceOptions(backend: .inMemory(session))
-        let window = NSWindow(
-            contentRect: terminal.frame, styleMask: [], backing: .buffered, defer: false)
-        window.contentView = terminal
-        defer { window.contentView = nil }
-        terminal.fitToSize()
-        session.receive((1...120).map { "server-log-\($0)\r\n" }.joined())
-        for _ in 0..<100 {
-            if terminal.readScreenText()?.contains("server-log-120") == true { break }
-            try await Task.sleep(for: .milliseconds(20))
-        }
-        let viewport = session.readViewportText()
-        let clipboardChangeCount = NSPasteboard.general.changeCount
-        let text = try XCTUnwrap(terminal.readScreenText())
-        XCTAssertTrue(
-            text.contains("server-log-1\n"), "Expected retained history: \(text.prefix(200))")
-        XCTAssertTrue(text.contains("server-log-120"))
-        XCTAssertFalse(viewport?.contains("server-log-1\n") ?? true)
-        XCTAssertEqual(session.readViewportText(), viewport)
-        XCTAssertEqual(NSPasteboard.general.changeCount, clipboardChangeCount)
-        XCTAssertTrue(
-            try CLITextSnapshot.response(
-                text, request: CLIRequest(command: "read", paneID: UUID(), tail: 3)
-            ).text?.contains("server-log-120") == true)
+    func testNativeSnapshotIncludesScrollbackAndDoesNotChangeViewportOrClipboard() async throws {
+        let driver = try GhosttyVTDriver(columns:80,rows:15)
+        let output = NativeTerminalOutput(driver:driver) { _ in }
+        output.receive(Data((1...120).map { "server-log-\($0)\r\n" }.joined().utf8))
+        let top = max(0,try driver.totalRows-driver.rows)
+        let before = try driver.snapshot(topRow:top)
+        let changeCount = NSPasteboard.general.changeCount
+        let id = UUID(), service = NativeTerminalReadService(paneID:id,driver:driver)
+        let response = try await service.response(.init(command:"read",paneID:id))
+        let text = try XCTUnwrap(response.text)
+        XCTAssertTrue(text.contains("server-log-1\n")); XCTAssertTrue(text.contains("server-log-120"))
+        XCTAssertFalse(before.rows.keys.sorted().map { before.rows[$0]!.cells.compactMap(\.text).joined() }.joined(separator:"\n").contains("server-log-1\n"))
+        let after = try driver.snapshot(topRow:top)
+        XCTAssertEqual(after.rows.mapValues(\.cells),before.rows.mapValues(\.cells))
+        XCTAssertEqual(NSPasteboard.general.changeCount,changeCount)
+        XCTAssertTrue(try CLITextSnapshot.response(text,request:.init(command:"read",paneID:id,tail:3)).text?.contains("server-log-120") == true)
+        let wrapped = "WRAP-"+String(repeating:"w",count:driver.columns+7)
+        output.receive(Data(("\r\n"+wrapped+"\r\nA\u{1b}[8mSECRET\u{1b}[0mZ\r\n").utf8))
+        let contract = try driver.readScreenText()
+        XCTAssertTrue(contract.contains(wrapped)); XCTAssertTrue(contract.contains("ASECRETZ"))
     }
 }

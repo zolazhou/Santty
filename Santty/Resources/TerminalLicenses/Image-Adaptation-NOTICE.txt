@@ -1,0 +1,42 @@
+Image snapshot API audit and adaptations reference the frozen headers of
+precompiled Ghostty VT 1.0.0 (MIT, full permission in Ghostty.txt), and
+herdr-app a547b16ccb5e8811b2dd8b3b901d31df8f05e55a src/vt.rs (Apache-2.0,
+full permission in Herdr-app.txt). Fixed PNG and Unicode placeholder fixtures
+are adapted from the latter; raw RGBA and zlib vectors use independent fixed
+values generated with Python's standard library.
+
+Changes: owned generation-keyed RGBA snapshots under the driver lock; current
+render-state placement API rather than Herdr's older storage ABI/manual
+placeholder resolver; explicit viewport/crop/pixel/grid metadata, bounded
+copies, direct transport only, and an independent C API diagnostic. A
+zero-source virtual slice is recorded as a limitation, not silently repaired.
+
+The renderer boundary adapts SwiftTerm
+28c6d1d95de156a36a2eaa278177ee7f8a15d322 KittyGraphicsSnapshot.swift and its
+existing Core Graphics/Metal image passes (MIT, SwiftTerm.txt). Changes add an
+optional resolved pixel size with unchanged legacy defaults; image-only Metal
+crop-clamp fragment and synchronized embedded shader; full-image bitmap/texture
+sharing, exact source crop and layer/offset conversion; VT-row-based placeholder
+suppression and empty presentation before held restores.
+
+PNG callback ownership/startup policy adapts herdr-app src/vt.rs, using the
+frozen Ghostty allocator ABI with bounded ImageIO/vImage conversion rather than
+Rust png. Conversion returns top-first straight RGBA8 in sRGB; ordinary tested
+8-bit inputs preserve low/zero-alpha RGB precision. Signature/final-IEND and
+actual pixel-provider checks guard ImageIO's observed tolerant/lazy success.
+Recognized multi-frame APNG refusal, independent struct/zlib test vectors and a standalone
+ImageIO diagnostic document the host boundary. ImageIO internal memory is not
+charged to the VT allocator, and full PNG/color-profile parity is not claimed.
+The independent C probe also records same-ID replacement retirement.
+
+Animation deadline/lifetime and independent wire tests adapt SwiftTerm's
+KittyGraphicsParityTests.swift, KittyGraphicsHardeningTests.swift and
+KittyRendererTests.swift (same pinned MIT source). VT alone ticks/selects/
+composes/loops frames. The host supplies one monotonic clock, one weak deadline
+wake and visibility/hold cancellation, not an emulator or playback model.
+ImageGeometryVisibility exports the existing renderer rectangle for real-clip
+intersection with the cell-bottom origin contract. Tests use synthetic owned
+window/app visibility without activating GUI, plus actual CG/Metal readbacks
+and an owned Herdr shell. GIF/APNG playback and device/power certification are
+not included. No new terminal/image protocol parser is
+installed, and the precompiled Ghostty core is unchanged.

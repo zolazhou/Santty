@@ -1,0 +1,7 @@
+--- a/Sources/SwiftTerm/KittyGraphicsSnapshot.swift
++++ b/Sources/SwiftTerm/KittyGraphicsSnapshot.swift
+@@ -158 +158,3 @@
+-    func destinationRect(cellWidth: CGFloat, cellHeight: CGFloat, imageScale: CGFloat,
++    /// `lineOrigin` is the bottom edge of `screenRow` in nonflipped renderer
++    /// coordinates; hosts reuse this exact rectangle for clip visibility.
++    public func destinationRect(cellWidth: CGFloat, cellHeight: CGFloat, imageScale: CGFloat,

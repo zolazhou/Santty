@@ -99,7 +99,7 @@ santty pane close <pane-id> --force
   selected workspace; sidebar terminals always use the local Herdr core.
 - Creation returns `status: "created"`, `paneID`, `tabID`, and `workspaceID`
   (absent for sidebar panes). It records a layout, not a promise that the shell
-  is ready. Panes in inactive tabs/workspaces start when presented. Use `--focus`
+  is ready. Terminals in inactive tabs/workspaces start when presented. Use `--focus`
   on creation if immediate presentation/startup is needed, then wait for readiness.
 - Creation, rename, move, resize and equalize do not select another pane, tab or
   workspace, change first responder, or bring the app forward. `focus` deliberately
@@ -123,6 +123,27 @@ santty pane close <pane-id> --force
   closes the window after replying (remaining sidebar Herdr viewers detach).
   Closing a focused pane necessarily transfers focus; closing another pane does
   not select an unrelated pane.
+
+### Browser previews
+
+Start a development server or serve generated HTML over loopback. For a static
+output directory, one option is `python3 -m http.server 8000 --bind 127.0.0.1 --directory dist`.
+
+```sh
+santty pane split "$SANTTY_PANE_ID" --direction right --type browser --url http://127.0.0.1:8000/ --json
+santty pane new --workspace <workspace-id> --type browser --url http://127.0.0.1:8000/ --focus --json
+```
+
+`--url` requires `new` or `split` with `--type browser` and a full HTTP or HTTPS
+URL of at most 8192 UTF-8 bytes. Omitting it opens a blank browser. Navigation
+starts when the pane is created. `created` confirms pane creation, while the
+browser shows loading and any page errors. Without `--focus`, keyboard focus
+stays where it was. Only pane-control permission is required.
+
+The browser loads the URL on the Mac running Santty. Forward a remote preview
+server's port to that Mac before opening its loopback URL. Open previews in a
+Local workspace when using Herdr workspace sharing, which supports terminal-only
+layouts. Check `supportsBrowserURL` in `santty capabilities --json` for support.
 
 ## Terminal input
 

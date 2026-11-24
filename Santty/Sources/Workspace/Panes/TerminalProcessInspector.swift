@@ -18,10 +18,14 @@ struct TerminalProcessInspector {
         }
     }
 
-    static func currentProcessTable() -> [ProcessRecord] {
+    static func currentProcessTable(processGroupID: Int32? = nil) -> [ProcessRecord] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-ewwaxo", "pid=,ppid=,pgid=,command="]
+        process.environment = ["PATH":"/usr/bin:/bin","LC_ALL":"C"]
+        if let processGroupID {
+            guard processGroupID > 0 else { return [] }
+            process.arguments = ["-ww", "-g", String(processGroupID), "-o", "pid=,ppid=,pgid=,command="]
+        } else { process.arguments = ["-ewwaxo", "pid=,ppid=,pgid=,command="] }
 
         let outputPipe = Pipe()
         process.standardOutput = outputPipe
