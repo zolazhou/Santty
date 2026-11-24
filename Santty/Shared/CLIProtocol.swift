@@ -23,6 +23,7 @@ struct CLIRequest: Codable, Sendable, Equatable {
     var includeProcesses: Bool?
     var workspaceID: UUID?
     var paneType: String?
+    var url: String?
     var direction: String?
     var amount: Int?
     var focus: Bool?
@@ -43,7 +44,7 @@ struct CLIRequest: Codable, Sendable, Equatable {
             try validatePaneCommand()
             return
         }
-        guard workspaceID == nil, paneType == nil, direction == nil, amount == nil,
+        guard workspaceID == nil, paneType == nil, url == nil, direction == nil, amount == nil,
               focus == nil, activate == nil, force == nil, name == nil, text == nil,
               key == nil, requestID == nil else { throw CLIError("Pane options require a pane command.") }
         if command == "capabilities" {
@@ -171,6 +172,16 @@ struct CLICapabilities: Codable, Sendable {
     var controlEnabled: Bool
     var inputEnabled: Bool
     var instanceID: UUID
+    var supportsBrowserURL: Bool? = nil
+
+    func requireSupport(for request: CLIRequest) throws {
+        guard commands.contains(request.command) else {
+            throw CLIError("This Santty server does not support pane control. Update and restart Santty.", code: "unsupported_command")
+        }
+        if request.url != nil, supportsBrowserURL != true {
+            throw CLIError("This Santty server does not support --url. Update and restart Santty.", code: "unsupported_command")
+        }
+    }
 }
 
 struct CLIResponse: Codable, Sendable {

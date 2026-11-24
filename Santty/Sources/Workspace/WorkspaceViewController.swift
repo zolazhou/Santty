@@ -4541,6 +4541,7 @@ extension WorkspaceViewController {
               view.window?.attachedSheet == nil, NSApp.modalWindow == nil else {
             throw CLIError("Finish the current close operation first.", code: "busy")
         }
+        let browserURL = try request.initialBrowserURL()
         if request.command == "pane.new" || request.command == "pane.split" {
             guard paneOwnerTabs.reduce(0, { $0 + $1.paneControllers.count }) < 512 else {
                 throw CLIError("Workspace pane limit reached.", code: "limit_reached")
@@ -4557,6 +4558,9 @@ extension WorkspaceViewController {
             if owner.id == localWorkspaceID { tabs.append(tab) }
             else if let index = otherLocalWorkspaces.firstIndex(where: { $0.id == owner.id }) {
                 otherLocalWorkspaces[index].tabs.append(tab)
+            }
+            if let browserURL, let browser = pane as? BrowserPaneController {
+                browser.loadURL(browserURL, focus: false)
             }
             if request.focus == true { cliFocus(pane.id, tab: tab, owner: owner, activate: false) }
             else { cliRefresh(tab) }
@@ -4610,6 +4614,9 @@ extension WorkspaceViewController {
                              axis: horizontal ? .horizontal : .vertical,
                              before: request.direction == "left" || request.direction == "up", focus: false) else {
                 throw CLIError("Could not split pane.", code: "unsupported_layout")
+            }
+            if let browserURL, let browser = newPane as? BrowserPaneController {
+                browser.loadURL(browserURL, focus: false)
             }
             if request.focus == true { cliFocus(newPane.id, tab: tab, owner: owner, activate: false) }
             response.paneID = newPane.id; response.status = "created"

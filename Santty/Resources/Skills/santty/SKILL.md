@@ -1,6 +1,6 @@
 ---
 name: santty
-description: Read and search Santty terminal panes, inspect service logs, or manage panes and terminal input when authorized. Use when relevant output is in Santty or the user asks to create, split, close, focus, rename, resize or send input to Santty panes.
+description: Read and search Santty terminal panes, inspect service logs, open browser previews, or manage panes and terminal input when authorized. Use when relevant output is in Santty or the user asks to preview generated web content or manage Santty panes.
 ---
 
 # Santty terminal information and control
@@ -126,6 +126,26 @@ santty pane send-key <pane-id> Enter --json
   blindly repeat with a new ID, including after expiry/restart. `request_conflict`,
   `stale_request` and `request_expired` require reconciliation, not automatic retry.
   A `persistence_failed` error can mean the pane already closed; inspect state.
+
+## Preview generated web content
+
+With the user's authorization, check that `santty capabilities --json` reports
+`controlEnabled: true` and `supportsBrowserURL: true`. Use the project's dev
+server, or serve static HTML from its output directory with
+`python3 -m http.server 8000 --bind 127.0.0.1 --directory dist`. Once the service
+is ready, open its full HTTP or HTTPS URL next to the Agent terminal.
+
+```sh
+santty pane split "$SANTTY_PANE_ID" --direction right --type browser --url http://127.0.0.1:8000/ --json
+```
+
+If the Agent has no Santty pane ID, use a pane or workspace UUID from
+`santty list --json`. Use `pane new --workspace <workspace-id> --type browser
+--url <url> --focus` for a separate tab that is immediately selected. A split
+without `--focus` preserves keyboard focus. `created` confirms the pane exists.
+The browser reports page loading errors. The browser runs on the Mac, so
+forward remote preview ports to the Mac first. Use a Local workspace if the
+Herdr workspace layout is shared.
 
 ## Use the evidence
 

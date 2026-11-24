@@ -17,6 +17,7 @@ extension CLIRequest {
         if let paneType, !["terminal", "browser", "agents", "workspaces"].contains(paneType) {
             throw CLIError("--type must be terminal, browser, agents or workspaces.")
         }
+        _ = try initialBrowserURL()
         let directional = ["pane.split", "pane.move", "pane.resize"].contains(command)
         if directional {
             guard let direction, ["left", "right", "up", "down"].contains(direction) else {
@@ -42,6 +43,24 @@ extension CLIRequest {
         }
         guard command == "pane.send-key" || key == nil else { throw CLIError("A key requires send-key.") }
         if command == "pane.send-key" { _ = try CLIKey(key ?? "") }
+    }
+
+    func initialBrowserURL() throws -> URL? {
+        guard let url else { return nil }
+        guard (command == "pane.new" || command == "pane.split"), paneType == "browser" else {
+            throw CLIError("--url requires pane new or split with --type browser.")
+        }
+        let whitespaceOrControls = CharacterSet.whitespacesAndNewlines.union(.controlCharacters)
+        guard url.utf8.count <= 8192,
+              url.rangeOfCharacter(from: whitespaceOrControls) == nil,
+              let parsed = URL(string: url, encodingInvalidCharacters: false),
+              let scheme = parsed.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = parsed.host(percentEncoded: false), !host.isEmpty,
+              host.rangeOfCharacter(from: whitespaceOrControls.union(CharacterSet(charactersIn: "/\\?#@"))) == nil,
+              (0...65535).contains(parsed.port ?? 0) else {
+            throw CLIError("--url requires a full HTTP or HTTPS URL with a host, up to 8192 UTF-8 bytes.")
+        }
+        return parsed
     }
 }
 

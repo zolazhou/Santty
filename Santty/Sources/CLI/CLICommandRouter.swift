@@ -23,7 +23,8 @@ final class CLICommandRouter {
 
     var capabilities: CLICapabilities {
         CLICapabilities(commands: ["list", "read", "search", "capabilities"] + CLIRequest.paneCommands,
-                        controlEnabled: Self.controlEnabled, inputEnabled: Self.inputEnabled, instanceID: instanceID)
+                        controlEnabled: Self.controlEnabled, inputEnabled: Self.inputEnabled,
+                        instanceID: instanceID, supportsBrowserURL: true)
     }
 
     func handle(_ request: CLIRequest, workspace: WorkspaceViewController) async -> CLIResponse {

@@ -404,15 +404,19 @@ final class BrowserPaneController: NSObject, PaneControlling, WKNavigationDelega
             NSSound.beep()
             return
         }
+        loadURL(url, focus: true)
+    }
 
+    func loadURL(_ url: URL, focus: Bool) {
         lastRequestedURL = url
         loadState = .loading
         browserHostView.showWebView()
         browserHostView.showError(nil)
         browserHostView.locationBar.resetProgress()
         browserHostView.locationBar.setVisible(true, animated: true)
+        if !isAddressFieldEditing { browserHostView.addressField.stringValue = url.absoluteString }
         browserHostView.webView.load(URLRequest(url: url))
-        browserHostView.window?.makeFirstResponder(browserHostView.webView)
+        if focus { browserHostView.window?.makeFirstResponder(browserHostView.webView) }
         displayTitle = url.host ?? url.absoluteString
         onTitleChange?(id)
     }
